@@ -32,6 +32,7 @@
 #define CALLABLE_METHOD_POINTER_H
 
 #include "core/object/object.h"
+#include "core/object/object_db.h"
 #include "core/templates/hashfuncs.h"
 #include "core/templates/simple_type.h"
 #include "core/variant/binder_common.h"

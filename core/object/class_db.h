@@ -33,6 +33,8 @@
 
 #include "core/object/method_bind.h"
 #include "core/object/object.h"
+#include "core/object/object_db.h"
+#include "core/object/object_utils.h"
 #include "core/string/print_string.h"
 
 // Makes callable_mp readily available in all classes connecting signals.
