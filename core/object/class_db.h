@@ -41,6 +41,8 @@
 // Needs to come after method_bind and object have been included.
 #include "core/object/callable_method_pointer.h"
 #include "core/templates/hash_set.h"
+#include "core/templates/hash_map.h"
+#include "core/templates/list.h"
 
 #include <type_traits>
 

@@ -38,6 +38,9 @@
 #include "core/object/script_language.h"
 #include "core/string/translation_server.h"
 #include "core/variant/typed_array.h"
+#include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
+#include "core/templates/list.h"
 
 #ifdef DEBUG_ENABLED
 

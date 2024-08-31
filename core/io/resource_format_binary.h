@@ -32,6 +32,7 @@
 #define RESOURCE_FORMAT_BINARY_H
 
 #include "core/io/file_access.h"
+#include "core/templates/rb_map.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
 

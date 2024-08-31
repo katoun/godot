@@ -37,6 +37,7 @@
 #include "core/io/remote_filesystem_client.h"
 #include "core/os/time_enums.h"
 #include "core/string/ustring.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/list.h"
 #include "core/templates/vector.h"
 

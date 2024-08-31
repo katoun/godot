@@ -31,6 +31,7 @@
 #include "object_utils.h"
 
 #include "core/object/class_db.h"
+#include "core/templates/list.h"
 #include "core/variant/typed_array.h"
 
 PropertyInfo::operator Dictionary() const {

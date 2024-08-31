@@ -32,6 +32,7 @@
 #define SYNTAX_HIGHLIGHTER_H
 
 #include "core/io/resource.h"
+#include "core/templates/rb_map.h"
 #include "core/object/gdvirtual.gen.inc"
 
 class TextEdit;
