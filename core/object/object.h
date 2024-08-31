@@ -39,7 +39,6 @@
 #include "core/os/spin_lock.h"
 #include "core/math/math_funcs.h"
 #include "core/templates/hash_set.h"
-#include "core/templates/list.h"
 #include "core/templates/safe_refcount.h"
 #include "core/variant/callable_bind.h"
 #include "core/variant/variant.h"
@@ -60,6 +59,9 @@ class HashMap;
 // 		typename,
 // 		typename>
 // class HashSet;
+
+template <typename T, typename>
+class List;
 
 // API used to extend in GDExtension and other C compatible compiled languages.
 class MethodBind;
@@ -102,6 +104,7 @@ private:
 	ObjectGDExtension *_extension = nullptr;
 	GDExtensionClassInstancePtr _extension_instance = nullptr;
 
+	class List<Connection>::Element;
 	struct SignalData {
 		struct Slot {
 			int reference_count = 0;
@@ -116,6 +119,7 @@ private:
 
 	HashMap<StringName, SignalData> signal_map;
 	List<Connection> connections;
+	
 #ifdef DEBUG_ENABLED
 	SafeRefCount _lock_index;
 #endif
