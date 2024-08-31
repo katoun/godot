@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  object.h                                                              */
+/*  object_utils.h                                                              */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -31,11 +31,7 @@
 #ifndef OBJECT_UTILS_H
 #define OBJECT_UTILS_H
 
-#include "core/extension/gdextension_interface.h"
-#include "core/object/message_queue.h"
 #include "core/object/object_id.h"
-#include "core/os/rw_lock.h"
-#include "core/os/spin_lock.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/list.h"
