@@ -38,7 +38,6 @@
 #include "core/os/rw_lock.h"
 #include "core/os/spin_lock.h"
 #include "core/math/math_funcs.h"
-#include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/list.h"
 #include "core/templates/safe_refcount.h"
@@ -47,6 +46,20 @@
 
 template <typename T>
 class TypedArray;
+
+template <typename T>
+struct HashableHasher;
+
+template <typename TKey, typename TValue,
+		typename,
+		typename,
+		typename>
+class HashMap;
+
+// template <typename TKey,
+// 		typename,
+// 		typename>
+// class HashSet;
 
 // API used to extend in GDExtension and other C compatible compiled languages.
 class MethodBind;
