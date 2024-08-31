@@ -55,11 +55,6 @@ template <typename TKey, typename TValue,
 		typename>
 class HashMap;
 
-// template <typename TKey,
-// 		typename,
-// 		typename>
-// class HashSet;
-
 template <typename T, typename>
 class List;
 
