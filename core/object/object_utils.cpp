@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  object.cpp                                                            */
+/*  object_utils.cpp                                                            */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,17 +28,9 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "object.h"
+#include "object_utils.h"
 
-#include "core/extension/gdextension_manager.h"
-#include "core/io/resource.h"
 #include "core/object/class_db.h"
-#include "core/object/message_queue.h"
-#include "core/object/script_language.h"
-#include "core/os/os.h"
-#include "core/string/print_string.h"
-#include "core/string/translation_server.h"
-#include "core/templates/local_vector.h"
 #include "core/variant/typed_array.h"
 
 PropertyInfo::operator Dictionary() const {

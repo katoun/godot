@@ -32,6 +32,9 @@
 #define OBJECT_DB_H
 
 #include "core/object/object_id.h"
+#include "core/error/error_macros.h"
+#include "core/os/rw_lock.h"
+#include "core/os/spin_lock.h"
 
 class Object;
 class SpinLock;
