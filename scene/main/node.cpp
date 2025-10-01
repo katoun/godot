@@ -30,6 +30,7 @@
 
 #include "node.h"
 #include "node.compat.inc"
+#include "node_component.h"
 
 #include "core/config/project_settings.h"
 #include "core/io/resource_loader.h"
@@ -3865,6 +3866,17 @@ void Node::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("atr", "message", "context"), &Node::atr, DEFVAL(""));
 	ClassDB::bind_method(D_METHOD("atr_n", "message", "plural_message", "n", "context"), &Node::atr_n, DEFVAL(""));
 
+	// Component system methods
+	ClassDB::bind_method(D_METHOD("add_component_by_class", "class_name"), &Node::add_component_by_class);
+	ClassDB::bind_method(D_METHOD("get_component_by_class", "class_name"), &Node::get_component_by_class);
+	ClassDB::bind_method(D_METHOD("get_components"), &Node::get_components);
+	ClassDB::bind_method(D_METHOD("get_components_by_class", "class_name"), &Node::get_components_by_class);
+	ClassDB::bind_method(D_METHOD("has_component", "component"), static_cast<bool (Node::*)(const Variant &) const>(&Node::has_component));
+	ClassDB::bind_method(D_METHOD("remove_component", "component"), static_cast<bool (Node::*)(const Variant &)>(&Node::remove_component));
+	ClassDB::bind_method(D_METHOD("remove_all_components"), &Node::remove_all_components);
+	ClassDB::bind_method(D_METHOD("get_component_count"), &Node::get_component_count);
+	ClassDB::bind_method(D_METHOD("has_components"), &Node::has_components);
+
 #ifdef TOOLS_ENABLED
 	ClassDB::bind_method(D_METHOD("_set_property_pinned", "property", "pinned"), &Node::set_property_pinned);
 #endif
@@ -4057,6 +4069,203 @@ String Node::_get_name_num_separator() {
 	return " ";
 }
 
+// Component management
+void Node::_connect_component_to_node(NodeComponent *p_component) {
+    if (!p_component) return;
+    
+    // Connect component to node's lifecycle
+    // Components will be called through the existing Node lifecycle methods
+    
+    // Optional: Connect component signals to node if needed
+    // This allows components to emit signals that the node can listen to
+    // Example:
+    // if (p_component->has_signal("health_changed")) {
+    //     p_component->connect("health_changed", callable_mp(this, &Node::_on_component_health_changed));
+    // }
+    // if (p_component->has_signal("died")) {
+    //     p_component->connect("died", callable_mp(this, &Node::_on_component_died));
+    // }
+}
+
+void Node::_disconnect_component_from_node(NodeComponent *p_component) {
+    if (!p_component) return;
+    
+    // Disconnect component from node's lifecycle
+    // Disconnect any signals that were connected
+    // Example:
+    // if (p_component->has_signal("health_changed")) {
+    //     p_component->disconnect("health_changed", callable_mp(this, &Node::_on_component_health_changed));
+    // }
+    // if (p_component->has_signal("died")) {
+    //     p_component->disconnect("died", callable_mp(this, &Node::_on_component_died));
+    // }
+}
+
+void Node::_propagate_to_components(const StringName &p_method, const Variant **p_args, int p_argcount) {
+    for (NodeComponent *component : node_components) {
+        if (component && component->is_enabled()) {
+            Callable::CallError error;
+            component->callp(p_method, p_args, p_argcount, error);
+        }
+    }
+}
+
+void Node::_propagate_to_components_reverse(const StringName &p_method, const Variant **p_args, int p_argcount) {
+    // Create reverse iterator for reverse propagation
+    Vector<NodeComponent *> components_list;
+    for (NodeComponent *comp : node_components) {
+        components_list.push_back(comp);
+    }
+    
+    for (int i = components_list.size() - 1; i >= 0; i--) {
+        NodeComponent *component = components_list[i];
+        if (component && component->is_enabled()) {
+            Callable::CallError error;
+            component->callp(p_method, p_args, p_argcount, error);
+        }
+    }
+}
+
+NodeComponent *Node::add_component_by_class(const StringName &p_class_name) {
+	// Support for GDScript components
+	Object *obj = ClassDB::instantiate(p_class_name);
+	if (!obj) {
+		ERR_PRINT("Failed to instantiate component class: " + String(p_class_name));
+		return nullptr;
+	}
+	
+	NodeComponent *component = Object::cast_to<NodeComponent>(obj);
+	if (!component) {
+		ERR_PRINT("Class " + String(p_class_name) + " is not a NodeComponent");
+		memdelete(obj);
+		return nullptr;
+	}
+	
+	component->set_owner_node(this);
+	node_components.insert(component);
+	
+	_connect_component_to_node(component);
+	
+	if (is_inside_tree()) {
+		component->_ready();
+	}
+	
+	return component;
+}
+
+NodeComponent *Node::get_component_by_class(const StringName &p_class_name) const {
+	for (NodeComponent *comp : node_components) {
+		if (comp->get_class() == p_class_name) {
+			return comp;
+		}
+	}
+	return nullptr;
+}
+
+Array Node::get_components() const {
+	Array result;
+	for (NodeComponent *comp : node_components) {
+		result.append(comp);
+	}
+	return result;
+}
+
+Array Node::get_components_by_class(const StringName &p_class_name) const {
+	Array result;
+	for (NodeComponent *comp : node_components) {
+		if (comp->get_class() == p_class_name) {
+			result.append(comp);
+		}
+	}
+	return result;
+}
+
+bool Node::has_component(NodeComponent *p_component) const {
+	return node_components.has(p_component);
+}
+
+bool Node::has_component(const Variant &p_component) const {
+	if (p_component.get_type() == Variant::OBJECT) {
+		NodeComponent *component = Object::cast_to<NodeComponent>(p_component.get_validated_object());
+		if (component) {
+			return node_components.has(component);
+		}
+	} else if (p_component.get_type() == Variant::STRING_NAME || p_component.get_type() == Variant::STRING) {
+		StringName class_name = p_component;
+		return get_component_by_class(class_name) != nullptr;
+	}
+	return false;
+}
+
+bool Node::remove_component(NodeComponent *p_component) {
+	if (!p_component) return false;
+
+	 // Check if component belongs to this node
+	 if (p_component->get_owner_node() != this) {
+        return false;
+    }
+	
+	// Disconnect from node lifecycle
+	_disconnect_component_from_node(p_component);
+	
+	// Remove from HashSet
+	node_components.erase(p_component);
+	
+	// Clear owner node
+	p_component->set_owner_node(nullptr);
+    
+	// Delete the component directly (since it's not a Node)
+	memdelete(p_component);
+	 
+	return true;
+}
+
+bool Node::remove_component(const Variant &p_component) {
+	if (p_component.get_type() == Variant::OBJECT) {
+		NodeComponent *component = Object::cast_to<NodeComponent>(p_component.get_validated_object());
+		if (component) {
+			return remove_component(component);
+		}
+	} else if (p_component.get_type() == Variant::STRING_NAME || p_component.get_type() == Variant::STRING) {
+		StringName class_name = p_component;
+		NodeComponent *component = get_component_by_class(class_name);
+		if (component) {
+			return remove_component(component);
+		}
+	}
+	return false;
+}
+
+void Node::remove_all_components() {
+	HashSet<NodeComponent *> components_copy = node_components;
+
+	for (NodeComponent *component : components_copy) {
+        if (component) {
+            // Disconnect from node lifecycle
+            _disconnect_component_from_node(component);
+            
+            // Clear owner node
+            component->set_owner_node(nullptr);
+            
+            // Delete the component directly (since it's not a Node)
+            memdelete(component);
+        }
+    }
+    
+    // Clear the components set
+    node_components.clear();
+}
+
+int Node::get_component_count() const {
+	return node_components.size();
+}
+
+bool Node::has_components() const {
+	return !node_components.is_empty();
+}
+
+// Component management
+
 Node::Node() {
 	_define_ancestry(AncestralClass::NODE);
 #ifdef DEBUG_ENABLED
@@ -4097,6 +4306,9 @@ Node::Node() {
 
 	data.is_translation_domain_inherited = true;
 	data.is_translation_domain_dirty = true;
+
+	// Initialize component system
+    node_components.clear();
 }
 
 Node::~Node() {
@@ -4111,6 +4323,8 @@ Node::~Node() {
 #ifdef DEBUG_ENABLED
 	total_node_count.decrement();
 #endif
+	// Clean up all components
+	remove_all_components();
 }
 
 ////////////////////////////////

@@ -41,6 +41,7 @@ class Window;
 class SceneState;
 class Tween;
 class PropertyTweener;
+class NodeComponent;
 
 SAFE_FLAG_TYPE_PUN_GUARANTEES
 SAFE_NUMERIC_TYPE_PUN_GUARANTEES(uint32_t)
@@ -850,6 +851,49 @@ public:
 
 	bool is_instance() const { return !data.scene_file_path.is_empty(); }
 
+	// Component management
+private:
+	HashSet<NodeComponent *> node_components;
+
+    // Component lifecycle management
+	void _connect_component_to_node(NodeComponent *p_component);
+	void _disconnect_component_from_node(NodeComponent *p_component);
+	void _propagate_to_components(const StringName &p_method, const Variant **p_args, int p_argcount);
+	void _propagate_to_components_reverse(const StringName &p_method, const Variant **p_args, int p_argcount);
+
+public:
+    
+    template<typename T>
+    T *add_component();
+    
+    NodeComponent *add_component_by_class(const StringName &p_class_name);
+    
+    template<typename T>
+    T *get_component() const;
+    
+    NodeComponent *get_component_by_class(const StringName &p_class_name) const;
+    
+    Array get_components() const;
+    
+    Array get_components_by_class(const StringName &p_class_name) const;
+    
+    bool has_component(NodeComponent *p_component) const;
+    bool has_component(const Variant &p_component) const;
+    
+    template<typename T>
+    bool has_component() const;
+    
+    bool remove_component(NodeComponent *p_component);
+    bool remove_component(const Variant &p_component);
+    
+    template<typename T>
+    void remove_component();
+    
+    void remove_all_components();
+    int get_component_count() const;
+    bool has_components() const;
+	// Component management
+
 	// These inherited functions need proper multithread locking when overridden in Node.
 #ifdef DEBUG_ENABLED
 
@@ -888,6 +932,56 @@ VARIANT_ENUM_CAST(Node::PhysicsInterpolationMode);
 VARIANT_ENUM_CAST(Node::AutoTranslateMode);
 
 typedef HashSet<Node *, Node::Comparator> NodeSet;
+
+template<typename T>
+T *Node::add_component() {
+	static_assert(std::is_base_of_v<NodeComponent, T>, "T must be a NodeComponent");
+	
+	// Check if component of this type already exists
+	if (get_component<T>()) {
+		ERR_PRINT("Component of type " + String(T::get_class_static()) + " already exists");
+		return nullptr;
+	}
+	
+	T *component = memnew(T);
+	component->set_owner_node(this);
+	
+	// Add to HashSet
+	node_components.insert(component);
+	
+	// Connect to node lifecycle
+	_connect_component_to_node(component);
+	
+	// Call _ready if node is already in tree
+	if (is_inside_tree()) {
+		component->_ready();
+	}
+	
+	return component;
+}
+
+template<typename T>
+T *Node::get_component() const {
+	for (NodeComponent *comp : node_components) {
+		if (T *casted = Object::cast_to<T>(comp)) {
+			return casted;
+		}
+	}
+	return nullptr;
+}
+
+template<typename T>
+bool Node::has_component() const {
+	return get_component<T>() != nullptr;
+}
+
+template<typename T>
+void Node::remove_component() {
+	T *component = get_component<T>();
+	if (component) {
+		remove_component(component);
+	}
+}
 
 // Template definitions must be in the header so they are always fully initialized before their usage.
 // See this StackOverflow question for more information: https://stackoverflow.com/questions/495021/why-can-templates-only-be-implemented-in-the-header-file
