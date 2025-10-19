@@ -49,7 +49,9 @@
 #include "core/variant/type_info.h"
 #include "servers/rendering/rendering_context_driver.h"
 #include "servers/rendering/rendering_device_commons.h"
-#include "servers/rendering/rendering_shader_container.h"
+
+class RenderingShaderContainer;
+class RenderingShaderContainerFormat;
 
 // These utilities help drivers avoid allocations.
 #define ALLOCA(m_size) ((m_size != 0) ? alloca(m_size) : nullptr)
@@ -68,7 +70,7 @@
 template <typename... RESOURCE_TYPES>
 struct VersatileResourceTemplate {
 	static constexpr size_t RESOURCE_SIZES[] = { sizeof(RESOURCE_TYPES)... };
-	static constexpr size_t MAX_RESOURCE_SIZE = std::max_element(RESOURCE_SIZES, RESOURCE_SIZES + sizeof...(RESOURCE_TYPES))[0];
+	static constexpr size_t MAX_RESOURCE_SIZE = Span(RESOURCE_SIZES).max();
 	uint8_t data[MAX_RESOURCE_SIZE];
 
 	template <typename T>
@@ -269,6 +271,8 @@ public:
 	virtual void texture_free(TextureID p_texture) = 0;
 	virtual uint64_t texture_get_allocation_size(TextureID p_texture) = 0;
 	virtual void texture_get_copyable_layout(TextureID p_texture, const TextureSubresource &p_subresource, TextureCopyableLayout *r_layout) = 0;
+	// Returns the data of a texture layer for a CPU texture that was created with TEXTURE_USAGE_CPU_READ_BIT.
+	virtual Vector<uint8_t> texture_get_data(TextureID p_texture, uint32_t p_layer) = 0;
 	virtual uint8_t *texture_map(TextureID p_texture, const TextureSubresource &p_subresource) = 0;
 	virtual void texture_unmap(TextureID p_texture) = 0;
 	virtual BitField<TextureUsageBits> texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) = 0;

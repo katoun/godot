@@ -34,6 +34,8 @@
 #include "core/variant/typed_array.h"
 
 #ifdef ANDROID_ENABLED
+#include "core/templates/rb_map.h"
+
 #include <android/log.h>
 #include <jni.h>
 #endif
@@ -203,7 +205,7 @@ public:
 	bool has_java_method(const StringName &p_method) const;
 
 #ifdef ANDROID_ENABLED
-	virtual String to_string() override;
+	virtual String _to_string() override;
 #endif
 
 	JavaClass();
@@ -230,7 +232,7 @@ public:
 	bool has_java_method(const StringName &p_method) const;
 
 #ifdef ANDROID_ENABLED
-	virtual String to_string() override;
+	virtual String _to_string() override;
 
 	jobject get_instance() { return instance; }
 

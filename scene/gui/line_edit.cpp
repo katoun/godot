@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "line_edit.h"
+#include "line_edit.compat.inc"
 
 #include "core/input/input_map.h"
 #include "core/os/keyboard.h"
@@ -38,24 +39,24 @@
 #include "scene/gui/label.h"
 #include "scene/main/window.h"
 #include "scene/theme/theme_db.h"
-#include "servers/display_server.h"
-#include "servers/text_server.h"
+#include "servers/display/display_server.h"
+#include "servers/text/text_server.h"
 
 #ifdef TOOLS_ENABLED
 #include "editor/settings/editor_settings.h"
 #endif
 
-void LineEdit::edit() {
-	_edit(true);
+void LineEdit::edit(bool p_hide_focus) {
+	_edit(true, p_hide_focus);
 }
 
-void LineEdit::_edit(bool p_show_virtual_keyboard) {
+void LineEdit::_edit(bool p_show_virtual_keyboard, bool p_hide_focus) {
 	if (!is_inside_tree()) {
 		return;
 	}
 
 	if (!has_focus()) {
-		grab_focus();
+		grab_focus(p_hide_focus);
 		return;
 	}
 
@@ -415,7 +416,7 @@ void LineEdit::gui_input(const Ref<InputEvent> &p_event) {
 			}
 
 			if (editable && !editing) {
-				edit();
+				edit(true);
 				emit_signal(SNAME("editing_toggled"), true);
 			}
 
@@ -432,7 +433,7 @@ void LineEdit::gui_input(const Ref<InputEvent> &p_event) {
 			set_caret_at_pixel_pos(b->get_position().x);
 
 			if (!editing) {
-				edit();
+				edit(true);
 				emit_signal(SNAME("editing_toggled"), true);
 			}
 
@@ -535,7 +536,7 @@ void LineEdit::gui_input(const Ref<InputEvent> &p_event) {
 			}
 
 			if (editable && !editing) {
-				edit();
+				edit(true);
 				emit_signal(SNAME("editing_toggled"), true);
 				return;
 			}
@@ -1099,10 +1100,10 @@ void LineEdit::drop_data(const Point2 &p_point, const Variant &p_data) {
 			selection_delete();
 			set_caret_column(caret_column_tmp);
 			insert_text_at_caret(p_data);
-			grab_focus();
+			grab_focus(true);
 		} else {
 			insert_text_at_caret(p_data);
-			grab_focus();
+			grab_focus(true);
 		}
 		select(caret_column_tmp, caret_column);
 		if (!text_changed_dirty) {
@@ -1201,11 +1202,8 @@ void LineEdit::_notification(int p_what) {
 			DisplayServer::get_singleton()->accessibility_update_add_action(ae, DisplayServer::AccessibilityAction::ACTION_REPLACE_SELECTED_TEXT, callable_mp(this, &LineEdit::_accessibility_action_replace_selected));
 			DisplayServer::get_singleton()->accessibility_update_add_action(ae, DisplayServer::AccessibilityAction::ACTION_SET_VALUE, callable_mp(this, &LineEdit::_accessibility_action_set_value));
 			DisplayServer::get_singleton()->accessibility_update_add_action(ae, DisplayServer::AccessibilityAction::ACTION_SHOW_CONTEXT_MENU, callable_mp(this, &LineEdit::_accessibility_action_menu));
-			if (!language.is_empty()) {
-				DisplayServer::get_singleton()->accessibility_update_set_language(ae, language);
-			} else {
-				DisplayServer::get_singleton()->accessibility_update_set_language(ae, TranslationServer::get_singleton()->get_tool_locale());
-			}
+			const String &lang = language.is_empty() ? _get_locale() : language;
+			DisplayServer::get_singleton()->accessibility_update_set_language(ae, lang);
 
 			bool rtl = is_layout_rtl();
 			Ref<StyleBox> style = theme_cache.normal;
@@ -2978,7 +2976,8 @@ void LineEdit::_shape() {
 	}
 	TS->shaped_text_set_preserve_control(text_rid, draw_control_chars);
 
-	TS->shaped_text_add_string(text_rid, t, font->get_rids(), font_size, font->get_opentype_features(), language);
+	const String &lang = language.is_empty() ? _get_locale() : language;
+	TS->shaped_text_add_string(text_rid, t, font->get_rids(), font_size, font->get_opentype_features(), lang);
 	TS->shaped_text_set_bidi_override(text_rid, structured_text_parser(st_parser, st_args, t));
 
 	full_width = TS->shaped_text_get_size(text_rid).x;
@@ -3196,7 +3195,7 @@ void LineEdit::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_horizontal_alignment", "alignment"), &LineEdit::set_horizontal_alignment);
 	ClassDB::bind_method(D_METHOD("get_horizontal_alignment"), &LineEdit::get_horizontal_alignment);
 
-	ClassDB::bind_method(D_METHOD("edit"), &LineEdit::edit);
+	ClassDB::bind_method(D_METHOD("edit", "hide_focus"), &LineEdit::edit, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("unedit"), &LineEdit::unedit);
 	ClassDB::bind_method(D_METHOD("is_editing"), &LineEdit::is_editing);
 	ClassDB::bind_method(D_METHOD("set_keep_editing_on_text_submit", "enable"), &LineEdit::set_keep_editing_on_text_submit);

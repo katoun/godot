@@ -163,6 +163,7 @@ void AnimationNodeStateMachineEditor::_state_machine_gui_input(const Ref<InputEv
 		selected_transition_to = StringName();
 		selected_transition_index = -1;
 		selected_node = StringName();
+		connected_nodes.clear();
 
 		for (int i = node_rects.size() - 1; i >= 0; i--) { //inverse to draw order
 			if (node_rects[i].play.has_point(mb->get_position())) { //edit name
@@ -873,7 +874,7 @@ void AnimationNodeStateMachineEditor::_connection_draw(const Vector2 &p_from, co
 		state_machine_draw->draw_line(p_from, p_from.lerp(p_to, p_fade_ratio), fade_line_color, 2);
 	}
 
-	const int ICON_COUNT = std::size(theme_cache.transition_icons);
+	const int ICON_COUNT = std_size(theme_cache.transition_icons);
 	int icon_index = p_mode + (p_auto_advance ? ICON_COUNT / 2 : 0);
 	ERR_FAIL_COND(icon_index >= ICON_COUNT);
 	Ref<Texture2D> icon = theme_cache.transition_icons[icon_index];
