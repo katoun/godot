@@ -49,7 +49,7 @@ private:
 
 	private:
 		Ref<TileSet> tile_set;
-		TileSetScenesCollectionSource *tile_set_scenes_collection_source = nullptr;
+		Ref<TileSetScenesCollectionSource> tile_set_scenes_collection_source;
 		int source_id = -1;
 
 	protected:
@@ -72,7 +72,7 @@ private:
 	private:
 		TileSetScenesCollectionSourceEditor *tile_set_scenes_collection_source_editor = nullptr;
 
-		TileSetScenesCollectionSource *tile_set_scenes_collection_source = nullptr;
+		Ref<TileSetScenesCollectionSource> tile_set_scenes_collection_source;
 		int source_id;
 		int scene_id;
 
@@ -96,7 +96,7 @@ private:
 	bool read_only = false;
 
 	Ref<TileSet> tile_set;
-	TileSetScenesCollectionSource *tile_set_scenes_collection_source = nullptr;
+	Ref<TileSetScenesCollectionSource> tile_set_scenes_collection_source;
 	int tile_set_source_id = -1;
 
 	bool tile_set_scenes_collection_source_changed_needs_update = false;
@@ -130,6 +130,7 @@ private:
 	void _update_tile_inspector();
 	void _update_scenes_list();
 	void _update_action_buttons();
+	void _update_all();
 
 	void _drop_data_fw(const Point2 &p_point, const Variant &p_data, Control *p_from);
 	bool _can_drop_data_fw(const Point2 &p_point, const Variant &p_data, Control *p_from) const;

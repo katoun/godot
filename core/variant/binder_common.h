@@ -30,9 +30,7 @@
 
 #pragma once
 
-#include "core/input/input_enums.h"
 #include "core/object/object.h"
-#include "core/os/keyboard.h"
 #include "core/templates/simple_type.h"
 #include "core/typedefs.h"
 #include "core/variant/method_ptrcall.h"
@@ -41,6 +39,19 @@
 #include "core/variant/variant_internal.h"
 
 #include <cstdio>
+
+enum class HatDir;
+enum class HatMask;
+enum class JoyAxis;
+enum class JoyButton;
+
+enum class MIDIMessage;
+enum class MouseButton;
+enum class MouseButtonMask;
+
+enum class Key;
+enum class KeyModifierMask;
+enum class KeyLocation;
 
 // Variant cannot define an implicit cast operator for every Object subclass, so the
 // casting is done here, to allow binding methods with parameters more specific than Object *
@@ -669,9 +680,9 @@ void call_with_variant_args_ret_helper(T *p_instance, R (T::*p_method)(P...), co
 	r_error.error = Callable::CallError::CALL_OK;
 
 #ifdef DEBUG_ENABLED
-	r_ret = (p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
+	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
 #else
-	r_ret = (p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...);
+	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...));
 #endif
 }
 
@@ -680,9 +691,9 @@ void call_with_variant_args_static_ret(R (*p_method)(P...), const Variant **p_ar
 	r_error.error = Callable::CallError::CALL_OK;
 
 #ifdef DEBUG_ENABLED
-	r_ret = (p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
+	r_ret = VariantInternal::make((p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
 #else
-	r_ret = (p_method)(VariantCaster<P>::cast(*p_args[Is])...);
+	r_ret = VariantInternal::make((p_method)(VariantCaster<P>::cast(*p_args[Is])...));
 #endif // DEBUG_ENABLED
 }
 
@@ -720,9 +731,9 @@ void call_with_variant_args_retc_helper(T *p_instance, R (T::*p_method)(P...) co
 	r_error.error = Callable::CallError::CALL_OK;
 
 #ifdef DEBUG_ENABLED
-	r_ret = (p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
+	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
 #else
-	r_ret = (p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...);
+	r_ret = VariantInternal::make((p_instance->*p_method)(VariantCaster<P>::cast(*p_args[Is])...));
 #endif // DEBUG_ENABLED
 	(void)p_args;
 }
@@ -786,9 +797,9 @@ void call_with_variant_args_retc_static_helper(T *p_instance, R (*p_method)(T *,
 	r_error.error = Callable::CallError::CALL_OK;
 
 #ifdef DEBUG_ENABLED
-	r_ret = (p_method)(p_instance, VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...);
+	r_ret = VariantInternal::make((p_method)(p_instance, VariantCasterAndValidate<P>::cast(p_args, Is, r_error)...));
 #else
-	r_ret = (p_method)(p_instance, VariantCaster<P>::cast(*p_args[Is])...);
+	r_ret = VariantInternal::make((p_method)(p_instance, VariantCaster<P>::cast(*p_args[Is])...));
 #endif // DEBUG_ENABLED
 
 	(void)p_args;

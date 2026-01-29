@@ -71,6 +71,7 @@ class ViewportRotationControl : public Control {
 		Vector2 screen_point;
 		float z_axis = -99.0;
 		int axis = -1;
+		bool is_positive = true;
 	};
 
 	struct Axis2DCompare {
@@ -334,6 +335,7 @@ private:
 	Vector<Node3D *> selection_results_menu;
 	bool clicked_wants_append = false;
 	bool selection_in_progress = false;
+	bool movement_threshold_passed = false;
 
 	PopupMenu *selection_menu = nullptr;
 
@@ -382,6 +384,7 @@ private:
 		Point2 original_mouse_pos;
 		bool snap = false;
 		bool show_rotation_line = false;
+		bool is_trackball = false;
 		Ref<EditorNode3DGizmo> gizmo;
 		int gizmo_handle = 0;
 		bool gizmo_handle_secondary = false;
@@ -399,6 +402,7 @@ private:
 		int numeric_next_decimal = 0;
 
 		Vector3 rotation_axis;
+		Vector3 view_axis_local;
 		double accumulated_rotation_angle = 0.0;
 		double display_rotation_angle = 0.0;
 		Vector3 initial_click_vector;
@@ -464,6 +468,7 @@ private:
 	int zoom_failed_attempts_count = 0;
 
 	RID move_gizmo_instance[3], move_plane_gizmo_instance[3], rotate_gizmo_instance[4], scale_gizmo_instance[3], scale_plane_gizmo_instance[3], axis_gizmo_instance[3];
+	RID trackball_sphere_instance;
 
 	String last_message;
 	String message;
@@ -530,7 +535,7 @@ private:
 
 	void _project_settings_changed();
 
-	Transform3D _compute_transform(TransformMode p_mode, const Transform3D &p_original, const Transform3D &p_original_local, Vector3 p_motion, double p_extra, bool p_local, bool p_orthogonal);
+	Transform3D _compute_transform(TransformMode p_mode, const Transform3D &p_original, const Transform3D &p_original_local, Vector3 p_motion, double p_extra, bool p_local, bool p_orthogonal, bool p_view_axis);
 
 	void _reset_transform(TransformType p_type);
 
@@ -657,10 +662,11 @@ public:
 	static const unsigned int VIEWPORTS_COUNT = 4;
 
 	enum ToolMode {
-		TOOL_MODE_SELECT,
+		TOOL_MODE_TRANSFORM,
 		TOOL_MODE_MOVE,
 		TOOL_MODE_ROTATE,
 		TOOL_MODE_SCALE,
+		TOOL_MODE_SELECT,
 		TOOL_MODE_LIST_SELECT,
 		TOOL_LOCK_SELECTED,
 		TOOL_UNLOCK_SELECTED,
@@ -674,7 +680,11 @@ public:
 		TOOL_OPT_LOCAL_COORDS,
 		TOOL_OPT_USE_SNAP,
 		TOOL_OPT_MAX
+	};
 
+	enum TransformMode {
+		TRANSFORM_MODE_GLOBAL = 1,
+		TRANSFORM_MODE_LOCAL = 2,
 	};
 
 private:
@@ -706,12 +716,15 @@ private:
 	Vector3 grid_camera_last_update_position;
 
 	Ref<ArrayMesh> move_gizmo[3], move_plane_gizmo[3], rotate_gizmo[4], scale_gizmo[3], scale_plane_gizmo[3], axis_gizmo[3];
+	Ref<ArrayMesh> trackball_sphere_gizmo;
 	Ref<StandardMaterial3D> gizmo_color[3];
 	Ref<StandardMaterial3D> plane_gizmo_color[3];
-	Ref<ShaderMaterial> rotate_gizmo_color[3];
+	Ref<ShaderMaterial> rotate_gizmo_color[4];
 	Ref<StandardMaterial3D> gizmo_color_hl[3];
 	Ref<StandardMaterial3D> plane_gizmo_color_hl[3];
-	Ref<ShaderMaterial> rotate_gizmo_color_hl[3];
+	Ref<ShaderMaterial> rotate_gizmo_color_hl[4];
+	Ref<StandardMaterial3D> trackball_sphere_material;
+	Ref<StandardMaterial3D> trackball_sphere_material_hl;
 
 	Ref<Node3DGizmo> current_hover_gizmo;
 	int current_hover_gizmo_handle;
@@ -757,10 +770,11 @@ private:
 	} gizmo;
 
 	enum MenuOption {
-		MENU_TOOL_SELECT,
+		MENU_TOOL_TRANSFORM,
 		MENU_TOOL_MOVE,
 		MENU_TOOL_ROTATE,
 		MENU_TOOL_SCALE,
+		MENU_TOOL_SELECT,
 		MENU_TOOL_LIST_SELECT,
 		MENU_TOOL_LOCAL_COORDS,
 		MENU_TOOL_USE_SNAP,
@@ -799,9 +813,9 @@ private:
 
 	bool snap_enabled;
 	bool snap_key_enabled;
-	LineEdit *snap_translate = nullptr;
-	LineEdit *snap_rotate = nullptr;
-	LineEdit *snap_scale = nullptr;
+	EditorSpinSlider *snap_translate = nullptr;
+	EditorSpinSlider *snap_rotate = nullptr;
+	EditorSpinSlider *snap_scale = nullptr;
 
 	LineEdit *xform_translate[3];
 	LineEdit *xform_rotate[3];
@@ -826,7 +840,6 @@ private:
 	HashMap<Control *, VSeparator *> context_toolbar_separators;
 
 	void _update_context_toolbar();
-	void _on_editor_settings_changed();
 
 	void _generate_selection_boxes();
 
@@ -989,6 +1002,7 @@ public:
 	Ref<ArrayMesh> get_rotate_gizmo(int idx) const { return rotate_gizmo[idx]; }
 	Ref<ArrayMesh> get_scale_gizmo(int idx) const { return scale_gizmo[idx]; }
 	Ref<ArrayMesh> get_scale_plane_gizmo(int idx) const { return scale_plane_gizmo[idx]; }
+	Ref<ArrayMesh> get_trackball_sphere_gizmo() const { return trackball_sphere_gizmo; }
 
 	void update_grid();
 	void update_transform_gizmo();

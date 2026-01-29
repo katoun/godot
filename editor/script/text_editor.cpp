@@ -89,7 +89,7 @@ String TextEditor::get_name() {
 }
 
 Ref<Texture2D> TextEditor::get_theme_icon() {
-	return EditorNode::get_singleton()->get_object_icon(edited_res.ptr(), "TextFile");
+	return EditorNode::get_singleton()->get_object_icon(edited_res.ptr());
 }
 
 Ref<Resource> TextEditor::get_edited_resource() const {
@@ -606,7 +606,6 @@ void TextEditor::update_toggle_files_button() {
 TextEditor::TextEditor() {
 	code_editor = memnew(CodeTextEditor);
 	add_child(code_editor);
-	code_editor->add_theme_constant_override("separation", 0);
 	code_editor->connect("load_theme_settings", callable_mp(this, &TextEditor::_load_theme_settings));
 	code_editor->connect("validate_script", callable_mp(this, &TextEditor::_validate_script));
 	code_editor->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);

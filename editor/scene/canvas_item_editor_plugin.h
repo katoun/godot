@@ -46,6 +46,7 @@ class HSplitContainer;
 class MenuButton;
 class PanelContainer;
 class StyleBoxTexture;
+class Timer;
 class ViewPanner;
 class VScrollBar;
 class VSeparator;
@@ -145,7 +146,8 @@ private:
 		VIEW_FRAME_TO_SELECTION,
 		PREVIEW_CANVAS_SCALE,
 		SKELETON_MAKE_BONES,
-		SKELETON_SHOW_BONES
+		SKELETON_SHOW_BONES,
+		AUTO_RESAMPLE_CANVAS_ITEMS,
 	};
 
 	enum DragType {
@@ -227,6 +229,10 @@ private:
 	Point2 view_offset;
 	Point2 previous_update_view_offset;
 
+	Timer *resample_timer = nullptr;
+	bool auto_resampling_enabled = true;
+	real_t resample_delay = 0.3;
+
 	bool selected_from_canvas = false;
 
 	// Defaults are defined in clear().
@@ -238,6 +244,7 @@ private:
 	real_t snap_rotation_step = 0.0;
 	real_t snap_rotation_offset = 0.0;
 	real_t snap_scale_step = 0.0;
+	bool use_local_space = true;
 	bool smart_snap_active = false;
 	bool grid_snap_active = false;
 
@@ -332,6 +339,7 @@ private:
 
 	Button *ruler_button = nullptr;
 
+	Button *local_space_button = nullptr;
 	Button *smart_snap_button = nullptr;
 	Button *grid_snap_button = nullptr;
 	MenuButton *snap_config_menu = nullptr;
@@ -430,6 +438,7 @@ private:
 	void _prepare_grid_menu();
 	void _on_grid_menu_id_pressed(int p_id);
 	void _reset_transform(TransformType p_type);
+	void _update_oversampling();
 
 public:
 	enum ThemePreviewMode {
@@ -492,6 +501,8 @@ private:
 	bool _gui_input_rulers_and_guides(const Ref<InputEvent> &p_event);
 	bool _gui_input_hover(const Ref<InputEvent> &p_event);
 
+	void _commit_drag();
+
 	void _gui_input_viewport(const Ref<InputEvent> &p_event);
 	void _update_cursor();
 	void _update_lock_and_group_button();
@@ -528,6 +539,7 @@ private:
 	void _update_zoom(real_t p_zoom);
 	void _shortcut_zoom_set(real_t p_zoom);
 	void _zoom_on_position(real_t p_zoom, Point2 p_position = Point2());
+	void _button_toggle_local_space(bool p_status);
 	void _button_toggle_smart_snap(bool p_status);
 	void _button_toggle_grid_snap(bool p_status);
 	void _button_tool_select(int p_index);

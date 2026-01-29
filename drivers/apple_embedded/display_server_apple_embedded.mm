@@ -114,8 +114,8 @@ DisplayServerAppleEmbedded::DisplayServerAppleEmbedded(const String &p_rendering
 			if (fallback_to_opengl3 && rendering_driver != "opengl3") {
 				WARN_PRINT("Your device does not seem to support MoltenVK or Metal, switching to OpenGL 3.");
 				rendering_driver = "opengl3";
-				OS::get_singleton()->set_current_rendering_method("gl_compatibility");
-				OS::get_singleton()->set_current_rendering_driver_name(rendering_driver);
+				OS::get_singleton()->set_current_rendering_method("gl_compatibility", OS::RENDERING_SOURCE_FALLBACK);
+				OS::get_singleton()->set_current_rendering_driver_name(rendering_driver, OS::RENDERING_SOURCE_FALLBACK);
 			} else
 #endif
 			{
@@ -413,7 +413,7 @@ TypedArray<Dictionary> DisplayServerAppleEmbedded::tts_get_voices() const {
 	return [tts getVoices];
 }
 
-void DisplayServerAppleEmbedded::tts_speak(const String &p_text, const String &p_voice, int p_volume, float p_pitch, float p_rate, int p_utterance_id, bool p_interrupt) {
+void DisplayServerAppleEmbedded::tts_speak(const String &p_text, const String &p_voice, int p_volume, float p_pitch, float p_rate, int64_t p_utterance_id, bool p_interrupt) {
 	if (unlikely(!tts)) {
 		initialize_tts();
 	}
@@ -816,4 +816,12 @@ DisplayServer::VSyncMode DisplayServerAppleEmbedded::window_get_vsync_mode(Windo
 	}
 #endif
 	return DisplayServer::VSYNC_ENABLED;
+}
+
+void DisplayServerAppleEmbedded::set_native_icon(const String &p_filename) {
+	// Not supported on Apple embedded platforms.
+}
+
+void DisplayServerAppleEmbedded::set_icon(const Ref<Image> &p_icon) {
+	// Not supported on Apple embedded platforms.
 }

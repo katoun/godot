@@ -53,10 +53,12 @@ Error ResourceLoader::load_threaded_request(const String &p_path, const String &
 }
 
 ResourceLoader::ThreadLoadStatus ResourceLoader::load_threaded_get_status(const String &p_path, Array r_progress) {
-	float progress = 0;
-	::ResourceLoader::ThreadLoadStatus tls = ::ResourceLoader::load_threaded_get_status(p_path, &progress);
+	// Progress being the default array indicates the user hasn't requested for it to be computed.
 	// Default array should never be modified, it causes the hash of the method to change.
-	if (!ClassDB::is_default_array_arg(r_progress)) {
+	const bool return_progress = !ClassDB::is_default_array_arg(r_progress);
+	float progress = 0;
+	::ResourceLoader::ThreadLoadStatus tls = ::ResourceLoader::load_threaded_get_status(p_path, return_progress ? &progress : nullptr);
+	if (return_progress) {
 		r_progress.resize(1);
 		r_progress[0] = progress;
 	}
@@ -165,7 +167,7 @@ void ResourceLoader::_bind_methods() {
 
 ////// ResourceSaver //////
 
-Error ResourceSaver::save(const Ref<Resource> &p_resource, const String &p_path, BitField<SaverFlags> p_flags) {
+Error ResourceSaver::save(RequiredParam<Resource> p_resource, const String &p_path, BitField<SaverFlags> p_flags) {
 	return ::ResourceSaver::save(p_resource, p_path, p_flags);
 }
 
@@ -1699,14 +1701,8 @@ TypedArray<Dictionary> ClassDB::class_get_method_list(const StringName &p_class,
 	::ClassDB::get_method_list(p_class, &methods, p_no_inheritance);
 	TypedArray<Dictionary> ret;
 
-	for (const MethodInfo &E : methods) {
-#ifdef DEBUG_ENABLED
-		ret.push_back(E.operator Dictionary());
-#else
-		Dictionary dict;
-		dict["name"] = E.name;
-		ret.push_back(dict);
-#endif // DEBUG_ENABLED
+	for (const MethodInfo &method : methods) {
+		ret.push_back(method.operator Dictionary());
 	}
 
 	return ret;

@@ -213,7 +213,7 @@ public:
 	void on_state_stopping();
 	void on_state_loss_pending();
 	void on_state_exiting();
-	void on_reference_space_change_pending();
+	void on_reference_space_change_pending(XrReferenceSpaceType p_type);
 	void on_refresh_rate_changes(float p_new_rate);
 	void tracker_profile_changed(RID p_tracker, RID p_interaction_profile);
 
@@ -231,6 +231,10 @@ public:
 	};
 
 	SessionState get_session_state();
+
+	/** User presence. */
+	bool is_user_presence_supported() const;
+	bool is_user_present() const;
 
 	/** Hand tracking. */
 	enum Hand {

@@ -31,16 +31,17 @@
 #pragma once
 
 #include "core/io/resource.h"
-#include "core/io/resource_loader.h"
-#include "core/io/resource_saver.h"
-#include "scene/resources/texture.h"
 #include "shader_include.h"
+
+class Texture;
+class Texture2D;
 
 class Shader : public Resource {
 	GDCLASS(Shader, Resource);
 	OBJ_SAVE_TYPE(Shader);
 
 public:
+	// Must be kept in sync with the List<String> of shader types in `servers/rendering/shader_types.cpp`.
 	enum Mode {
 		MODE_SPATIAL,
 		MODE_CANVAS_ITEM,

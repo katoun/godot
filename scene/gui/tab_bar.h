@@ -34,6 +34,8 @@
 #include "scene/property_list_helper.h"
 #include "scene/resources/text_line.h"
 
+class Timer;
+
 class TabBar : public Control {
 	GDCLASS(TabBar, Control);
 
@@ -117,6 +119,7 @@ private:
 
 	bool select_with_rmb = false;
 	bool deselect_enabled = false;
+	bool switch_on_release = false;
 
 	int cb_hover = -1;
 	bool cb_pressing = false;
@@ -130,6 +133,7 @@ private:
 	bool dragging_valid_tab = false;
 	bool scroll_to_selected = true;
 	int tabs_rearrange_group = -1;
+	bool switch_on_drag_hover = true;
 
 	static const int CURRENT_TAB_UNINITIALIZED = -2;
 	bool initialized = false;
@@ -143,6 +147,7 @@ private:
 		int h_separation = 0;
 		int tab_separation = 0;
 		int icon_max_width = 0;
+		int hover_switch_wait_msec = 500;
 
 		Ref<StyleBox> tab_unselected_style;
 		Ref<StyleBox> tab_hovered_style;
@@ -177,6 +182,8 @@ private:
 		Ref<StyleBox> button_hl_style;
 	} theme_cache;
 
+	Timer *hover_switch_delay = nullptr;
+
 	int get_tab_width(int p_idx) const;
 	Size2 _get_tab_icon_size(int p_idx) const;
 	void _ensure_no_over_offset();
@@ -184,6 +191,7 @@ private:
 
 	void _update_hover();
 	void _update_cache(bool p_update_hover = true);
+	void _hover_switch_timeout();
 
 	void _on_mouse_exited();
 
@@ -218,6 +226,7 @@ public:
 	bool _handle_can_drop_data(const String &p_type, const Point2 &p_point, const Variant &p_data) const;
 	void _handle_drop_data(const String &p_type, const Point2 &p_point, const Variant &p_data, const Callable &p_move_tab_callback, const Callable &p_move_tab_from_other_callback);
 	void _draw_tab_drop(RID p_canvas_item);
+	void _handle_switch_on_hover(const Variant &p_data) const;
 
 	void add_tab(const String &p_str = "", const Ref<Texture2D> &p_icon = Ref<Texture2D>());
 
@@ -307,6 +316,9 @@ public:
 	void set_scroll_to_selected(bool p_enabled);
 	bool get_scroll_to_selected() const;
 
+	void set_switch_on_drag_hover(bool p_enabled);
+	bool get_switch_on_drag_hover() const;
+
 	void set_select_with_rmb(bool p_enabled);
 	bool get_select_with_rmb() const;
 
@@ -317,6 +329,8 @@ public:
 
 	void set_max_tab_width(int p_width);
 	int get_max_tab_width() const;
+
+	void set_switch_on_release(bool p_switch) { switch_on_release = p_switch; }
 
 	Rect2 get_tab_rect(int p_tab) const;
 	Size2 get_minimum_size() const override;

@@ -36,6 +36,7 @@
 #include "extensions/openxr_eye_gaze_interaction.h"
 #include "extensions/openxr_hand_interaction_extension.h"
 #include "extensions/openxr_performance_settings_extension.h"
+#include "extensions/openxr_user_presence_extension.h"
 #include "servers/rendering/renderer_compositor.h"
 
 #include <openxr/openxr.h>
@@ -57,6 +58,12 @@ void OpenXRInterface::_bind_methods() {
 
 	// State
 	ClassDB::bind_method(D_METHOD("get_session_state"), &OpenXRInterface::get_session_state);
+
+	// User presence
+	ADD_SIGNAL(MethodInfo("user_presence_changed", PropertyInfo(Variant::BOOL, "is_user_present")));
+
+	ClassDB::bind_method(D_METHOD("is_user_presence_supported"), &OpenXRInterface::is_user_presence_supported);
+	ClassDB::bind_method(D_METHOD("is_user_present"), &OpenXRInterface::is_user_present);
 
 	// Display refresh rate
 	ClassDB::bind_method(D_METHOD("get_display_refresh_rate"), &OpenXRInterface::get_display_refresh_rate);
@@ -1408,8 +1415,32 @@ void OpenXRInterface::on_state_exiting() {
 	emit_signal(SNAME("instance_exiting"));
 }
 
-void OpenXRInterface::on_reference_space_change_pending() {
+void OpenXRInterface::on_reference_space_change_pending(XrReferenceSpaceType p_type) {
 	reference_stage_changing = true;
+
+	// Emit play area bounds changed signal when the reference space changes.
+	PlayAreaMode mode = XR_PLAY_AREA_UNKNOWN;
+
+	switch (p_type) {
+		case XR_REFERENCE_SPACE_TYPE_VIEW:
+			mode = XR_PLAY_AREA_3DOF;
+			break;
+		case XR_REFERENCE_SPACE_TYPE_LOCAL:
+			mode = XR_PLAY_AREA_SITTING;
+			break;
+		case XR_REFERENCE_SPACE_TYPE_STAGE:
+			mode = XR_PLAY_AREA_STAGE;
+			break;
+		case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
+			mode = XR_PLAY_AREA_ROOMSCALE;
+			break;
+		default:
+			mode = XR_PLAY_AREA_UNKNOWN;
+			break;
+	}
+
+	print_verbose("OpenXR Interface: Play area changed, emitting signal.");
+	emit_signal(SNAME("play_area_changed"), mode);
 }
 
 void OpenXRInterface::on_refresh_rate_changes(float p_new_rate) {
@@ -1422,6 +1453,26 @@ OpenXRInterface::SessionState OpenXRInterface::get_session_state() {
 	}
 
 	return SESSION_STATE_UNKNOWN;
+}
+
+/** User Presence. */
+bool OpenXRInterface::is_user_presence_supported() const {
+	if (!openxr_api || !openxr_api->is_initialized()) {
+		return false;
+	} else {
+		OpenXRUserPresenceExtension *user_presence_ext = OpenXRUserPresenceExtension::get_singleton();
+		return user_presence_ext && user_presence_ext->is_active();
+	}
+}
+
+bool OpenXRInterface::is_user_present() const {
+	// If extension is unavailable or unsupported, we default to user is present.
+	if (!is_user_presence_supported()) {
+		return true;
+	} else {
+		OpenXRUserPresenceExtension *user_presence_ext = OpenXRUserPresenceExtension::get_singleton();
+		return user_presence_ext->is_user_present();
+	}
 }
 
 /** Hand tracking. */

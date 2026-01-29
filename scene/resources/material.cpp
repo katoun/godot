@@ -35,6 +35,7 @@
 #include "core/error/error_macros.h"
 #include "core/version.h"
 #include "scene/main/scene_tree.h"
+#include "scene/resources/texture.h"
 
 void Material::set_next_pass(const Ref<Material> &p_pass) {
 	for (Ref<Material> pass_child = p_pass; pass_child.is_valid(); pass_child = pass_child->get_next_pass()) {
@@ -1357,7 +1358,7 @@ void vertex() {)";
 	if (flags[FLAG_FIXED_SIZE]) {
 		code += R"(
 	// Fixed Size: Enabled
-	if (PROJECTION_MATRIX[2][3] == 0.0) {
+	if (PROJECTION_MATRIX[3][3] != 0.0) {
 		// Orthogonal matrix; try to do about the same with viewport size.
 		float h = abs(1.0 / (2.0 * PROJECTION_MATRIX[1][1]));
 		// Consistent with vertical FOV (Keep Height).
@@ -1367,7 +1368,15 @@ void vertex() {)";
 		MODELVIEW_MATRIX[2] *= sc;
 	} else {
 		// Scale by depth.
-		float sc = length((MODELVIEW_MATRIX)[3].xyz);
+		float sc;
+		if (IS_MULTIVIEW) {
+			// Assuming stereo rendering.
+			// Moving in the z-plane gives the illusion of the object growing/shrinking in size.
+			// We need to take the full distance to camera to compensate.
+			sc = length((MODELVIEW_MATRIX)[3].xyz);
+		} else {
+			sc = -(MODELVIEW_MATRIX)[3].z;
+		}
 		MODELVIEW_MATRIX[0] *= sc;
 		MODELVIEW_MATRIX[1] *= sc;
 		MODELVIEW_MATRIX[2] *= sc;
@@ -1842,7 +1851,8 @@ void fragment() {)";
 		code += R"(
 	// Proximity Fade: Enabled
 	float proximity_depth_tex = textureLod(depth_texture, SCREEN_UV, 0.0).r;
-	vec4 proximity_view_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, proximity_depth_tex, 1.0);
+	vec4 ndc = OUTPUT_IS_SRGB ? vec4(vec3(SCREEN_UV, proximity_depth_tex) * 2.0 - 1.0, 1.0) : vec4(SCREEN_UV * 2.0 - 1.0, proximity_depth_tex, 1.0);
+	vec4 proximity_view_pos = INV_PROJECTION_MATRIX * ndc;
 	proximity_view_pos.xyz /= proximity_view_pos.w;
 	ALPHA *= clamp(1.0 - smoothstep(proximity_view_pos.z + proximity_fade_distance, proximity_view_pos.z, VERTEX.z), 0.0, 1.0);
 )";
@@ -3009,7 +3019,7 @@ float BaseMaterial3D::get_fov_override() const {
 	return fov_override;
 }
 
-Ref<Material> BaseMaterial3D::get_material_for_2d(bool p_shaded, Transparency p_transparency, bool p_double_sided, bool p_billboard, bool p_billboard_y, bool p_msdf, bool p_no_depth, bool p_fixed_size, TextureFilter p_filter, AlphaAntiAliasing p_alpha_antialiasing_mode, RID *r_shader_rid) {
+Ref<Material> BaseMaterial3D::get_material_for_2d(bool p_shaded, Transparency p_transparency, bool p_double_sided, bool p_billboard, bool p_billboard_y, bool p_msdf, bool p_no_depth, bool p_fixed_size, TextureFilter p_filter, AlphaAntiAliasing p_alpha_antialiasing_mode, bool p_texture_repeat, RID *r_shader_rid) {
 	uint64_t key = 0;
 	key |= ((int8_t)p_shaded & 0x01) << 0;
 	key |= ((int8_t)p_transparency & 0x07) << 1; // Bits 1-3.
@@ -3021,6 +3031,7 @@ Ref<Material> BaseMaterial3D::get_material_for_2d(bool p_shaded, Transparency p_
 	key |= ((int8_t)p_fixed_size & 0x01) << 9;
 	key |= ((int8_t)p_filter & 0x07) << 10; // Bits 10-12.
 	key |= ((int8_t)p_alpha_antialiasing_mode & 0x07) << 13; // Bits 13-15.
+	key |= ((int8_t)p_texture_repeat & 0x01) << 16;
 
 	if (materials_for_2d.has(key)) {
 		if (r_shader_rid) {
@@ -3040,6 +3051,7 @@ Ref<Material> BaseMaterial3D::get_material_for_2d(bool p_shaded, Transparency p_
 	material->set_flag(FLAG_ALBEDO_TEXTURE_MSDF, p_msdf);
 	material->set_flag(FLAG_DISABLE_DEPTH_TEST, p_no_depth);
 	material->set_flag(FLAG_FIXED_SIZE, p_fixed_size);
+	material->set_flag(FLAG_USE_TEXTURE_REPEAT, p_texture_repeat);
 	material->set_alpha_antialiasing(p_alpha_antialiasing_mode);
 	material->set_texture_filter(p_filter);
 	if (p_billboard || p_billboard_y) {

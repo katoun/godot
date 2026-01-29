@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "core/extension/gdextension_interface.h"
+#include "core/extension/gdextension_interface.gen.h"
 #include "core/object/gdtype.h"
 #include "core/object/message_queue.h"
 #include "core/object/object_id.h"
@@ -348,16 +348,6 @@ struct ObjectGDExtension {
 	GDExtensionClassReference unreference;
 	GDExtensionClassGetRID get_rid;
 
-	_FORCE_INLINE_ bool is_class(const String &p_class) const {
-		const ObjectGDExtension *e = this;
-		while (e) {
-			if (p_class == e->class_name.operator String()) {
-				return true;
-			}
-			e = e->parent;
-		}
-		return false;
-	}
 	void *class_userdata = nullptr;
 
 #ifndef DISABLE_DEPRECATED
@@ -379,6 +369,14 @@ struct ObjectGDExtension {
 	void (*track_instance)(void *p_userdata, void *p_instance) = nullptr;
 	void (*untrack_instance)(void *p_userdata, void *p_instance) = nullptr;
 #endif
+
+	/// A type for this Object extension.
+	/// This is not exposed through the GDExtension API (yet) so it is inferred from above parameters.
+	const GDType *gdtype;
+	void create_gdtype();
+	void destroy_gdtype();
+
+	~ObjectGDExtension();
 };
 
 #define GDVIRTUAL_CALL(m_name, ...) _gdvirtual_##m_name##_call(__VA_ARGS__)
@@ -524,7 +522,7 @@ public:                                                                         
 			return;                                                                                                                         \
 		}                                                                                                                                   \
 		m_inherits::initialize_class();                                                                                                     \
-		_add_class_to_classdb(get_class_static(), super_type::get_class_static());                                                          \
+		_add_class_to_classdb(get_gdtype_static(), &super_type::get_gdtype_static());                                                       \
 		if (m_class::_get_bind_methods() != m_inherits::_get_bind_methods()) {                                                              \
 			_bind_methods();                                                                                                                \
 		}                                                                                                                                   \
@@ -672,6 +670,7 @@ private:
 	HashMap<StringName, Variant> metadata;
 	HashMap<StringName, Variant *> metadata_properties;
 	mutable const GDType *_gdtype_ptr = nullptr;
+	void _reset_gdtype() const;
 
 	void _add_user_signal(const String &p_name, const Array &p_args = Array());
 	bool _has_user_signal(const StringName &p_name) const;
@@ -792,7 +791,7 @@ protected:
 	friend class ::ClassDB;
 	friend class PlaceholderExtensionInstance;
 
-	static void _add_class_to_classdb(const StringName &p_class, const StringName &p_inherits);
+	static void _add_class_to_classdb(const GDType &p_class, const GDType *p_inherits);
 	static void _get_property_list_from_classdb(const StringName &p_class, List<PropertyInfo> *p_list, bool p_no_inheritance, const Object *p_validator);
 
 	bool _disconnect(const StringName &p_signal, const Callable &p_callable, bool p_force = false);
@@ -829,16 +828,27 @@ public:
 	void detach_from_objectdb();
 	_FORCE_INLINE_ ObjectID get_instance_id() const { return _instance_id; }
 
-	template <typename T>
-	static T *cast_to(Object *p_object) {
+	template <typename T, typename O>
+	static T *cast_to(O *p_object) {
 		// This is like dynamic_cast, but faster.
 		// The reason is that we can assume no virtual and multiple inheritance.
-		return p_object && p_object->derives_from<T>() ? static_cast<T *>(p_object) : nullptr;
+		return p_object && p_object->template derives_from<T, O>() ? static_cast<T *>(p_object) : nullptr;
+	}
+
+	template <typename T, typename O>
+	static const T *cast_to(const O *p_object) {
+		return p_object && p_object->template derives_from<T, O>() ? static_cast<const T *>(p_object) : nullptr;
+	}
+
+	// cast_to versions for types that implicitly convert to Object.
+	template <typename T>
+	static T *cast_to(Object *p_object) {
+		return p_object && p_object->template derives_from<T, Object>() ? static_cast<T *>(p_object) : nullptr;
 	}
 
 	template <typename T>
 	static const T *cast_to(const Object *p_object) {
-		return p_object && p_object->derives_from<T>() ? static_cast<const T *>(p_object) : nullptr;
+		return p_object && p_object->template derives_from<T, Object>() ? static_cast<const T *>(p_object) : nullptr;
 	}
 
 	enum {
@@ -871,7 +881,7 @@ public:
 	bool is_class(const String &p_class) const;
 	virtual bool is_class_ptr(void *p_ptr) const { return get_class_ptr_static() == p_ptr; }
 
-	template <typename T>
+	template <typename T, typename O>
 	bool derives_from() const;
 
 	const StringName &get_class_name() const;
@@ -973,6 +983,7 @@ public:
 	DEBUG_VIRTUAL void get_signal_connection_list(const StringName &p_signal, List<Connection> *p_connections) const;
 	DEBUG_VIRTUAL void get_all_signal_connections(List<Connection> *p_connections) const;
 	DEBUG_VIRTUAL int get_persistent_signal_connection_count() const;
+	DEBUG_VIRTUAL uint32_t get_signal_connection_flags(const StringName &p_name, const Callable &p_callable) const;
 	DEBUG_VIRTUAL void get_signals_connected_to_this(List<Connection> *p_connections) const;
 
 	DEBUG_VIRTUAL Error connect(const StringName &p_signal, const Callable &p_callable, uint32_t p_flags = 0);
@@ -1039,27 +1050,23 @@ public:
 bool predelete_handler(Object *p_object);
 void postinitialize_handler(Object *p_object);
 
-template <typename T>
+template <typename T, typename O>
 bool Object::derives_from() const {
-	static_assert(std::is_base_of_v<Object, T>, "T must be derived from Object.");
-	static_assert(std::is_same_v<std::decay_t<T>, typename T::self_type>, "T must use GDCLASS or GDSOFTCLASS.");
-
-	// If there is an explicitly set ancestral class on the type, we can use that.
-	if constexpr (T::static_ancestral_class != T::super_type::static_ancestral_class) {
-		return _has_ancestry(T::static_ancestral_class);
+	if constexpr (std::is_base_of_v<T, O>) {
+		// We derive statically from T (or are the same class), so casting to it is trivial.
+		return true;
 	} else {
-		return is_class_ptr(T::get_class_ptr_static());
+		static_assert(std::is_base_of_v<Object, O>, "derives_from can only be used with Object subclasses.");
+		static_assert(std::is_base_of_v<O, T>, "Cannot cast argument to T because T does not derive from the argument's known class.");
+		static_assert(std::is_same_v<std::decay_t<T>, typename T::self_type>, "T must use GDCLASS or GDSOFTCLASS.");
+
+		// If there is an explicitly set ancestral class on the type, we can use that.
+		if constexpr (T::static_ancestral_class != T::super_type::static_ancestral_class) {
+			return _has_ancestry(T::static_ancestral_class);
+		} else {
+			return is_class_ptr(T::get_class_ptr_static());
+		}
 	}
-}
-
-template <>
-inline bool Object::derives_from<Object>() const {
-	return true;
-}
-
-template <>
-inline bool Object::derives_from<const Object>() const {
-	return true;
 }
 
 class ObjectDB {
@@ -1129,3 +1136,222 @@ public:
 	static void debug_objects(DebugFunc p_func, void *p_user_data);
 	static int get_object_count();
 };
+
+// Using `RequiredResult<T>` as the return type indicates that null will only be returned in the case of an error.
+// This allows GDExtension language bindings to use the appropriate error handling mechanism for that language
+// when null is returned (for example, throwing an exception), rather than simply returning the value.
+template <typename T>
+class RequiredResult {
+	static_assert(!is_fully_defined_v<T> || std::is_base_of_v<Object, T>, "T must be an Object subtype");
+
+public:
+	using element_type = T;
+	using ptr_type = std::conditional_t<std::is_base_of_v<RefCounted, T>, Ref<T>, T *>;
+
+private:
+	ptr_type _value = ptr_type();
+
+public:
+	_FORCE_INLINE_ RequiredResult() = default;
+
+	RequiredResult(const RequiredResult &p_other) = default;
+	RequiredResult(RequiredResult &&p_other) = default;
+	RequiredResult &operator=(const RequiredResult &p_other) = default;
+	RequiredResult &operator=(RequiredResult &&p_other) = default;
+
+	_FORCE_INLINE_ RequiredResult(std::nullptr_t) :
+			RequiredResult() {}
+	_FORCE_INLINE_ RequiredResult &operator=(std::nullptr_t) { _value = nullptr; }
+
+	// These functions should not be called directly, they are only for internal use.
+	_FORCE_INLINE_ ptr_type _internal_ptr_dont_use() const { return _value; }
+	_FORCE_INLINE_ static RequiredResult<T> _err_return_dont_use() { return RequiredResult<T>(); }
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult(const RequiredResult<T_Other> &p_other) :
+			_value(p_other._value) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult &operator=(const RequiredResult<T_Other> &p_other) {
+		_value = p_other._value;
+		return *this;
+	}
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult(T_Other *p_ptr) :
+			_value(p_ptr) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult &operator=(T_Other *p_ptr) {
+		_value = p_ptr;
+		return *this;
+	}
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult(const Ref<T_Other> &p_ref) :
+			_value(p_ref) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult &operator=(const Ref<T_Other> &p_ref) {
+		_value = p_ref;
+		return *this;
+	}
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult(Ref<T_Other> &&p_ref) :
+			_value(std::move(p_ref)) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredResult &operator=(Ref<T_Other> &&p_ref) {
+		_value = std::move(p_ref);
+		return &this;
+	}
+
+	template <typename U = T, std::enable_if_t<std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredResult(const Variant &p_variant) :
+			_value(Object::cast_to<T>(p_variant.get_validated_object())) {}
+	template <typename U = T, std::enable_if_t<std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredResult &operator=(const Variant &p_variant) {
+		_value = Object::cast_to<T>(p_variant.get_validated_object());
+		return *this;
+	}
+
+	template <typename U = T, std::enable_if_t<!std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredResult(const Variant &p_variant) :
+			_value(Object::cast_to<T>(p_variant.operator Object *())) {}
+	template <typename U = T, std::enable_if_t<!std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredResult &operator=(const Variant &p_variant) {
+		_value = Object::cast_to<T>(p_variant.operator Object *());
+		return *this;
+	}
+
+	template <typename U = T, std::enable_if_t<std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ element_type *ptr() const {
+		return *_value;
+	}
+
+	template <typename U = T, std::enable_if_t<!std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ element_type *ptr() const {
+		return _value;
+	}
+
+	_FORCE_INLINE_ operator ptr_type() const {
+		return _value;
+	}
+
+	template <typename U = T, typename T_Other, std::enable_if_t<std::is_base_of_v<RefCounted, U> && std::is_base_of_v<U, T_Other>, int> = 0>
+	_FORCE_INLINE_ operator Ref<T_Other>() const {
+		return Ref<T_Other>(_value);
+	}
+
+	_FORCE_INLINE_ element_type *operator*() const {
+		return ptr();
+	}
+
+	_FORCE_INLINE_ element_type *operator->() const {
+		return ptr();
+	}
+};
+
+// Using `RequiredParam<T>` as an argument type indicates that passing null as that parameter is an error,
+// that will prevent the method from doing its intended function.
+// This allows GDExtension bindings to use language-specific mechanisms to prevent users from passing null,
+// because it is never valid to do so.
+template <typename T>
+class RequiredParam {
+	static_assert(!is_fully_defined_v<T> || std::is_base_of_v<Object, T>, "T must be an Object subtype");
+
+public:
+	static constexpr bool is_ref = std::is_base_of_v<RefCounted, T>;
+
+	using element_type = T;
+	using extracted_type = std::conditional_t<is_ref, const Ref<T> &, T *>;
+	using persistent_type = std::conditional_t<is_ref, Ref<T>, T *>;
+
+private:
+	T *_value = nullptr;
+
+	_FORCE_INLINE_ RequiredParam() = default;
+
+public:
+	// These functions should not be called directly, they are only for internal use.
+	_FORCE_INLINE_ extracted_type _internal_ptr_dont_use() const {
+		if constexpr (is_ref) {
+			// Pretend _value is a Ref, for ease of use with existing `const Ref &` accepting APIs.
+			// This only works as long as Ref is internally T *.
+			// The double indirection should be optimized away by the compiler.
+			static_assert(sizeof(Ref<T>) == sizeof(T *));
+			return *((const Ref<T> *)&_value);
+		} else {
+			return _value;
+		}
+	}
+	_FORCE_INLINE_ bool _is_null_dont_use() const { return _value == nullptr; }
+	_FORCE_INLINE_ static RequiredParam<T> _err_return_dont_use() { return RequiredParam<T>(); }
+
+	// Prevent erroneously assigning null values by explicitly removing nullptr constructor/assignment.
+	RequiredParam(std::nullptr_t) = delete;
+	RequiredParam &operator=(std::nullptr_t) = delete;
+
+	RequiredParam(const RequiredParam &p_other) = default;
+	RequiredParam(RequiredParam &&p_other) = default;
+	RequiredParam &operator=(const RequiredParam &p_other) = default;
+	RequiredParam &operator=(RequiredParam &&p_other) = default;
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredParam(const RequiredParam<T_Other> &p_other) :
+			_value(p_other._internal_ptr_dont_use()) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredParam &operator=(const RequiredParam<T_Other> &p_other) {
+		_value = p_other._internal_ptr_dont_use();
+		return *this;
+	}
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredParam(T_Other *p_ptr) :
+			_value(p_ptr) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredParam &operator=(T_Other *p_ptr) {
+		_value = p_ptr;
+		return *this;
+	}
+
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredParam(const Ref<T_Other> &p_ref) :
+			_value(*p_ref) {}
+	template <typename T_Other, std::enable_if_t<std::is_base_of_v<T, T_Other>, int> = 0>
+	_FORCE_INLINE_ RequiredParam &operator=(const Ref<T_Other> &p_ref) {
+		_value = *p_ref;
+		return *this;
+	}
+
+	template <typename U = T, std::enable_if_t<std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredParam(const Variant &p_variant) :
+			_value(Object::cast_to<T>(p_variant.get_validated_object())) {}
+	template <typename U = T, std::enable_if_t<std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredParam &operator=(const Variant &p_variant) {
+		_value = Object::cast_to<T>(p_variant.get_validated_object());
+		return *this;
+	}
+
+	template <typename U = T, std::enable_if_t<!std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredParam(const Variant &p_variant) :
+			_value(Object::cast_to<T>(p_variant.operator Object *())) {}
+	template <typename U = T, std::enable_if_t<!std::is_base_of_v<RefCounted, U>, int> = 0>
+	_FORCE_INLINE_ RequiredParam &operator=(const Variant &p_variant) {
+		_value = Object::cast_to<T>(p_variant.operator Object *());
+		return *this;
+	}
+};
+
+#define TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, m_retval, m_msg, m_editor)                                                 \
+	if (unlikely(m_param._is_null_dont_use())) {                                                                               \
+		_err_print_error(FUNCTION_STR, __FILE__, __LINE__, "Required object \"" _STR(m_param) "\" is null.", m_msg, m_editor); \
+		return m_retval;                                                                                                       \
+	}                                                                                                                          \
+	typename std::decay_t<decltype(m_param)>::extracted_type m_name = m_param._internal_ptr_dont_use();                        \
+	static_assert(true)
+
+// These macros are equivalent to the ERR_FAIL_NULL*() family of macros, only for RequiredParam<T> instead of raw pointers.
+#define EXTRACT_PARAM_OR_FAIL(m_name, m_param) TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, void(), "", false)
+#define EXTRACT_PARAM_OR_FAIL_MSG(m_name, m_param, m_msg) TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, void(), m_msg, false)
+#define EXTRACT_PARAM_OR_FAIL_EDMSG(m_name, m_param, m_msg) TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, void(), m_msg, true)
+#define EXTRACT_PARAM_OR_FAIL_V(m_name, m_param, m_retval) TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, m_retval, "", false)
+#define EXTRACT_PARAM_OR_FAIL_V_MSG(m_name, m_param, m_retval, m_msg) TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, m_retval, m_msg, false)
+#define EXTRACT_PARAM_OR_FAIL_V_EDMSG(m_name, m_param, m_retval, m_msg) TMPL_EXTRACT_PARAM_OR_FAIL(m_name, m_param, m_retval, m_msg, true)

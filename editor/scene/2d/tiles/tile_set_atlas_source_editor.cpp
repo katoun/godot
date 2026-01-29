@@ -45,6 +45,7 @@
 #include "scene/gui/button.h"
 #include "scene/gui/control.h"
 
+#include "core/input/input.h"
 #include "core/math/geometry_2d.h"
 #include "core/os/keyboard.h"
 
@@ -798,6 +799,7 @@ void TileSetAtlasSourceEditor::_update_tile_data_editors() {
 			ADD_TILE_DATA_EDITOR(group, vformat(TTR("Custom Data %d"), i), editor_name);
 		} else {
 			ADD_TILE_DATA_EDITOR(group, prop_name, editor_name);
+			item->set_auto_translate_mode(0, AUTO_TRANSLATE_MODE_DISABLED);
 		}
 
 		// If the type of the edited property has been changed, delete the
@@ -857,6 +859,7 @@ void TileSetAtlasSourceEditor::_update_tile_data_editors() {
 	tile_data_editor_dropdown_button->set_visible(is_visible);
 	if (tile_data_editors_tree->get_selected()) {
 		tile_data_editor_dropdown_button->set_text(tile_data_editors_tree->get_selected()->get_text(0));
+		tile_data_editor_dropdown_button->set_auto_translate_mode(tile_data_editors_tree->get_selected()->get_auto_translate_mode(0));
 	} else {
 		tile_data_editor_dropdown_button->set_text(TTR("Select a property editor"));
 	}
@@ -879,6 +882,7 @@ void TileSetAtlasSourceEditor::_update_current_tile_data_editor() {
 	} else if (tools_button_group->get_pressed_button() == tool_paint_button && tile_data_editors_tree->get_selected()) {
 		property = tile_data_editors_tree->get_selected()->get_metadata(0);
 		tile_data_editor_dropdown_button->set_text(tile_data_editors_tree->get_selected()->get_text(0));
+		tile_data_editor_dropdown_button->set_auto_translate_mode(tile_data_editors_tree->get_selected()->get_auto_translate_mode(0));
 	}
 
 	// Hide all editors but the current one.
@@ -2254,6 +2258,7 @@ void TileSetAtlasSourceEditor::init_new_atlases(const Vector<Ref<TileSetAtlasSou
 
 void TileSetAtlasSourceEditor::_update_source_texture() {
 	if (tile_set_atlas_source && tile_set_atlas_source->get_texture() == atlas_source_texture) {
+		_check_outside_tiles();
 		return;
 	}
 
@@ -2272,8 +2277,9 @@ void TileSetAtlasSourceEditor::_update_source_texture() {
 
 void TileSetAtlasSourceEditor::_check_outside_tiles() {
 	ERR_FAIL_NULL(tile_set_atlas_source);
-	outside_tiles_warning->set_visible(!read_only && tile_set_atlas_source->has_tiles_outside_texture());
-	tool_advanced_menu_button->get_popup()->set_item_disabled(tool_advanced_menu_button->get_popup()->get_item_index(ADVANCED_CLEANUP_TILES), !tile_set_atlas_source->has_tiles_outside_texture());
+	bool has_tiles_outside = tile_set_atlas_source->has_tiles_outside_texture();
+	outside_tiles_warning->set_visible(!read_only && has_tiles_outside);
+	tool_advanced_menu_button->get_popup()->set_item_disabled(tool_advanced_menu_button->get_popup()->get_item_index(ADVANCED_CLEANUP_TILES), !has_tiles_outside);
 }
 
 void TileSetAtlasSourceEditor::_cleanup_outside_tiles() {
@@ -2571,6 +2577,7 @@ TileSetAtlasSourceEditor::TileSetAtlasSourceEditor() {
 	tile_inspector->set_show_categories(false, true);
 	tile_inspector->set_use_doc_hints(true);
 	tile_inspector->set_use_folding(true);
+	tile_inspector->set_theme_type_variation("ScrollContainerSecondary");
 	tile_inspector->connect("property_selected", callable_mp(this, &TileSetAtlasSourceEditor::_inspector_property_selected));
 	middle_vbox_container->add_child(tile_inspector);
 
@@ -2586,6 +2593,7 @@ TileSetAtlasSourceEditor::TileSetAtlasSourceEditor() {
 	tile_data_editors_scroll = memnew(ScrollContainer);
 	tile_data_editors_scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
 	tile_data_editors_scroll->set_v_size_flags(SIZE_EXPAND_FILL);
+	tile_data_editors_scroll->set_theme_type_variation("ScrollContainerSecondary");
 	middle_vbox_container->add_child(tile_data_editors_scroll);
 
 	VBoxContainer *tile_data_editors_vbox = memnew(VBoxContainer);
@@ -2625,6 +2633,7 @@ TileSetAtlasSourceEditor::TileSetAtlasSourceEditor() {
 	atlas_source_inspector->set_v_size_flags(SIZE_EXPAND_FILL);
 	atlas_source_inspector->set_show_categories(false, true);
 	atlas_source_inspector->set_use_doc_hints(true);
+	atlas_source_inspector->set_theme_type_variation("ScrollContainerSecondary");
 	middle_vbox_container->add_child(atlas_source_inspector);
 
 	// -- Right side --
