@@ -61,12 +61,7 @@ void NodeComponent::_bind_methods() {
     // Editor methods - only bind the ones that can be called from GDScript
     ClassDB::bind_method(D_METHOD("_get_configuration_warnings"), &NodeComponent::_get_configuration_warnings);
     // Note: _validate_property is NOT bound because PropertyInfo is not a valid scripting type
-    
-    // Component management
-    ClassDB::bind_method(D_METHOD("get_component_by_class", "class_name"), &NodeComponent::get_component_by_class);
-    ClassDB::bind_method(D_METHOD("get_components"), &NodeComponent::get_components);
-    ClassDB::bind_method(D_METHOD("has_component", "class_name"), &NodeComponent::has_component);
-    
+
     // Signals - Simplified signal declarations
     ADD_SIGNAL(MethodInfo("enabled_changed", PropertyInfo(Variant::BOOL, "enabled")));
     ADD_SIGNAL(MethodInfo("owner_changed", PropertyInfo(Variant::OBJECT, "owner")));
@@ -74,18 +69,10 @@ void NodeComponent::_bind_methods() {
     // Properties
     ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
     ADD_PROPERTY(PropertyInfo(Variant::STRING, "component_name"), "set_component_name", "get_component_name");
-    
-    // Property groups
-    ADD_GROUP("Component", "component_");
-    ADD_GROUP("Lifecycle", "");
 }
 
 NodeComponent::NodeComponent() {
-    enabled = true;
-    owner_node = nullptr;
-    component_name = "";
-    is_ready_called = false;
-    is_in_tree = false;
+    // Member variables are already initialized with default values in header
 }
 
 NodeComponent::~NodeComponent() {
@@ -163,12 +150,10 @@ void NodeComponent::_notification(int p_what) {
 }
 
 void NodeComponent::_enter_tree() {
-    is_in_tree = true;
     // Default implementation - can be overridden in GDScript
 }
 
 void NodeComponent::_exit_tree() {
-    is_in_tree = false;
     // Default implementation - can be overridden in GDScript
 }
 
@@ -204,37 +189,6 @@ void NodeComponent::_validate_property(PropertyInfo &p_property) const {
     // Default implementation - can be overridden in GDScript
 }
 
-// Component management methods - simplified for now
-NodeComponent *NodeComponent::get_component_by_class(const StringName &p_class_name) const {
-    if (!owner_node) {
-        return nullptr;
-    }
-    
-    // We'll implement this method in Node class
-    // For now, return nullptr
-    return nullptr;
-}
-
-Array NodeComponent::get_components() const {
-    if (!owner_node) {
-        return Array();
-    }
-    
-    // We'll implement this method in Node class
-    // For now, return empty array
-    return Array();
-}
-
-bool NodeComponent::has_component(const StringName &p_class_name) const {
-    if (!owner_node) {
-        return false;
-    }
-    
-    // We'll implement this method in Node class
-    // For now, return false
-    return false;
-}
-
 // Internal methods
 void NodeComponent::_connect_to_owner() {
     if (!owner_node) {
@@ -251,7 +205,13 @@ void NodeComponent::_disconnect_from_owner() {
     if (!owner_node) {
         return;
     }
-    
+
+    // Verify the owner node still exists in the object database
+    if (!ObjectDB::get_instance(owner_node->get_instance_id())) {
+        owner_node = nullptr;
+        return;
+    }
+
     // Disconnect from owner's lifecycle signals
     if (owner_node->is_connected("ready", callable_mp(this, &NodeComponent::_on_owner_ready))) {
         owner_node->disconnect("ready", callable_mp(this, &NodeComponent::_on_owner_ready));
@@ -346,61 +306,28 @@ bool NodeComponent::is_ready() const {
 }
 
 bool NodeComponent::is_inside_tree() const {
-    return is_in_tree && owner_node && owner_node->is_inside_tree();
+    ERR_FAIL_NULL_V(owner_node, false);
+    return owner_node->is_inside_tree();
 }
 
 SceneTree *NodeComponent::get_tree() const {
-    if (!owner_node) {
-        return nullptr;
-    }
+    ERR_FAIL_NULL_V(owner_node, nullptr);
     return owner_node->get_tree();
 }
 
 Viewport *NodeComponent::get_viewport() const {
-    if (!owner_node) {
-        return nullptr;
-    }
+    ERR_FAIL_NULL_V(owner_node, nullptr);
     return owner_node->get_viewport();
 }
 
 Window *NodeComponent::get_window() const {
-    if (!owner_node) {
-        return nullptr;
-    }
+    ERR_FAIL_NULL_V(owner_node, nullptr);
     return owner_node->get_window();
-}
-
-// Signal emission helpers
-void NodeComponent::emit_signal_component(const StringName &p_signal, const Variant **p_args, int p_argcount) {
-    if (!owner_node) {
-        return;
-    }
-    
-    // Emit signal on the owner node so it can be connected to from outside
-    owner_node->emit_signalp(p_signal, p_args, p_argcount);
-}
-
-template<typename... VarArgs>
-void NodeComponent::emit_signal_component(const StringName &p_signal, VarArgs... p_args) {
-    if (!owner_node) {
-        return;
-    }
-    
-    Variant args[sizeof...(p_args) + 1] = { p_args..., Variant() };
-    const Variant *argptrs[sizeof...(p_args) + 1];
-    for (uint32_t i = 0; i < sizeof...(p_args); i++) {
-        argptrs[i] = &args[i];
-    }
-    
-    emit_signal_component(p_signal, sizeof...(p_args) == 0 ? nullptr : (const Variant **)argptrs, sizeof...(p_args));
 }
 
 // Property system integration
 void NodeComponent::_get_property_list(List<PropertyInfo> *p_list) const {
-    // Default implementation - can be overridden in GDScript
-    // Add basic properties
-    p_list->push_back(PropertyInfo(Variant::BOOL, "enabled", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT));
-    p_list->push_back(PropertyInfo(Variant::STRING, "component_name", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT));
+    // Default implementation - can be overridden in GDScript for custom properties
 }
 
 bool NodeComponent::_get(const StringName &p_name, Variant &r_ret) const {
@@ -423,18 +350,6 @@ bool NodeComponent::_set(const StringName &p_name, const Variant &p_property) {
         return true;
     }
     return false;
-}
-
-void NodeComponent::_get_property_list_component(List<PropertyInfo> *p_list) const {
-    _get_property_list(p_list);
-}
-
-bool NodeComponent::_get_component(const StringName &p_name, Variant &r_ret) const {
-    return _get(p_name, r_ret);
-}
-
-bool NodeComponent::_set_component(const StringName &p_name, const Variant &p_property) {
-    return _set(p_name, p_property);
 }
 
 // Editor integration

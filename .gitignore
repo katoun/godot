@@ -227,6 +227,9 @@ xcuserdata/
 # Zed
 .zed/
 
+# Claude Code
+.claude/
+
 ##############################
 ### Visual Studio specific ###
 ##############################

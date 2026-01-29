@@ -43,6 +43,9 @@ class ComponentInspectorPlugin : public EditorInspectorPlugin {
 	GDCLASS(ComponentInspectorPlugin, EditorInspectorPlugin);
 
 public:
+	ComponentInspectorPlugin();
+	~ComponentInspectorPlugin();
+
 	virtual bool can_handle(Object *p_object) override;
 	virtual void parse_begin(Object *p_object) override;
 	virtual bool parse_property(Object *p_object, const Variant::Type p_type, const String &p_path, const PropertyHint p_hint, const String &p_hint_text, const BitField<PropertyUsageFlags> p_usage, const bool p_wide = false) override;
@@ -59,8 +62,18 @@ private:
 	// Script section style dropdown (like Script section)
 	Button *component_button = nullptr;
 	PopupMenu *component_menu = nullptr;
+	Vector<String> available_component_scripts;
 
+	// Script property menu for each component
+	PopupMenu *component_script_menu = nullptr;
+	NodeComponent *current_script_menu_component = nullptr;
+
+	void _populate_component_menu();
+	void _find_component_scripts(const String &p_path, List<String> &r_scripts);
 	void _show_component_menu();
+	void _edit_component_script(NodeComponent *p_component);
+	void _show_component_script_menu(NodeComponent *p_component, Button *p_button);
+	void _component_script_menu_selected(int p_id);
 	void _component_menu_selected(int p_id);
 	void _component_resource_selected(const Ref<Resource> &p_resource);
 	void _component_resource_changed(const Ref<Resource> &p_resource);
@@ -74,4 +87,8 @@ private:
 	void _show_component_file_dialog();
 	void _component_file_selected(const String &p_path);
 	void _create_new_component_script(const String &p_path);
+
+	// Helper methods for component property editor
+	Panel *_create_component_header(NodeComponent *p_component, const String &p_component_name);
+	Control *_create_property_editor(NodeComponent *p_component, const PropertyInfo &p_property);
 };

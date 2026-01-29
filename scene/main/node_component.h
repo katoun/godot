@@ -47,7 +47,6 @@ protected:
     bool enabled = true;
     String component_name;
     bool is_ready_called = false;
-    bool is_in_tree = false;
     
     static void _bind_methods();
     
@@ -68,11 +67,6 @@ protected:
     void _on_owner_ready();
     void _on_owner_enter_tree();
     void _on_owner_exit_tree();
-    
-    // Property system integration
-    void _get_property_list_component(List<PropertyInfo> *p_list) const;
-    bool _get_component(const StringName &p_name, Variant &r_ret) const;
-    bool _set_component(const StringName &p_name, const Variant &p_property);
 
     // Internal editor method - not bound to scripting
     virtual void _validate_property(PropertyInfo &p_property) const;
@@ -107,24 +101,14 @@ public:
     
     // Editor integration
     virtual PackedStringArray _get_configuration_warnings() const;
-    
-    // Component management
-    NodeComponent *get_component_by_class(const StringName &p_class_name) const;
-    Array get_components() const;
-    bool has_component(const StringName &p_class_name) const;
-    
+
     // Utility methods
     bool is_ready() const;
     bool is_inside_tree() const;
     SceneTree *get_tree() const;
     Viewport *get_viewport() const;
     Window *get_window() const;
-    
-    // Signal emission helpers
-    void emit_signal_component(const StringName &p_signal, const Variant **p_args, int p_argcount);
-    template<typename... VarArgs>
-    void emit_signal_component(const StringName &p_signal, VarArgs... p_args);
-    
+
     // Editor integration
     PackedStringArray get_configuration_warnings() const;
     void validate_property(PropertyInfo &p_property) const;
