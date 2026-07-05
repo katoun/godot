@@ -3780,7 +3780,7 @@ void ScriptEditor::_on_find_in_files_result_selected(const String &fpath, int li
 			}
 			ScriptEditorNavigationMarker::get_singleton()->locate_end();
 			return;
-		} else if (fpath.has_extension("tscn")) {
+		} else if (fpath.has_extension("scn")) {
 			const PackedStringArray lines = FileAccess::get_file_as_string(fpath).split("\n");
 			if (line_number > lines.size()) {
 				ScriptEditorNavigationMarker::get_singleton()->locate_end();

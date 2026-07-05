@@ -1440,8 +1440,8 @@ void EditorAudioBuses::_drop_at_index(int p_bus, int p_index) {
 void EditorAudioBuses::_server_save() {
 	Ref<AudioBusLayout> state = AudioServer::get_singleton()->generate_bus_layout();
 	if (edited_path.is_empty()) {
-		ResourceSaver::save(state, "res://default_bus_layout.tres");
-		edited_path = ResourceUID::path_to_uid("res://default_bus_layout.tres");
+		ResourceSaver::save(state, "res://default_bus_layout.res");
+		edited_path = ResourceUID::path_to_uid("res://default_bus_layout.res");
 		ProjectSettings::get_singleton()->set_setting("audio/buses/default_bus_layout", edited_path);
 		_update_file_label();
 	} else if (!edited_path.begins_with("uid://")) {
@@ -1474,7 +1474,7 @@ void EditorAudioBuses::_save_as_layout() {
 void EditorAudioBuses::_new_layout() {
 	file_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
 	file_dialog->set_title(TTR("Location for New Layout..."));
-	file_dialog->set_current_path("new_bus_layout.tres");
+	file_dialog->set_current_path("new_bus_layout.res");
 	file_dialog->popup_file_dialog();
 	new_layout = true;
 }

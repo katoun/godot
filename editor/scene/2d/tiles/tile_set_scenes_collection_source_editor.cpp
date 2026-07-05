@@ -244,7 +244,7 @@ void TileSetScenesCollectionSourceEditor::_source_add_pressed() {
 		scene_select_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
 		scene_select_dialog->connect("file_selected", callable_mp(this, &TileSetScenesCollectionSourceEditor::_scene_file_selected));
 
-		for (const String &E : Vector<String>{ "tscn", "scn" }) {
+		for (const String &E : Vector<String>{ "scn" }) {
 			scene_select_dialog->add_filter("*." + E, E.to_upper());
 		}
 	}

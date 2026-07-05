@@ -2273,10 +2273,8 @@ void FileSystemDock::_file_option(int p_option, const Vector<String> &p_selected
 				const String resource_type = ResourceLoader::get_resource_type(fpath);
 				String external_program;
 
-				if (ClassDB::is_parent_class(resource_type, "Script") || extension == "tres" || extension == "tscn") {
+				if (ClassDB::is_parent_class(resource_type, "Script") || extension == "res" || extension == "scn") {
 					external_program = EDITOR_GET("text_editor/external/exec_path");
-				} else if (extension == "res" || extension == "scn") {
-					// Binary resources have no meaningful editor outside Godot, so just fallback to something default.
 				} else if (resource_type == "CompressedTexture2D" || resource_type == "Image") {
 					if (extension == "svg" || extension == "svgz") {
 						external_program = EDITOR_GET("filesystem/external_programs/vector_image_editor");

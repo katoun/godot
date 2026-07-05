@@ -1484,11 +1484,7 @@ void SceneImportSettingsDialog::_save_dir_callback(const String &p_path) {
 						item->set_checked(0, true);
 						name = name.validate_filename();
 						String path = p_path.path_join(name);
-						if (external_extension_type->get_selected() == 0) {
-							path += ".tres";
-						} else {
-							path += ".res";
-						}
+						path += ".res";
 
 						item->set_text(1, path);
 						if (FileAccess::exists(path)) {
@@ -1538,11 +1534,7 @@ void SceneImportSettingsDialog::_save_dir_callback(const String &p_path) {
 						item->set_checked(0, true);
 						name = name.validate_filename();
 						String path = p_path.path_join(name);
-						if (external_extension_type->get_selected() == 0) {
-							path += ".tres";
-						} else {
-							path += ".res";
-						}
+						path += ".res";
 
 						item->set_text(1, path);
 						if (FileAccess::exists(path)) {
@@ -1591,11 +1583,7 @@ void SceneImportSettingsDialog::_save_dir_callback(const String &p_path) {
 					item->set_checked(0, true);
 					name = name.validate_filename();
 					String path = p_path.path_join(name);
-					if (external_extension_type->get_selected() == 0) {
-						path += ".tres";
-					} else {
-						path += ".res";
-					}
+					path += ".res";
 
 					item->set_text(1, path);
 					if (FileAccess::exists(path)) {
@@ -1977,15 +1965,13 @@ SceneImportSettingsDialog::SceneImportSettingsDialog() {
 	extension_hb->add_child(memnew(Label(TTR("Save Extension:"))));
 	external_extension_type = memnew(OptionButton);
 	extension_hb->add_child(external_extension_type);
-	external_extension_type->add_item(TTR("Text: *.tres"));
-	external_extension_type->add_item(TTR("Binary: *.res"));
+	external_extension_type->add_item(TTR("Text: *.res"));
 	external_path_tree->set_hide_root(true);
 	add_child(save_path);
 
 	item_save_path = memnew(EditorFileDialog);
 	item_save_path->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
-	item_save_path->add_filter("*.tres", TTR("Text Resource"));
-	item_save_path->add_filter("*.res", TTR("Binary Resource"));
+	item_save_path->add_filter("*.res", TTR("Text Resource"));
 	add_child(item_save_path);
 	item_save_path->connect("file_selected", callable_mp(this, &SceneImportSettingsDialog::_save_path_changed));
 

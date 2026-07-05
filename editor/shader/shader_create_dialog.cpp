@@ -86,9 +86,6 @@ void ShaderCreateDialog::_update_language_info() {
 		}
 		shader_type_data.default_extension = EditorShaderLanguagePlugin::get_file_extension_for_index(i);
 		shader_type_data.extensions.push_back(shader_type_data.default_extension);
-		if (shader_type_data.default_extension != "tres") {
-			shader_type_data.extensions.push_back("tres");
-		}
 		shader_type_data.extensions.push_back("res");
 		type_data.push_back(shader_type_data);
 	}

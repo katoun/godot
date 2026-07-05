@@ -2625,7 +2625,7 @@ HashSet<StringName> PackedScene::get_scene_groups(const String &p_path) {
 		}
 	}
 
-	if (p_path.get_extension() == "tscn") {
+	if (p_path.get_extension() == "scn") {
 		Ref<FileAccess> scene_file = FileAccess::open(p_path, FileAccess::READ);
 		ERR_FAIL_COND_V(scene_file.is_null(), HashSet<StringName>());
 

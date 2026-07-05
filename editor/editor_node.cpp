@@ -1818,13 +1818,13 @@ void EditorNode::save_resource_in_path(const Ref<Resource> &p_resource, const St
 	editor_data.notify_resource_saved(p_resource);
 
 	if (EDITOR_GET("filesystem/on_save/warn_on_saving_large_text_resources")) {
-		if (p_path.ends_with(".tres")) {
+		if (p_path.ends_with(".res")) {
 			const int64_t file_size = FileAccess::get_size(p_path);
 			if (file_size >= LARGE_RESOURCE_WARNING_SIZE_THRESHOLD) {
 				// File is larger than 500 KiB, likely because it contains binary data serialized as Base64.
 				// This is slow to save and load, so warn the user.
 				EditorToaster::get_singleton()->popup_str(
-						vformat(TTR("The text-based resource at path \"%s\" is large on disk (%s), likely because it has embedded binary data.\nThis slows down resource saving and loading.\nConsider saving its binary subresource(s) to a binary `.res` file or saving the resource as a binary `.res` file.\nThis warning can be disabled in the Editor Settings (FileSystem > On Save > Warn on Saving Large Text Resources)."), p_path, String::humanize_size(file_size)), EditorToaster::SEVERITY_WARNING);
+						vformat(TTR("The text-based resource at path \"%s\" is large on disk (%s), likely because it has embedded binary data.\nThis slows down resource saving and loading.\nThis warning can be disabled in the Editor Settings (FileSystem > On Save > Warn on Saving Large Text Resources)."), p_path, String::humanize_size(file_size)), EditorToaster::SEVERITY_WARNING);
 			}
 		}
 	}
@@ -2579,13 +2579,13 @@ void EditorNode::_save_scene(String p_file, int idx) {
 		editor_data.set_scene_modified_time(idx, FileAccess::get_modified_time(p_file));
 
 		if (EDITOR_GET("filesystem/on_save/warn_on_saving_large_text_resources")) {
-			if (p_file.ends_with(".tscn") || p_file.ends_with(".tres")) {
+			if (p_file.ends_with(".scn") || p_file.ends_with(".res")) {
 				const int64_t file_size = FileAccess::get_size(p_file);
 				if (file_size >= LARGE_RESOURCE_WARNING_SIZE_THRESHOLD) {
 					// File is larger than 500 KiB, likely because it contains binary data serialized as Base64.
 					// This is slow to save and load, so warn the user.
 					EditorToaster::get_singleton()->popup_str(
-							vformat(TTR("The text-based scene at path \"%s\" is large on disk (%s), likely because it has embedded binary data.\nThis slows down scene saving and loading.\nConsider saving its binary subresource(s) to a binary `.res` file or saving the scene as a binary `.scn` file.\nThis warning can be disabled in the Editor Settings (FileSystem > On Save > Warn on Saving Large Text Resources)."), p_file, String::humanize_size(file_size)), EditorToaster::SEVERITY_WARNING);
+							vformat(TTR("The text-based scene at path \"%s\" is large on disk (%s), likely because it has embedded binary data.\nThis slows down scene saving and loading.\nThis warning can be disabled in the Editor Settings (FileSystem > On Save > Warn on Saving Large Text Resources)."), p_file, String::humanize_size(file_size)), EditorToaster::SEVERITY_WARNING);
 				}
 			}
 		}

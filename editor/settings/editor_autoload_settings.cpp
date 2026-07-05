@@ -366,7 +366,7 @@ void EditorAutoloadSettings::_create_script_autoload() {
 }
 
 void EditorAutoloadSettings::_create_scene_autoload() {
-	scene_file_dialog->set_current_file("new_autoload_scene.tscn");
+	scene_file_dialog->set_current_file("new_autoload_scene.scn");
 	scene_file_dialog->popup_file_dialog();
 }
 
