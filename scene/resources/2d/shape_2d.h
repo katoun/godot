@@ -34,6 +34,7 @@
 
 class Shape2D : public Resource {
 	GDCLASS(Shape2D, Resource);
+	RES_BASE_EXTENSION("shape2d");
 	OBJ_SAVE_TYPE(Shape2D);
 
 	RID shape;

@@ -34,6 +34,7 @@
 
 class ColorPalette : public Resource {
 	GDCLASS(ColorPalette, Resource)
+	RES_BASE_EXTENSION("colpalette");
 
 private:
 	PackedColorArray colors;

@@ -37,6 +37,7 @@ class Mesh;
 
 class VoxelGIData : public Resource {
 	GDCLASS(VoxelGIData, Resource);
+	RES_BASE_EXTENSION("vxgidata");
 
 	RID probe;
 

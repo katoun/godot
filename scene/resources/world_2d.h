@@ -42,6 +42,7 @@ struct SpatialIndexer2D;
 
 class World2D : public Resource {
 	GDCLASS(World2D, Resource);
+	RES_BASE_EXTENSION("world");
 
 	RID canvas;
 #ifndef NAVIGATION_2D_DISABLED

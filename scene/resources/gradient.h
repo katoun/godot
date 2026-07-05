@@ -36,6 +36,7 @@
 
 class Gradient : public Resource {
 	GDCLASS(Gradient, Resource);
+	RES_BASE_EXTENSION("gradient");
 	OBJ_SAVE_TYPE(Gradient);
 
 public:

@@ -34,6 +34,7 @@
 
 class OccluderPolygon2D : public Resource {
 	GDCLASS(OccluderPolygon2D, Resource);
+	RES_BASE_EXTENSION("occ2d");
 
 public:
 	enum CullMode {

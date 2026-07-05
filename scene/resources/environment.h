@@ -37,6 +37,7 @@ class Sky;
 
 class Environment : public Resource {
 	GDCLASS(Environment, Resource);
+	RES_BASE_EXTENSION("env");
 
 public:
 	enum BGMode {

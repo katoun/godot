@@ -114,6 +114,7 @@ union TileMapCell {
 
 class TileMapPattern : public Resource {
 	GDCLASS(TileMapPattern, Resource);
+	RES_BASE_EXTENSION("tilepat");
 
 	Size2i size;
 	HashMap<Vector2i, TileMapCell> pattern;
@@ -148,6 +149,7 @@ public:
 
 class TileSet : public Resource {
 	GDCLASS(TileSet, Resource);
+	RES_BASE_EXTENSION("tileset");
 
 #ifndef DISABLE_DEPRECATED
 private:

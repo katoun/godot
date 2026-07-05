@@ -40,6 +40,7 @@ class Bone2D;
 
 class SkeletonModification2D : public Resource {
 	GDCLASS(SkeletonModification2D, Resource);
+	RES_BASE_EXTENSION("skeletonmod2d");
 	friend class Skeleton2D;
 	friend class Bone2D;
 

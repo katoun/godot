@@ -51,6 +51,7 @@ struct Transform2D;
 
 class InputEvent : public Resource {
 	GDCLASS(InputEvent, Resource);
+	RES_BASE_EXTENSION("inputevent");
 
 	int device = 0;
 

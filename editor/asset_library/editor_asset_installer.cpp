@@ -656,7 +656,6 @@ void EditorAssetInstaller::_notification(int p_what) {
 				extension_icon_map["mp3"] = get_editor_theme_icon(SNAME("AudioStreamMP3"));
 
 				extension_icon_map["scn"] = get_editor_theme_icon(SNAME("PackedScene"));
-				extension_icon_map["tscn"] = get_editor_theme_icon(SNAME("PackedScene"));
 				extension_icon_map["escn"] = get_editor_theme_icon(SNAME("PackedScene"));
 				extension_icon_map["dae"] = get_editor_theme_icon(SNAME("PackedScene"));
 				extension_icon_map["gltf"] = get_editor_theme_icon(SNAME("PackedScene"));
@@ -673,19 +672,7 @@ void EditorAssetInstaller::_notification(int p_what) {
 				}
 
 				extension_icon_map["res"] = get_editor_theme_icon(SNAME("Resource"));
-				extension_icon_map["tres"] = get_editor_theme_icon(SNAME("Resource"));
-				extension_icon_map["anim"] = get_editor_theme_icon(SNAME("Animation"));
-				extension_icon_map["animlib"] = get_editor_theme_icon(SNAME("AnimationLibrary"));
-				extension_icon_map["atlastex"] = get_editor_theme_icon(SNAME("AtlasTexture"));
-				extension_icon_map["img"] = get_editor_theme_icon(SNAME("Image"));
-				extension_icon_map["mat"] = get_editor_theme_icon(SNAME("Material"));
-				extension_icon_map["mesh"] = get_editor_theme_icon(SNAME("Mesh"));
-				extension_icon_map["meshlib"] = get_editor_theme_icon(SNAME("MeshLibrary"));
-				extension_icon_map["navmesh"] = get_editor_theme_icon(SNAME("NavigationMesh"));
-				extension_icon_map["skin"] = get_editor_theme_icon(SNAME("Skin"));
-				extension_icon_map["spriteframes"] = get_editor_theme_icon(SNAME("SpriteFrames"));
-				extension_icon_map["tex"] = get_editor_theme_icon(SNAME("Texture2D"));
-				extension_icon_map["theme"] = get_editor_theme_icon(SNAME("Theme"));
+	
 				// By default, OBJ files are imported as Mesh resources rather than PackedScenes.
 				extension_icon_map["obj"] = get_editor_theme_icon(SNAME("MeshItem"));
 

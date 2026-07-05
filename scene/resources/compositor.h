@@ -38,6 +38,7 @@
 
 class CompositorEffect : public Resource {
 	GDCLASS(CompositorEffect, Resource);
+	RES_BASE_EXTENSION("compositorfx");
 
 public:
 	enum EffectCallbackType {
@@ -102,6 +103,7 @@ VARIANT_ENUM_CAST(CompositorEffect::EffectCallbackType)
 
 class Compositor : public Resource {
 	GDCLASS(Compositor, Resource);
+	RES_BASE_EXTENSION("compositor");
 
 private:
 	RID compositor;

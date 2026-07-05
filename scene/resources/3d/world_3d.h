@@ -45,6 +45,7 @@ struct SpatialIndexer;
 
 class World3D : public Resource {
 	GDCLASS(World3D, Resource);
+	RES_BASE_EXTENSION("world");
 
 private:
 	RID scenario;

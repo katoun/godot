@@ -35,6 +35,7 @@
 
 class Sky : public Resource {
 	GDCLASS(Sky, Resource);
+	RES_BASE_EXTENSION("sky");
 
 public:
 	enum RadianceSize {

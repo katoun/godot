@@ -34,6 +34,7 @@
 
 class BoneMap : public Resource {
 	GDCLASS(BoneMap, Resource);
+	RES_BASE_EXTENSION("bonemap");
 
 	Ref<SkeletonProfile> profile;
 	HashMap<StringName, StringName> bone_map;

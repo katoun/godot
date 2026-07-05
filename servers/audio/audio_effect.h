@@ -50,6 +50,7 @@ public:
 
 class AudioEffect : public Resource {
 	GDCLASS(AudioEffect, Resource);
+	RES_BASE_EXTENSION("audiofx");
 
 protected:
 	GDVIRTUAL0R_REQUIRED(Ref<AudioEffectInstance>, _instantiate)

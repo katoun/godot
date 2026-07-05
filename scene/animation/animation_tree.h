@@ -47,6 +47,7 @@ struct AnimationNodeInstance;
 
 class AnimationNode : public Resource {
 	GDCLASS(AnimationNode, Resource);
+	RES_BASE_EXTENSION("animnode");
 
 public:
 	friend class AnimationTree;
