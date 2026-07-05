@@ -36,6 +36,7 @@ static const float SPRITE_FRAME_MINIMUM_DURATION = 0.01;
 
 class SpriteFrames : public Resource {
 	GDCLASS(SpriteFrames, Resource);
+	RES_BASE_EXTENSION("spriteframes")
 
 public:
 	enum LoopMode {

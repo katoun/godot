@@ -37,7 +37,17 @@
 
 class Material : public Resource {
 	GDCLASS(Material, Resource);
-	RES_BASE_EXTENSION("material")
+
+public:
+	static void register_custom_data_to_otdb() {
+		Resource::_add_resource_base_extension_to_classdb("mat", get_class_static());
+		Resource::_add_resource_base_extension_to_classdb("material", get_class_static());
+	}
+	virtual String get_base_extension() const override {
+		return "mat";
+	}
+
+private:
 	OBJ_SAVE_TYPE(Material);
 
 	mutable RID material;

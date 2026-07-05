@@ -919,6 +919,20 @@ void ResourceLoaderBinary::get_dependencies(Ref<FileAccess> p_f, List<String> *p
 	}
 }
 
+static bool _is_binary_resource_file(const String &p_path) {
+	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
+	if (f.is_null()) {
+		return false;
+	}
+
+	uint8_t header[4];
+	if (f->get_buffer(header, 4) != 4) {
+		return false;
+	}
+
+	return (header[0] == 'R' && header[1] == 'S' && ((header[2] == 'R' && header[3] == 'C') || (header[2] == 'C' && header[3] == 'C')));
+}
+
 void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p_keep_uuid_paths) {
 	error = OK;
 
@@ -1191,43 +1205,22 @@ Ref<Resource> ResourceFormatLoaderBinary::load(const String &p_path, const Strin
 	return loader.resource;
 }
 
+bool ResourceFormatLoaderBinary::recognize_path(const String &p_path, const String &p_for_type) const {
+	if (!ResourceFormatLoader::recognize_path(p_path, p_for_type)) {
+		return false;
+	}
+
+	return _is_binary_resource_file(p_path);
+}
+
 void ResourceFormatLoaderBinary::get_recognized_extensions_for_type(const String &p_type, List<String> *p_extensions) const {
-	if (p_type.is_empty()) {
-		get_recognized_extensions(p_extensions);
-		return;
-	}
-
-	// res files not supported for GDExtension.
-	if (p_type == "GDExtension") {
-		return;
-	}
-
-	List<String> extensions;
-	ClassDB::get_extensions_for_type(p_type, &extensions);
-
-	extensions.sort();
-
-	for (const String &E : extensions) {
-		String ext = E.to_lower();
-		if (ext == "res" || ext == "scn") {
-			continue;
-		}
-		p_extensions->push_back(ext);
-	}
+	// Binary generic resources are legacy-only in this fork. Dedicated resource
+	// extensions are owned by the text resource format.
 }
 
 void ResourceFormatLoaderBinary::get_recognized_extensions(List<String> *p_extensions) const {
-	List<String> extensions;
-	ClassDB::get_resource_base_extensions(&extensions);
-	extensions.sort();
-
-	for (const String &E : extensions) {
-		String ext = E.to_lower();
-		if (ext == "res" || ext == "scn") {
-			continue;
-		}
-		p_extensions->push_back(ext);
-	}
+	// Binary generic resources are legacy-only in this fork. Dedicated resource
+	// extensions are owned by the text resource format.
 }
 
 bool ResourceFormatLoaderBinary::handles_type(const String &p_type) const {
@@ -1501,6 +1494,10 @@ void ResourceFormatLoaderBinary::get_classes_used(const String &p_path, HashSet<
 }
 
 String ResourceFormatLoaderBinary::get_resource_type(const String &p_path) const {
+	if (!_is_binary_resource_file(p_path)) {
+		return "";
+	}
+
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	if (f.is_null()) {
 		return ""; //could not read
@@ -1514,6 +1511,10 @@ String ResourceFormatLoaderBinary::get_resource_type(const String &p_path) const
 }
 
 String ResourceFormatLoaderBinary::get_resource_script_class(const String &p_path) const {
+	if (!_is_binary_resource_file(p_path)) {
+		return "";
+	}
+
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	if (f.is_null()) {
 		return ""; //could not read
@@ -1526,8 +1527,7 @@ String ResourceFormatLoaderBinary::get_resource_script_class(const String &p_pat
 }
 
 ResourceUID::ID ResourceFormatLoaderBinary::get_resource_uid(const String &p_path) const {
-	String ext = p_path.get_extension().to_lower();
-	if (!ClassDB::is_resource_extension(ext)) {
+	if (!_is_binary_resource_file(p_path)) {
 		return ResourceUID::INVALID_ID;
 	}
 
@@ -2480,11 +2480,8 @@ bool ResourceFormatSaverBinary::recognize(const Ref<Resource> &p_resource) const
 }
 
 void ResourceFormatSaverBinary::get_recognized_extensions(const Ref<Resource> &p_resource, List<String> *p_extensions) const {
-	String base = p_resource->get_base_extension().to_lower();
-	if (base == "res" || base == "scn") {
-		return;
-	}
-	p_extensions->push_back(base);
+	// Binary generic resources are legacy-only in this fork. Dedicated resource
+	// extensions are owned by the text resource format.
 }
 
 ResourceFormatSaverBinary::ResourceFormatSaverBinary() {

@@ -36,6 +36,7 @@
 
 class Texture : public Resource {
 	GDCLASS(Texture, Resource);
+	RES_BASE_EXTENSION("tex")
 };
 
 class Texture2D : public Texture {

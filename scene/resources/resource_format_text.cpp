@@ -1475,6 +1475,24 @@ Ref<Resource> ResourceFormatLoaderText::load(const String &p_path, const String 
 	}
 }
 
+bool ResourceFormatLoaderText::recognize_path(const String &p_path, const String &p_for_type) const {
+	if (!ResourceFormatLoader::recognize_path(p_path, p_for_type)) {
+		return false;
+	}
+
+	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
+	if (f.is_null()) {
+		return true;
+	}
+
+	uint8_t header[4];
+	if (f->get_buffer(header, 4) != 4) {
+		return true;
+	}
+
+	return !(header[0] == 'R' && header[1] == 'S' && ((header[2] == 'R' && header[3] == 'C') || (header[2] == 'C' && header[3] == 'C')));
+}
+
 void ResourceFormatLoaderText::get_recognized_extensions_for_type(const String &p_type, List<String> *p_extensions) const {
 	if (p_type.is_empty()) {
 		get_recognized_extensions(p_extensions);
@@ -1485,6 +1503,19 @@ void ResourceFormatLoaderText::get_recognized_extensions_for_type(const String &
 		p_extensions->push_back("scn");
 	}
 
+	List<String> extensions;
+	ClassDB::get_extensions_for_type(p_type, &extensions);
+
+	extensions.sort();
+
+	for (const String &E : extensions) {
+		String ext = E.to_lower();
+		if (ext == "res" || ext == "scn") {
+			continue;
+		}
+		p_extensions->push_back(ext);
+	}
+
 	// Don't allow .res for PackedScenes or GDExtension.
 	if (p_type != "PackedScene" && p_type != "GDExtension") {
 		p_extensions->push_back("res");
@@ -1493,6 +1524,17 @@ void ResourceFormatLoaderText::get_recognized_extensions_for_type(const String &
 
 void ResourceFormatLoaderText::get_recognized_extensions(List<String> *p_extensions) const {
 	p_extensions->push_back("scn");
+	List<String> extensions;
+	ClassDB::get_resource_base_extensions(&extensions);
+	extensions.sort();
+
+	for (const String &E : extensions) {
+		String ext = E.to_lower();
+		if (ext == "res" || ext == "scn") {
+			continue;
+		}
+		p_extensions->push_back(ext);
+	}
 	p_extensions->push_back("res");
 }
 
@@ -1524,7 +1566,7 @@ String ResourceFormatLoaderText::get_resource_type(const String &p_path) const {
 	const String ext = p_path.get_extension().to_lower();
 	if (ext == "scn") {
 		return "PackedScene";
-	} else if (ext != "res") {
+	} else if (ext != "res" && !ClassDB::is_resource_extension(ext)) {
 		return String();
 	}
 
@@ -2203,7 +2245,8 @@ Error ResourceFormatSaverText::save(const Ref<Resource> &p_resource, const Strin
 
 Error ResourceFormatSaverText::set_uid(const String &p_path, ResourceUID::ID p_uid) {
 	String lc = p_path.to_lower();
-	if (!lc.ends_with(".scn") && !lc.ends_with(".res")) {
+	const String ext = lc.get_extension();
+	if (ext != "scn" && ext != "res" && !ClassDB::is_resource_extension(ext)) {
 		return ERR_FILE_UNRECOGNIZED;
 	}
 
@@ -2238,6 +2281,10 @@ void ResourceFormatSaverText::get_recognized_extensions(const Ref<Resource> &p_r
 	if (Ref<PackedScene>(p_resource).is_valid()) {
 		p_extensions->push_back("scn"); // Text scene.
 	} else {
+		String base = p_resource->get_base_extension().to_lower();
+		if (base != "res" && base != "scn") {
+			p_extensions->push_back(base);
+		}
 		p_extensions->push_back("res"); // Text resource.
 	}
 }

@@ -49,6 +49,7 @@ class MeshConvexDecompositionSettings;
 
 class Mesh : public Resource {
 	GDCLASS(Mesh, Resource);
+	RES_BASE_EXTENSION("mesh")
 
 	mutable Ref<TriangleMesh> triangle_mesh; //cached
 	mutable Vector<Ref<TriangleMesh>> surface_triangle_meshes; //cached

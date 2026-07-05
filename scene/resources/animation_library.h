@@ -36,6 +36,7 @@
 
 class AnimationLibrary : public Resource {
 	GDCLASS(AnimationLibrary, Resource)
+	RES_BASE_EXTENSION("animlib")
 
 	void _set_data(const Dictionary &p_data);
 	Dictionary _get_data() const;

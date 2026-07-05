@@ -36,6 +36,8 @@
 
 class NavigationMesh : public Resource {
 	GDCLASS(NavigationMesh, Resource);
+	RES_BASE_EXTENSION("navmesh")
+
 	RWLock rwlock;
 
 	Vector<Vector3> vertices;

@@ -34,6 +34,7 @@
 
 class Skin : public Resource {
 	GDCLASS(Skin, Resource)
+	RES_BASE_EXTENSION("skin")
 
 	struct Bind {
 		int bone = -1;

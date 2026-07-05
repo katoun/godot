@@ -46,6 +46,7 @@
 
 class ImporterMesh : public Resource {
 	GDCLASS(ImporterMesh, Resource)
+	RES_BASE_EXTENSION("mesh")
 
 	struct Surface {
 		Mesh::PrimitiveType primitive;
