@@ -92,7 +92,7 @@ func _init():
 }
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-TEST_CASE("[Modules][GDScript] Baseline JIT preserves Variant frame semantics") {
+TEST_CASE("[Modules][GDScript] Baseline JIT unboxes primitive frames and calls") {
 	GDScriptLanguage::get_singleton()->init();
 	Ref<GDScript> gdscript = memnew(GDScript);
 	gdscript->set_source_code(R"(
@@ -134,6 +134,22 @@ func float_not_equal(left: float, right: float) -> bool:
 func float_less(left: float, right: float) -> bool:
 	return left < right
 
+func mixed_signature(integer: int, scalar: float, enabled: bool) -> float:
+	var adjusted: int = integer + 2
+	var result: float = scalar * 2.0
+	if enabled:
+		result += 1.0
+	if adjusted < 0:
+		result = -result
+	return result
+
+func no_arguments() -> int:
+	var value: int = 40
+	return value + 2
+
+func call_mixed_signature() -> float:
+	return mixed_signature(4, 1.5, true)
+
 func interpreter_fallback(value: int) -> String:
 	return str(value)
 )");
@@ -144,11 +160,15 @@ func interpreter_fallback(value: int) -> String:
 	REQUIRE_MESSAGE(error == OK, "The baseline JIT test script should parse successfully.");
 
 	const HashMap<StringName, GDScriptFunction *> &functions = gdscript->get_member_functions();
-	for (const StringName &function_name : { SNAME("integer_math"), SNAME("float_math"), SNAME("bool_branch"), SNAME("wide_integer"), SNAME("float_not_equal"), SNAME("float_less") }) {
+	for (const StringName &function_name : { SNAME("integer_math"), SNAME("float_math"), SNAME("bool_branch"), SNAME("wide_integer"), SNAME("float_not_equal"), SNAME("float_less"), SNAME("mixed_signature"), SNAME("no_arguments") }) {
 		const GDScriptFunction *const *function = functions.getptr(function_name);
 		REQUIRE_MESSAGE(function != nullptr, "The expected test function should be compiled.");
 		CHECK_MESSAGE((*function)->has_baseline_jit(), vformat("Function '%s' should have baseline native code.", function_name));
+		CHECK_MESSAGE((*function)->has_typed_baseline_jit(), vformat("Function '%s' should expose the primitive typed entry.", function_name));
 	}
+	const GDScriptFunction *const *script_call_function = functions.getptr(SNAME("call_mixed_signature"));
+	REQUIRE(script_call_function != nullptr);
+	CHECK_FALSE_MESSAGE((*script_call_function)->has_baseline_jit(), "The caller's dynamic dispatch opcode should stay in the interpreter.");
 	const GDScriptFunction *const *fallback_function = functions.getptr(SNAME("interpreter_fallback"));
 	REQUIRE(fallback_function != nullptr);
 	CHECK_FALSE_MESSAGE((*fallback_function)->has_baseline_jit(), "Unsupported bytecode should keep the function on the interpreter.");
@@ -162,7 +182,26 @@ func interpreter_fallback(value: int) -> String:
 	CHECK(int64_t(ref_counted->call(SNAME("wide_integer"), 5'000'000'000)) == 9'000'000'000);
 	CHECK(bool(ref_counted->call(SNAME("float_not_equal"), Math::NaN, 1.0)));
 	CHECK_FALSE(bool(ref_counted->call(SNAME("float_less"), Math::NaN, 1.0)));
+	CHECK(Math::is_equal_approx(double(ref_counted->call(SNAME("mixed_signature"), 4, 1.5, true)), 4.0));
+	CHECK(int64_t(ref_counted->call(SNAME("no_arguments"))) == 42);
+	CHECK(Math::is_equal_approx(double(ref_counted->call(SNAME("call_mixed_signature"))), 4.0));
+	// A strictly convertible argument cannot use the raw typed entry, but the
+	// Variant-frame entry still executes the function with unboxed native locals.
+	CHECK(int64_t(ref_counted->call(SNAME("wide_integer"), 5'000'000'000.0)) == 9'000'000'000);
 	CHECK(String(ref_counted->call(SNAME("interpreter_fallback"), 42)) == "42");
+
+	Ref<GDScript> reload_script = memnew(GDScript);
+	reload_script->set_source_code("extends RefCounted\nfunc increment(value: int) -> int:\n\treturn value + 1\n");
+	REQUIRE(reload_script->reload() == OK);
+	Ref<RefCounted> reload_instance = memnew(RefCounted);
+	reload_instance->set_script(reload_script);
+	CHECK(int64_t(reload_instance->call(SNAME("increment"), 40)) == 41);
+	reload_script->set_source_code("extends RefCounted\nfunc increment(value: int) -> int:\n\treturn value + 2\n");
+	REQUIRE(reload_script->reload(true) == OK);
+	const GDScriptFunction *const *reloaded_function = reload_script->get_member_functions().getptr(SNAME("increment"));
+	REQUIRE(reloaded_function != nullptr);
+	CHECK((*reloaded_function)->has_typed_baseline_jit());
+	CHECK(int64_t(reload_instance->call(SNAME("increment"), 40)) == 42);
 }
 #endif // GDSCRIPT_BASELINE_JIT_ENABLED
 

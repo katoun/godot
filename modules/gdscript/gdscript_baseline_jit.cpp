@@ -61,11 +61,22 @@ class BaselineCompiler {
 	int code_size = 0;
 	int stack_size = 0;
 	int constant_count = 0;
+	const Variant *constants = nullptr;
+	Vector<Variant::Type> argument_types;
+	Variant::Type return_type = Variant::NIL;
 	struct sljit_compiler *compiler = nullptr;
 	Vector<struct sljit_label *> labels;
 	Vector<PendingJump> pending_jumps;
+	Vector<Variant::Type> stack_slot_types;
+	Vector<sljit_sw> stack_slot_offsets;
+	bool typed_entry = false;
 	sljit_sw variant_type_offset = 0;
 	sljit_sw variant_data_offset = 0;
+	sljit_s32 native_frame_size = 0;
+
+	static bool is_unboxed_type(Variant::Type p_type) {
+		return p_type == Variant::BOOL || p_type == Variant::INT || p_type == Variant::FLOAT;
+	}
 
 	static bool is_comparison(Variant::Operator p_operator) {
 		return p_operator >= Variant::OP_EQUAL && p_operator <= Variant::OP_GREATER_EQUAL;
@@ -134,10 +145,31 @@ class BaselineCompiler {
 		return false;
 	}
 
-	bool validate() const {
+	bool mark_address_type(int p_address, Variant::Type p_type) {
+		if (!is_unboxed_type(p_type) || !is_valid_address(p_address)) {
+			return false;
+		}
+
+		int address_type = (p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+		int address_index = p_address & GDScriptFunction::ADDR_MASK;
+		if (address_type == GDScriptFunction::ADDR_TYPE_CONSTANT) {
+			return constants != nullptr && constants[address_index].get_type() == p_type;
+		}
+
+		Variant::Type &slot_type = stack_slot_types.write[address_index];
+		if (slot_type != Variant::NIL && slot_type != p_type) {
+			return false;
+		}
+		slot_type = p_type;
+		return true;
+	}
+
+	bool validate() {
 		if (!code || code_size <= 0) {
 			return false;
 		}
+		stack_slot_types.resize(stack_size);
+		stack_slot_types.fill(Variant::NIL);
 
 		Vector<uint8_t> boundaries;
 		boundaries.resize(code_size + 1);
@@ -151,18 +183,27 @@ class BaselineCompiler {
 			switch (opcode) {
 				case GDScriptFunction::OPCODE_ASSIGN_BOOL:
 				case GDScriptFunction::OPCODE_ASSIGN_INT:
-				case GDScriptFunction::OPCODE_ASSIGN_FLOAT:
+				case GDScriptFunction::OPCODE_ASSIGN_FLOAT: {
 					if (ip + 3 > code_size || !is_valid_address(code[ip + 1], true) || !is_valid_address(code[ip + 2])) {
 						return false;
 					}
+					Variant::Type type = opcode == GDScriptFunction::OPCODE_ASSIGN_BOOL ? Variant::BOOL : (opcode == GDScriptFunction::OPCODE_ASSIGN_INT ? Variant::INT : Variant::FLOAT);
+					if (!mark_address_type(code[ip + 1], type) || !mark_address_type(code[ip + 2], type)) {
+						return false;
+					}
 					ip += 3;
-					break;
+				} break;
 				case GDScriptFunction::OPCODE_OPERATOR_INT: {
 					if (ip + 5 > code_size || !is_valid_address(code[ip + 1]) || !is_valid_address(code[ip + 3], true)) {
 						return false;
 					}
 					Variant::Operator op = Variant::Operator(code[ip + 4]);
 					if (!is_supported_int_operator(op) || (op != Variant::OP_NEGATE && op != Variant::OP_POSITIVE && op != Variant::OP_BIT_NEGATE && !is_valid_address(code[ip + 2]))) {
+						return false;
+					}
+					if (!mark_address_type(code[ip + 1], Variant::INT) ||
+							(op != Variant::OP_NEGATE && op != Variant::OP_POSITIVE && op != Variant::OP_BIT_NEGATE && !mark_address_type(code[ip + 2], Variant::INT)) ||
+							!mark_address_type(code[ip + 3], is_comparison(op) ? Variant::BOOL : Variant::INT)) {
 						return false;
 					}
 					has_native_work = true;
@@ -176,12 +217,21 @@ class BaselineCompiler {
 					if (!is_supported_float_operator(op) || (op != Variant::OP_NEGATE && op != Variant::OP_POSITIVE && !is_valid_address(code[ip + 2]))) {
 						return false;
 					}
+					if (!mark_address_type(code[ip + 1], Variant::FLOAT) ||
+							(op != Variant::OP_NEGATE && op != Variant::OP_POSITIVE && !mark_address_type(code[ip + 2], Variant::FLOAT)) ||
+							!mark_address_type(code[ip + 3], is_comparison(op) ? Variant::BOOL : Variant::FLOAT)) {
+						return false;
+					}
 					has_native_work = true;
 					ip += 5;
 				} break;
 				case GDScriptFunction::OPCODE_JUMP_COMPARE_INT:
 				case GDScriptFunction::OPCODE_JUMP_COMPARE_FLOAT: {
 					if (ip + 6 > code_size || !is_valid_address(code[ip + 1]) || !is_valid_address(code[ip + 2]) || !is_comparison(Variant::Operator(code[ip + 3]))) {
+						return false;
+					}
+					Variant::Type type = opcode == GDScriptFunction::OPCODE_JUMP_COMPARE_INT ? Variant::INT : Variant::FLOAT;
+					if (!mark_address_type(code[ip + 1], type) || !mark_address_type(code[ip + 2], type)) {
 						return false;
 					}
 					jump_targets.push_back(code[ip + 5]);
@@ -191,6 +241,9 @@ class BaselineCompiler {
 				case GDScriptFunction::OPCODE_JUMP_IF_BOOL:
 				case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
 					if (ip + 3 > code_size || !is_valid_address(code[ip + 1])) {
+						return false;
+					}
+					if (!mark_address_type(code[ip + 1], Variant::BOOL)) {
 						return false;
 					}
 					jump_targets.push_back(code[ip + 2]);
@@ -206,6 +259,9 @@ class BaselineCompiler {
 					break;
 				case GDScriptFunction::OPCODE_RETURN:
 					if (ip + 2 > code_size || !is_valid_address(code[ip + 1])) {
+						return false;
+					}
+					if (typed_entry && !mark_address_type(code[ip + 1], return_type)) {
 						return false;
 					}
 					ip += 2;
@@ -230,12 +286,39 @@ class BaselineCompiler {
 				return false;
 			}
 		}
+
+		if (typed_entry) {
+			for (int i = 0; i < argument_types.size(); i++) {
+				int stack_index = GDScriptFunction::FIXED_ADDRESSES_MAX + i;
+				if (stack_index >= stack_size || !mark_address_type(stack_index, argument_types[i])) {
+					return false;
+				}
+			}
+		}
+
+		stack_slot_offsets.resize(stack_size);
+		stack_slot_offsets.fill(-1);
+		int native_slot_count = 0;
+		for (int i = 0; i < stack_slot_types.size(); i++) {
+			if (stack_slot_types[i] != Variant::NIL) {
+				stack_slot_offsets.write[i] = native_slot_count++ * sizeof(uint64_t);
+			}
+		}
+		if (native_slot_count > SLJIT_MAX_LOCAL_SIZE / int(sizeof(uint64_t))) {
+			return false;
+		}
+		native_frame_size = native_slot_count * sizeof(uint64_t);
 		return has_native_work;
 	}
 
 	void emit_load_base(int p_address, int p_register) {
 		int address_type = (p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
-		sljit_emit_op1(compiler, SLJIT_MOV, p_register, 0, SLJIT_MEM1(SLJIT_S0), address_type * sizeof(Variant *));
+		if (address_type == GDScriptFunction::ADDR_TYPE_CONSTANT) {
+			sljit_emit_op1(compiler, SLJIT_MOV, p_register, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(constants));
+		} else {
+			DEV_ASSERT(!typed_entry);
+			sljit_emit_op1(compiler, SLJIT_MOV, p_register, 0, SLJIT_MEM1(SLJIT_S0), address_type * sizeof(Variant *));
+		}
 	}
 
 	sljit_sw get_address_offset(int p_address, sljit_sw p_field_offset) const {
@@ -243,16 +326,28 @@ class BaselineCompiler {
 	}
 
 	void emit_load_int(int p_address, int p_register) {
+		if (((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK) {
+			sljit_emit_op1(compiler, SLJIT_MOV, p_register, 0, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK]);
+			return;
+		}
 		emit_load_base(p_address, p_register);
 		sljit_emit_op1(compiler, SLJIT_MOV, p_register, 0, SLJIT_MEM1(p_register), get_address_offset(p_address, variant_data_offset));
 	}
 
 	void emit_load_bool(int p_address, int p_register) {
+		if (((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U8, p_register, 0, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK]);
+			return;
+		}
 		emit_load_base(p_address, p_register);
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, p_register, 0, SLJIT_MEM1(p_register), get_address_offset(p_address, variant_data_offset));
 	}
 
 	void emit_load_float(int p_address, int p_float_register) {
+		if (((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK) {
+			sljit_emit_fop1(compiler, SLJIT_MOV_F64, p_float_register, 0, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK]);
+			return;
+		}
 		emit_load_base(p_address, SLJIT_R2);
 		sljit_emit_fop1(compiler, SLJIT_MOV_F64, p_float_register, 0, SLJIT_MEM1(SLJIT_R2), get_address_offset(p_address, variant_data_offset));
 	}
@@ -262,19 +357,84 @@ class BaselineCompiler {
 		sljit_emit_op1(compiler, SLJIT_MOV32, SLJIT_MEM1(SLJIT_R2), get_address_offset(p_address, variant_type_offset), SLJIT_IMM, p_type);
 	}
 
-	void emit_store_int(int p_address, int p_register, Variant::Type p_type = Variant::INT) {
-		emit_store_type(p_address, p_type);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R2), get_address_offset(p_address, variant_data_offset), p_register, 0);
+	void emit_store_int(int p_address, int p_register) {
+		DEV_ASSERT(((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK], p_register, 0);
 	}
 
 	void emit_store_bool(int p_address, int p_register) {
-		emit_store_type(p_address, Variant::BOOL);
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R2), get_address_offset(p_address, variant_data_offset), p_register, 0);
+		DEV_ASSERT(((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK], p_register, 0);
 	}
 
 	void emit_store_float(int p_address, int p_float_register) {
-		emit_store_type(p_address, Variant::FLOAT);
-		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_R2), get_address_offset(p_address, variant_data_offset), p_float_register, 0);
+		DEV_ASSERT(((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK);
+		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK], p_float_register, 0);
+	}
+
+	void emit_initialize_unboxed_slots() {
+		for (int i = 0; i < stack_slot_types.size(); i++) {
+			Variant::Type type = stack_slot_types[i];
+			if (type == Variant::NIL) {
+				continue;
+			}
+
+			sljit_sw native_offset = stack_slot_offsets[i];
+			int argument_index = i - GDScriptFunction::FIXED_ADDRESSES_MAX;
+			if (argument_index >= 0 && argument_index < argument_types.size()) {
+				if (typed_entry) {
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), argument_index * sizeof(uint64_t));
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), native_offset, SLJIT_R0, 0);
+				} else {
+					emit_load_base(i, SLJIT_R0);
+					if (type == Variant::BOOL) {
+						sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), get_address_offset(i, variant_data_offset));
+					} else {
+						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), get_address_offset(i, variant_data_offset));
+					}
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), native_offset, SLJIT_R1, 0);
+				}
+				continue;
+			}
+
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), native_offset, SLJIT_IMM, 0);
+		}
+	}
+
+	void emit_spill_unboxed_slots() {
+		DEV_ASSERT(!typed_entry);
+		for (int i = 0; i < stack_slot_types.size(); i++) {
+			Variant::Type type = stack_slot_types[i];
+			if (type == Variant::NIL) {
+				continue;
+			}
+
+			emit_store_type(i, type);
+			if (type == Variant::BOOL) {
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[i]);
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R2), get_address_offset(i, variant_data_offset), SLJIT_R1, 0);
+			} else {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[i]);
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R2), get_address_offset(i, variant_data_offset), SLJIT_R1, 0);
+			}
+		}
+	}
+
+	void emit_return_value(int p_address) {
+		if (typed_entry) {
+			if (return_type == Variant::BOOL) {
+				emit_load_bool(p_address, SLJIT_R0);
+			} else {
+				// Integer values and IEEE-754 doubles both occupy one raw slot.
+				emit_load_int(p_address, SLJIT_R0);
+			}
+			sljit_emit_return(compiler, SLJIT_MOV, SLJIT_R0, 0);
+			return;
+		}
+
+		emit_spill_unboxed_slots();
+		emit_variant_pointer(p_address, SLJIT_R0);
+		sljit_emit_return(compiler, SLJIT_MOV, SLJIT_R0, 0);
 	}
 
 	void emit_variant_pointer(int p_address, int p_register) {
@@ -405,8 +565,8 @@ class BaselineCompiler {
 	}
 
 public:
-	BaselineCompiler(const int *p_code, int p_code_size, int p_stack_size, int p_constant_count) :
-			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constant_count(p_constant_count) {
+	BaselineCompiler(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, const Vector<Variant::Type> &p_argument_types, Variant::Type p_return_type, bool p_typed_entry) :
+			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constant_count(p_constant_count), constants(p_constants), argument_types(p_argument_types), return_type(p_return_type), typed_entry(p_typed_entry) {
 		Variant probe;
 		variant_type_offset = reinterpret_cast<uint8_t *>(VariantInternal::get_type_ptr(&probe)) - reinterpret_cast<uint8_t *>(&probe);
 		variant_data_offset = reinterpret_cast<uint8_t *>(VariantInternal::get_int(&probe)) - reinterpret_cast<uint8_t *>(&probe);
@@ -423,7 +583,8 @@ public:
 		}
 
 		labels.resize(code_size + 1);
-		sljit_emit_enter(compiler, 0, SLJIT_ARGS1(P, P), 3 | SLJIT_ENTER_FLOAT(2), 1, 0);
+		sljit_emit_enter(compiler, 0, typed_entry ? SLJIT_ARGS1(W, P) : SLJIT_ARGS1(P, P), 3 | SLJIT_ENTER_FLOAT(2), 1, native_frame_size);
+		emit_initialize_unboxed_slots();
 
 		int ip = 0;
 		while (ip < code_size) {
@@ -485,16 +646,18 @@ public:
 					ip += 2;
 					break;
 				case GDScriptFunction::OPCODE_RETURN:
-					emit_variant_pointer(code[ip + 1], SLJIT_R0);
-					sljit_emit_return(compiler, SLJIT_MOV, SLJIT_R0, 0);
+					emit_return_value(code[ip + 1]);
 					ip += 2;
 					break;
 				case GDScriptFunction::OPCODE_LINE:
 					ip += 2;
 					break;
 				case GDScriptFunction::OPCODE_END:
-					emit_variant_pointer(GDScriptFunction::ADDR_NIL, SLJIT_R0);
-					sljit_emit_return(compiler, SLJIT_MOV, SLJIT_R0, 0);
+					if (typed_entry) {
+						sljit_emit_return(compiler, SLJIT_MOV, SLJIT_IMM, 0);
+					} else {
+						emit_return_value(GDScriptFunction::ADDR_NIL);
+					}
 					ip += 1;
 					break;
 				default:
@@ -503,8 +666,11 @@ public:
 		}
 
 		labels.write[code_size] = sljit_emit_label(compiler);
-		emit_variant_pointer(GDScriptFunction::ADDR_NIL, SLJIT_R0);
-		sljit_emit_return(compiler, SLJIT_MOV, SLJIT_R0, 0);
+		if (typed_entry) {
+			sljit_emit_return(compiler, SLJIT_MOV, SLJIT_IMM, 0);
+		} else {
+			emit_return_value(GDScriptFunction::ADDR_NIL);
+		}
 
 		for (const PendingJump &pending : pending_jumps) {
 			sljit_set_label(pending.jump, labels[pending.target]);
@@ -522,20 +688,40 @@ public:
 
 } // namespace
 
-GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, uint64_t p_code_size) :
-		entry_point(p_entry_point), code_size(p_code_size) {
+GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type) :
+		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_return_type(p_typed_return_type) {
 }
 
 GDScriptBaselineJIT *GDScriptBaselineJIT::compile(const GDScriptFunction *p_function) {
 	ERR_FAIL_NULL_V(p_function, nullptr);
 
-	BaselineCompiler compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constant_count);
+	auto is_typed_abi_type = [](Variant::Type p_type) {
+		return p_type == Variant::BOOL || p_type == Variant::INT || p_type == Variant::FLOAT;
+	};
+	Vector<Variant::Type> typed_argument_types;
+	bool has_typed_signature = !p_function->is_vararg() && p_function->return_type.kind == GDScriptDataType::BUILTIN && is_typed_abi_type(p_function->return_type.builtin_type);
+	for (const GDScriptDataType &argument_type : p_function->argument_types) {
+		Variant::Type builtin_type = argument_type.kind == GDScriptDataType::BUILTIN && is_typed_abi_type(argument_type.builtin_type) ? argument_type.builtin_type : Variant::NIL;
+		typed_argument_types.push_back(builtin_type);
+		has_typed_signature = has_typed_signature && builtin_type != Variant::NIL;
+	}
+
+	BaselineCompiler compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, typed_argument_types, Variant::NIL, false);
 	uint64_t generated_size = 0;
 	void *generated_code = compiler.compile(generated_size);
 	if (!generated_code) {
 		return nullptr;
 	}
-	return memnew(GDScriptBaselineJIT(generated_code, generated_size));
+
+	void *typed_generated_code = nullptr;
+	if (has_typed_signature) {
+		BaselineCompiler typed_compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, typed_argument_types, p_function->return_type.builtin_type, true);
+		uint64_t typed_generated_size = 0;
+		typed_generated_code = typed_compiler.compile(typed_generated_size);
+		generated_size += typed_generated_size;
+	}
+
+	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL));
 }
 
 Variant *GDScriptBaselineJIT::execute(Variant **p_variant_addresses) const {
@@ -543,9 +729,57 @@ Variant *GDScriptBaselineJIT::execute(Variant **p_variant_addresses) const {
 	return reinterpret_cast<EntryPoint>(entry_point)(p_variant_addresses);
 }
 
+bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argument_count, Variant &r_return) const {
+	if (typed_entry_point == nullptr || p_argument_count != typed_argument_types.size()) {
+		return false;
+	}
+
+	uint64_t *raw_arguments = reinterpret_cast<uint64_t *>(alloca(MAX(1, p_argument_count) * sizeof(uint64_t)));
+	for (int i = 0; i < p_argument_count; i++) {
+		if (p_arguments[i]->get_type() != typed_argument_types[i]) {
+			return false;
+		}
+		switch (typed_argument_types[i]) {
+			case Variant::BOOL:
+				raw_arguments[i] = *VariantInternal::get_bool(p_arguments[i]);
+				break;
+			case Variant::INT:
+				raw_arguments[i] = uint64_t(*VariantInternal::get_int(p_arguments[i]));
+				break;
+			case Variant::FLOAT:
+				memcpy(&raw_arguments[i], VariantInternal::get_float(p_arguments[i]), sizeof(uint64_t));
+				break;
+			default:
+				return false;
+		}
+	}
+
+	typedef uint64_t(SLJIT_FUNC * TypedEntryPoint)(const uint64_t *);
+	const uint64_t result = reinterpret_cast<TypedEntryPoint>(typed_entry_point)(raw_arguments);
+	switch (typed_return_type) {
+		case Variant::BOOL:
+			r_return = bool(result);
+			break;
+		case Variant::INT:
+			r_return = int64_t(result);
+			break;
+		case Variant::FLOAT: {
+			double value;
+			memcpy(&value, &result, sizeof(value));
+			r_return = value;
+		} break;
+		default:
+			return false;
+	}
+	return true;
+}
+
 GDScriptBaselineJIT::~GDScriptBaselineJIT() {
 	if (entry_point) {
 		sljit_free_code(entry_point, nullptr);
+	}
+	if (typed_entry_point) {
+		sljit_free_code(typed_entry_point, nullptr);
 	}
 }
 

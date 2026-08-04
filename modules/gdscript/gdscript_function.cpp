@@ -236,6 +236,14 @@ GDScriptFunction::GDScriptFunction() {
 #endif
 }
 
+bool GDScriptFunction::has_typed_baseline_jit() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	return _baseline_jit != nullptr && _baseline_jit->has_typed_entry();
+#else
+	return false;
+#endif
+}
+
 GDScriptFunction::~GDScriptFunction() {
 	get_script()->member_functions.erase(name);
 

@@ -539,6 +539,7 @@ public:
 		return false;
 #endif
 	}
+	bool has_typed_baseline_jit() const;
 
 	Variant get_constant(int p_idx) const;
 	StringName get_global_name(int p_idx) const;

@@ -560,6 +560,20 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	}
 
 	Variant retvalue;
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	bool typed_jit_allowed = _baseline_jit != nullptr && _baseline_jit->has_typed_entry() && p_state == nullptr &&
+			p_argcount == _argument_count && !is_vararg() && !EngineDebugger::is_active() &&
+			!GDScriptLanguage::get_singleton()->should_track_call_stack();
+#ifdef DEBUG_ENABLED
+	typed_jit_allowed = typed_jit_allowed && !GDScriptLanguage::get_singleton()->profiling;
+#endif
+	if (typed_jit_allowed && _baseline_jit->execute_typed(p_args, p_argcount, retvalue)) {
+		call_depth--;
+		return retvalue;
+	}
+#endif
+
 	Variant *stack = nullptr;
 	Variant **instruction_args = nullptr;
 	int defarg = 0;

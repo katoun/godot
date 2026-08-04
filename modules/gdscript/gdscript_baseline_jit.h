@@ -31,20 +31,26 @@
 #pragma once
 
 #include "core/typedefs.h"
+#include "core/templates/vector.h"
+#include "core/variant/variant.h"
 
 class GDScriptFunction;
-class Variant;
 
 class GDScriptBaselineJIT {
 	void *entry_point = nullptr;
+	void *typed_entry_point = nullptr;
 	uint64_t code_size = 0;
+	Vector<Variant::Type> typed_argument_types;
+	Variant::Type typed_return_type = Variant::NIL;
 
-	GDScriptBaselineJIT(void *p_entry_point, uint64_t p_code_size);
+	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type);
 
 public:
 	static GDScriptBaselineJIT *compile(const GDScriptFunction *p_function);
 
 	Variant *execute(Variant **p_variant_addresses) const;
+	bool execute_typed(const Variant **p_arguments, int p_argument_count, Variant &r_return) const;
+	bool has_typed_entry() const { return typed_entry_point != nullptr; }
 	uint64_t get_code_size() const { return code_size; }
 
 	~GDScriptBaselineJIT();
