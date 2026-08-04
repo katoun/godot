@@ -429,6 +429,14 @@ private:
 	Mutex feedback_mutex;
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 	GDScriptBaselineJIT *_baseline_jit = nullptr;
+	SafeNumeric<uintptr_t> _optimizing_jit_ptr;
+	SafeNumeric<uint32_t> _jit_call_count;
+	SafeFlag _optimizing_jit_attempted;
+	Mutex _jit_mutex;
+
+	GDScriptBaselineJIT *_get_optimizing_jit() const;
+	GDScriptBaselineJIT *_get_active_jit() const;
+	void _maybe_compile_optimizing_jit();
 #endif
 
 	int _code_size = 0;
@@ -541,6 +549,11 @@ public:
 	}
 	bool has_typed_baseline_jit() const;
 	int get_baseline_jit_ptrcall_count() const;
+	bool has_optimizing_jit() const;
+	int get_optimizing_jit_ssa_node_count() const;
+	int get_optimizing_jit_eliminated_node_count() const;
+	String get_optimization_profile_key() const;
+	uint32_t get_optimization_fingerprint() const;
 
 	Variant get_constant(int p_idx) const;
 	StringName get_global_name(int p_idx) const;

@@ -33,6 +33,9 @@
 #include "gdscript.h"
 #include "gdscript_cache.h"
 #include "gdscript_parser.h"
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+#include "gdscript_optimization_profile.h"
+#endif
 #include "gdscript_resource_format.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_utility_functions.h"
@@ -95,6 +98,18 @@ protected:
 		if (preset.is_valid()) {
 			script_mode = preset->get_script_export_mode();
 		}
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+		if (!p_debug) {
+			const String profile_path = GDScriptOptimizationProfile::get_default_path();
+			if (FileAccess::exists(profile_path)) {
+				const Vector<uint8_t> profile = FileAccess::get_file_as_bytes(profile_path);
+				if (!profile.is_empty()) {
+					add_file(profile_path, profile, false);
+				}
+			}
+		}
+#endif
 	}
 
 	virtual void _export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) override {

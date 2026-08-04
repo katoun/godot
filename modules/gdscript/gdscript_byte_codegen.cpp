@@ -32,6 +32,7 @@
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 #include "gdscript_baseline_jit.h"
+#include "gdscript_optimization_profile.h"
 #endif
 
 #include "core/object/class_db.h"
@@ -416,6 +417,13 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 	function->_baseline_jit = GDScriptBaselineJIT::compile(function);
+	if (function->_baseline_jit != nullptr && GDScriptOptimizationProfile::has_hint(function->get_optimization_profile_key(), function->get_optimization_fingerprint())) {
+		function->_optimizing_jit_attempted.set();
+		GDScriptBaselineJIT *optimizing_jit = GDScriptBaselineJIT::compile_optimized(function);
+		if (optimizing_jit != nullptr) {
+			function->_optimizing_jit_ptr.set(reinterpret_cast<uintptr_t>(optimizing_jit));
+		}
+	}
 #endif
 
 #ifdef DEBUG_ENABLED

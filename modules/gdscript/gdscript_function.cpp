@@ -36,6 +36,7 @@
 #endif
 
 #include "core/object/class_db.h"
+#include "core/templates/hashfuncs.h"
 
 bool GDScriptDataType::is_type(const Variant &p_variant, bool p_allow_implicit_conversion) const {
 	switch (kind) {
@@ -252,12 +253,88 @@ int GDScriptFunction::get_baseline_jit_ptrcall_count() const {
 #endif
 }
 
+bool GDScriptFunction::has_optimizing_jit() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	return _get_optimizing_jit() != nullptr;
+#else
+	return false;
+#endif
+}
+
+int GDScriptFunction::get_optimizing_jit_ssa_node_count() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	const GDScriptBaselineJIT *jit = _get_optimizing_jit();
+	return jit != nullptr ? jit->get_ssa_node_count() : 0;
+#else
+	return 0;
+#endif
+}
+
+int GDScriptFunction::get_optimizing_jit_eliminated_node_count() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	const GDScriptBaselineJIT *jit = _get_optimizing_jit();
+	return jit != nullptr ? jit->get_eliminated_node_count() : 0;
+#else
+	return 0;
+#endif
+}
+
+String GDScriptFunction::get_optimization_profile_key() const {
+	if (source.is_empty()) {
+		return String();
+	}
+	return GDScript::canonicalize_path(source) + "::" + String::num_int64(_initial_line) + "::" + String(name);
+}
+
+uint32_t GDScriptFunction::get_optimization_fingerprint() const {
+	uint32_t fingerprint = hash_murmur3_buffer(_code_ptr, _code_size * sizeof(int));
+	for (int i = 0; i < _constant_count; i++) {
+		fingerprint = hash_murmur3_one_64(uint64_t(_constants_ptr[i].get_type()) << 32 | _constants_ptr[i].hash(), fingerprint);
+	}
+	for (const GDScriptDataType &argument_type : argument_types) {
+		fingerprint = hash_murmur3_one_64(argument_type.kind == GDScriptDataType::BUILTIN ? argument_type.builtin_type + 1 : 0, fingerprint);
+	}
+	fingerprint = hash_murmur3_one_64(return_type.kind == GDScriptDataType::BUILTIN ? return_type.builtin_type + 1 : 0, fingerprint);
+	return fingerprint;
+}
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+GDScriptBaselineJIT *GDScriptFunction::_get_optimizing_jit() const {
+	return reinterpret_cast<GDScriptBaselineJIT *>(_optimizing_jit_ptr.get());
+}
+
+GDScriptBaselineJIT *GDScriptFunction::_get_active_jit() const {
+	GDScriptBaselineJIT *optimizing_jit = _get_optimizing_jit();
+	return optimizing_jit != nullptr ? optimizing_jit : _baseline_jit;
+}
+
+void GDScriptFunction::_maybe_compile_optimizing_jit() {
+	if (_baseline_jit == nullptr || _optimizing_jit_attempted.is_set() || _jit_call_count.increment() < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD) {
+		return;
+	}
+
+	MutexLock lock(_jit_mutex);
+	if (_optimizing_jit_attempted.is_set()) {
+		return;
+	}
+	_optimizing_jit_attempted.set();
+	GDScriptBaselineJIT *optimizing_jit = GDScriptBaselineJIT::compile_optimized(this);
+	if (optimizing_jit != nullptr) {
+		_optimizing_jit_ptr.set(reinterpret_cast<uintptr_t>(optimizing_jit));
+	}
+}
+#endif
+
 GDScriptFunction::~GDScriptFunction() {
 	get_script()->member_functions.erase(name);
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 	if (_baseline_jit != nullptr) {
 		memdelete(_baseline_jit);
+	}
+	GDScriptBaselineJIT *optimizing_jit = _get_optimizing_jit();
+	if (optimizing_jit != nullptr) {
+		memdelete(optimizing_jit);
 	}
 #endif
 

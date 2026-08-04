@@ -34,6 +34,10 @@
 #include "gdscript_cache.h"
 #include "gdscript_compiler.h"
 #include "gdscript_parser.h"
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+#include "gdscript_baseline_jit.h"
+#include "gdscript_optimization_profile.h"
+#endif
 #include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_warning.h"
@@ -2311,9 +2315,41 @@ void GDScriptLanguage::profiling_set_save_native_calls(bool p_enable) {
 
 void GDScriptLanguage::profiling_stop() {
 #ifdef DEBUG_ENABLED
-	MutexLock lock(mutex);
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	Vector<GDScriptOptimizationProfile::Entry> optimization_entries;
+	const bool capture_optimization_profile = EngineDebugger::is_active();
+#endif
+	{
+		MutexLock lock(mutex);
+		profiling = false;
 
-	profiling = false;
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+		if (capture_optimization_profile) {
+			SelfList<GDScriptFunction> *elem = function_list.first();
+			while (elem) {
+				GDScriptFunction *function = elem->self();
+				const uint64_t call_count = function->profile.call_count.get();
+				if (call_count >= GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD && function->has_baseline_jit() && !function->get_optimization_profile_key().is_empty()) {
+					GDScriptOptimizationProfile::Entry entry;
+					entry.key = function->get_optimization_profile_key();
+					entry.fingerprint = function->get_optimization_fingerprint();
+					entry.call_count = call_count;
+					optimization_entries.push_back(entry);
+				}
+				elem = elem->next();
+			}
+		}
+#endif
+	}
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	if (capture_optimization_profile) {
+		const Error error = GDScriptOptimizationProfile::save(optimization_entries);
+		if (error != OK) {
+			WARN_PRINT("Could not save the GDScript optimization profile (error " + itos(error) + ").");
+		}
+	}
+#endif
 #endif
 }
 

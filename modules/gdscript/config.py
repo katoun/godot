@@ -10,7 +10,7 @@ def get_opts(platform):
     return [
         BoolVariable(
             "gdscript_baseline_jit",
-            "Enable the experimental GDScript baseline JIT compiler",
+            "Enable the experimental tiered GDScript JIT compiler",
             jit_supported,
         ),
     ]

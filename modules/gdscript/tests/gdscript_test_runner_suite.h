@@ -39,6 +39,11 @@
 #include "tests/test_macros.h"
 #include "tests/test_utils.h"
 
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+#include "../gdscript_baseline_jit.h"
+#include "../gdscript_optimization_profile.h"
+#endif
+
 #ifdef TOOLS_ENABLED
 #include "core/os/os.h"
 #endif
@@ -291,6 +296,102 @@ func native_float_roundtrip(value: float) -> float:
 	CHECK((*float_function)->get_baseline_jit_ptrcall_count() == 3);
 	CHECK(Math::is_equal_approx(double(float_instance->call(SNAME("native_float_roundtrip"), 0.375)), 0.5));
 	memdelete(float_instance);
+}
+
+TEST_CASE("[Modules][GDScript] Compact SSA JIT promotes hot functions and consumes export profiles") {
+	GDScriptLanguage::get_singleton()->init();
+	GDScriptOptimizationProfile::clear();
+
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends RefCounted
+
+func hot_integer(limit: int) -> int:
+	var index: int = 0
+	var total: int = 0
+	while index < limit:
+		var tripled: int = index * 3
+		var repeated: int = index * 3
+		var dead: int = (index + 91) * 7
+		if (index & 1) == 0:
+			total += tripled
+		else:
+			total += repeated
+		index += 1
+	return total
+
+func constant_path(value: int) -> int:
+	var folded: int = 7
+	folded *= 6
+	var condition: bool = true
+	if condition:
+		return value + folded
+	return -1
+
+func hot_native(value: bool) -> bool:
+	set_block_signals(value)
+	return is_blocking_signals()
+)");
+	REQUIRE(gdscript->reload() == OK);
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(gdscript);
+
+	const GDScriptFunction *const *hot_integer = gdscript->get_member_functions().getptr(SNAME("hot_integer"));
+	const GDScriptFunction *const *constant_path = gdscript->get_member_functions().getptr(SNAME("constant_path"));
+	const GDScriptFunction *const *hot_native = gdscript->get_member_functions().getptr(SNAME("hot_native"));
+	REQUIRE(hot_integer != nullptr);
+	REQUIRE(constant_path != nullptr);
+	REQUIRE(hot_native != nullptr);
+	CHECK_FALSE((*hot_integer)->has_optimizing_jit());
+
+	for (uint32_t i = 1; i < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		CHECK(int64_t(instance->call(SNAME("hot_integer"), 10)) == 135);
+	}
+	CHECK_FALSE((*hot_integer)->has_optimizing_jit());
+	CHECK(int64_t(instance->call(SNAME("hot_integer"), 10)) == 135);
+	CHECK((*hot_integer)->has_optimizing_jit());
+	CHECK((*hot_integer)->get_optimizing_jit_ssa_node_count() > 0);
+	CHECK((*hot_integer)->get_optimizing_jit_eliminated_node_count() >= 2);
+	// A convertible argument misses the raw entry but still uses the optimized
+	// Variant-compatible entry after normal GDScript argument conversion.
+	CHECK(int64_t(instance->call(SNAME("hot_integer"), 10.0)) == 135);
+
+	for (uint32_t i = 0; i < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		CHECK(int64_t(instance->call(SNAME("constant_path"), 5)) == 47);
+		CHECK(bool(instance->call(SNAME("hot_native"), bool(i & 1))) == bool(i & 1));
+	}
+	CHECK((*constant_path)->has_optimizing_jit());
+	CHECK((*constant_path)->get_optimizing_jit_eliminated_node_count() > 0);
+	CHECK((*hot_native)->has_optimizing_jit());
+
+	const String script_path = OS::get_singleton()->get_temp_path().path_join("gdscript_ssa_profile_source.gd");
+	const String profile_path = OS::get_singleton()->get_temp_path().path_join("gdscript_ssa_profile");
+	Ref<GDScript> profiled_script = memnew(GDScript);
+	profiled_script->set_path(script_path);
+	profiled_script->set_source_code("extends RefCounted\nfunc profiled(value: int) -> int:\n\treturn (value + 2) * 3\n");
+	REQUIRE(profiled_script->reload() == OK);
+	const GDScriptFunction *const *profiled = profiled_script->get_member_functions().getptr(SNAME("profiled"));
+	REQUIRE(profiled != nullptr);
+	CHECK_FALSE((*profiled)->has_optimizing_jit());
+
+	GDScriptOptimizationProfile::Entry entry;
+	entry.key = (*profiled)->get_optimization_profile_key();
+	entry.fingerprint = (*profiled)->get_optimization_fingerprint();
+	entry.call_count = 1000;
+	Vector<GDScriptOptimizationProfile::Entry> entries;
+	entries.push_back(entry);
+	REQUIRE(GDScriptOptimizationProfile::save(entries, profile_path) == OK);
+	REQUIRE(profiled_script->reload(true) == OK);
+	profiled = profiled_script->get_member_functions().getptr(SNAME("profiled"));
+	REQUIRE(profiled != nullptr);
+	CHECK_MESSAGE((*profiled)->has_optimizing_jit(), "An exact portable profile match should eagerly compile the SSA tier.");
+
+	profiled_script->set_source_code("extends RefCounted\nfunc profiled(value: int) -> int:\n\treturn (value + 3) * 3\n");
+	REQUIRE(profiled_script->reload(true) == OK);
+	profiled = profiled_script->get_member_functions().getptr(SNAME("profiled"));
+	REQUIRE(profiled != nullptr);
+	CHECK_FALSE_MESSAGE((*profiled)->has_optimizing_jit(), "A changed bytecode fingerprint must reject a stale export profile.");
+	GDScriptOptimizationProfile::clear();
 }
 #endif // GDSCRIPT_BASELINE_JIT_ENABLED
 

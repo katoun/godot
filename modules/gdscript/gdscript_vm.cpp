@@ -562,13 +562,17 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	Variant retvalue;
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-	bool typed_jit_allowed = _baseline_jit != nullptr && _baseline_jit->has_typed_entry() && p_state == nullptr &&
+	if (p_state == nullptr && p_argcount == _argument_count && !is_vararg()) {
+		_maybe_compile_optimizing_jit();
+	}
+	GDScriptBaselineJIT *active_jit = _get_active_jit();
+	bool typed_jit_allowed = active_jit != nullptr && active_jit->has_typed_entry() && p_state == nullptr &&
 			p_argcount == _argument_count && !is_vararg() && !EngineDebugger::is_active() &&
 			!GDScriptLanguage::get_singleton()->should_track_call_stack();
 #ifdef DEBUG_ENABLED
 	typed_jit_allowed = typed_jit_allowed && !GDScriptLanguage::get_singleton()->profiling;
 #endif
-	if (typed_jit_allowed && _baseline_jit->execute_typed(p_args, p_argcount, p_instance ? p_instance->owner : nullptr, retvalue)) {
+	if (typed_jit_allowed && active_jit->execute_typed(p_args, p_argcount, p_instance ? p_instance->owner : nullptr, retvalue)) {
 		call_depth--;
 		return retvalue;
 	}
@@ -793,12 +797,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	bool baseline_jit_executed = false;
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-	bool baseline_jit_allowed = _baseline_jit != nullptr && p_state == nullptr && !EngineDebugger::is_active();
+	bool baseline_jit_allowed = active_jit != nullptr && p_state == nullptr && !EngineDebugger::is_active();
 #ifdef DEBUG_ENABLED
-	baseline_jit_allowed = baseline_jit_allowed && !(GDScriptLanguage::get_singleton()->profiling && GDScriptLanguage::get_singleton()->profile_native_calls && _baseline_jit->has_ptrcalls());
+	baseline_jit_allowed = baseline_jit_allowed && !(GDScriptLanguage::get_singleton()->profiling && GDScriptLanguage::get_singleton()->profile_native_calls && active_jit->has_ptrcalls());
 #endif
 	if (baseline_jit_allowed) {
-		Variant *native_result = _baseline_jit->execute(variant_addresses, p_instance ? p_instance->owner : nullptr);
+		Variant *native_result = active_jit->execute(variant_addresses, p_instance ? p_instance->owner : nullptr);
 		if (native_result != nullptr) {
 			retvalue = *native_result;
 			baseline_jit_executed = true;

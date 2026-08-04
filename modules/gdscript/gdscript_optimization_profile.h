@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  gdscript_baseline_jit.h                                               */
+/*  gdscript_optimization_profile.h                                       */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,43 +30,23 @@
 
 #pragma once
 
-#include "core/typedefs.h"
+#include "core/error/error_list.h"
+#include "core/string/ustring.h"
 #include "core/templates/vector.h"
-#include "core/variant/variant.h"
 
-class GDScriptFunction;
-class Object;
-
-class GDScriptBaselineJIT {
-	void *entry_point = nullptr;
-	void *typed_entry_point = nullptr;
-	uint64_t code_size = 0;
-	Vector<Variant::Type> typed_argument_types;
-	Variant::Type typed_return_type = Variant::NIL;
-	int ptrcall_count = 0;
-	int ssa_node_count = 0;
-	int eliminated_node_count = 0;
-	bool requires_self = false;
-	bool optimizing = false;
-
-	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count);
-	static GDScriptBaselineJIT *_compile(const GDScriptFunction *p_function, bool p_optimizing);
-
+class GDScriptOptimizationProfile {
 public:
-	static constexpr uint32_t OPTIMIZING_CALL_THRESHOLD = 64;
+	struct Entry {
+		String key;
+		uint32_t fingerprint = 0;
+		uint64_t call_count = 0;
 
-	static GDScriptBaselineJIT *compile(const GDScriptFunction *p_function);
-	static GDScriptBaselineJIT *compile_optimized(const GDScriptFunction *p_function);
+		bool operator<(const Entry &p_other) const { return key < p_other.key; }
+	};
 
-	Variant *execute(Variant **p_variant_addresses, Object *p_self) const;
-	bool execute_typed(const Variant **p_arguments, int p_argument_count, Object *p_self, Variant &r_return) const;
-	bool has_typed_entry() const { return typed_entry_point != nullptr; }
-	bool has_ptrcalls() const { return ptrcall_count > 0; }
-	int get_ptrcall_count() const { return ptrcall_count; }
-	bool is_optimizing() const { return optimizing; }
-	int get_ssa_node_count() const { return ssa_node_count; }
-	int get_eliminated_node_count() const { return eliminated_node_count; }
-	uint64_t get_code_size() const { return code_size; }
-
-	~GDScriptBaselineJIT();
+	static String get_default_path();
+	static bool has_hint(const String &p_key, uint32_t p_fingerprint);
+	static Error load(const String &p_path = String());
+	static Error save(const Vector<Entry> &p_entries, const String &p_path = String());
+	static void clear();
 };
