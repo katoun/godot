@@ -34,6 +34,7 @@
 
 #include "gdscript_function.h"
 
+#include "core/object/method_bind.h"
 #include "core/variant/variant_internal.h"
 
 #define SLJIT_CONFIG_AUTO 1
@@ -49,7 +50,12 @@
 namespace {
 
 static_assert(sizeof(sljit_sw) == sizeof(int64_t), "The GDScript baseline JIT requires 64-bit integer registers.");
+static_assert(sizeof(sljit_sw) == sizeof(void *), "The GDScript baseline JIT requires 64-bit pointers.");
 static_assert(sizeof(Variant::Type) == sizeof(sljit_s32), "The GDScript baseline JIT requires a 32-bit Variant type tag.");
+
+static void SLJIT_FUNC invoke_ptrcall(MethodBind *p_method, Object *p_instance, const void **p_arguments, void *r_return) {
+	p_method->ptrcall(p_instance, p_arguments, r_return);
+}
 
 class BaselineCompiler {
 	struct PendingJump {
@@ -62,6 +68,8 @@ class BaselineCompiler {
 	int stack_size = 0;
 	int constant_count = 0;
 	const Variant *constants = nullptr;
+	int method_count = 0;
+	MethodBind *const *methods = nullptr;
 	Vector<Variant::Type> argument_types;
 	Variant::Type return_type = Variant::NIL;
 	struct sljit_compiler *compiler = nullptr;
@@ -72,7 +80,11 @@ class BaselineCompiler {
 	bool typed_entry = false;
 	sljit_sw variant_type_offset = 0;
 	sljit_sw variant_data_offset = 0;
+	sljit_sw ptrcall_arguments_offset = 0;
 	sljit_s32 native_frame_size = 0;
+	int max_ptrcall_argument_count = 0;
+	int ptrcall_count = 0;
+	bool requires_self = false;
 
 	static bool is_unboxed_type(Variant::Type p_type) {
 		return p_type == Variant::BOOL || p_type == Variant::INT || p_type == Variant::FLOAT;
@@ -164,6 +176,63 @@ class BaselineCompiler {
 		return true;
 	}
 
+	bool validate_ptrcall(int p_ip, GDScriptFunction::Opcode p_opcode) {
+		if (p_ip + 2 > code_size) {
+			return false;
+		}
+
+		const bool is_static = p_opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN || p_opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN;
+		const bool has_return = p_opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN || p_opcode == GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN;
+		const int instruction_argument_count = code[p_ip + 1];
+		if (instruction_argument_count < (is_static ? 1 : 2) || p_ip + 4 + instruction_argument_count > code_size) {
+			return false;
+		}
+
+		const int argument_count = code[p_ip + 2 + instruction_argument_count];
+		if (argument_count < 0 || instruction_argument_count != argument_count + (is_static ? 1 : 2)) {
+			return false;
+		}
+
+		const int method_index = code[p_ip + 3 + instruction_argument_count];
+		if (method_index < 0 || method_index >= method_count || methods == nullptr || methods[method_index] == nullptr) {
+			return false;
+		}
+		MethodBind *method = methods[method_index];
+		if (method->is_vararg() || method->is_static() != is_static || method->has_return() != has_return || method->get_argument_count() != argument_count) {
+			return false;
+		}
+
+		for (int i = 0; i < argument_count; i++) {
+			if (!mark_address_type(code[p_ip + 2 + i], method->get_argument_type(i))) {
+				return false;
+			}
+		}
+
+		if (!is_static) {
+			if (code[p_ip + 2 + argument_count] != GDScriptFunction::ADDR_SELF) {
+				return false;
+			}
+			requires_self = true;
+		}
+
+		const int destination = code[p_ip + 1 + instruction_argument_count];
+		if (!is_valid_address(destination, true)) {
+			return false;
+		}
+		if (has_return && !mark_address_type(destination, method->get_return_info().type)) {
+			return false;
+		}
+
+		// A zero-argument void call has no unboxed values to expose to ptrcall.
+		if (argument_count == 0 && !has_return) {
+			return false;
+		}
+
+		max_ptrcall_argument_count = MAX(max_ptrcall_argument_count, argument_count);
+		ptrcall_count++;
+		return true;
+	}
+
 	bool validate() {
 		if (!code || code_size <= 0) {
 			return false;
@@ -181,6 +250,15 @@ class BaselineCompiler {
 			boundaries.write[ip] = 1;
 			GDScriptFunction::Opcode opcode = GDScriptFunction::Opcode(code[ip]);
 			switch (opcode) {
+				case GDScriptFunction::OPCODE_ASSIGN_NULL:
+					// A validated no-return call is followed by cleanup of its
+					// temporary target. The target stays NIL in the Variant frame;
+					// it has no corresponding native slot to clear.
+					if (ip + 2 > code_size || !is_valid_address(code[ip + 1], true)) {
+						return false;
+					}
+					ip += 2;
+					break;
 				case GDScriptFunction::OPCODE_ASSIGN_BOOL:
 				case GDScriptFunction::OPCODE_ASSIGN_INT:
 				case GDScriptFunction::OPCODE_ASSIGN_FLOAT: {
@@ -257,6 +335,16 @@ class BaselineCompiler {
 					jump_targets.push_back(code[ip + 1]);
 					ip += 2;
 					break;
+				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
+				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
+				case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN:
+				case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_NO_RETURN: {
+					if (!validate_ptrcall(ip, opcode)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 4 + code[ip + 1];
+				} break;
 				case GDScriptFunction::OPCODE_RETURN:
 					if (ip + 2 > code_size || !is_valid_address(code[ip + 1])) {
 						return false;
@@ -307,7 +395,12 @@ class BaselineCompiler {
 		if (native_slot_count > SLJIT_MAX_LOCAL_SIZE / int(sizeof(uint64_t))) {
 			return false;
 		}
-		native_frame_size = native_slot_count * sizeof(uint64_t);
+		ptrcall_arguments_offset = native_slot_count * sizeof(uint64_t);
+		const uint64_t frame_size = uint64_t(ptrcall_arguments_offset) + uint64_t(max_ptrcall_argument_count) * sizeof(void *);
+		if (frame_size > SLJIT_MAX_LOCAL_SIZE) {
+			return false;
+		}
+		native_frame_size = sljit_s32(frame_size);
 		return has_native_work;
 	}
 
@@ -370,6 +463,51 @@ class BaselineCompiler {
 	void emit_store_float(int p_address, int p_float_register) {
 		DEV_ASSERT(((p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK);
 		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK], p_float_register, 0);
+	}
+
+	void emit_unboxed_pointer(int p_address, int p_register) {
+		const int address_type = (p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+		if (address_type == GDScriptFunction::ADDR_TYPE_STACK) {
+			sljit_emit_op2(compiler, SLJIT_ADD, p_register, 0, SLJIT_SP, 0, SLJIT_IMM, stack_slot_offsets[p_address & GDScriptFunction::ADDR_MASK]);
+			return;
+		}
+
+		DEV_ASSERT(address_type == GDScriptFunction::ADDR_TYPE_CONSTANT);
+		sljit_emit_op1(compiler, SLJIT_MOV, p_register, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(constants));
+		sljit_emit_op2(compiler, SLJIT_ADD, p_register, 0, p_register, 0, SLJIT_IMM, get_address_offset(p_address, variant_data_offset));
+	}
+
+	void emit_ptrcall(int p_ip, GDScriptFunction::Opcode p_opcode) {
+		const bool is_static = p_opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN || p_opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN;
+		const bool has_return = p_opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN || p_opcode == GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN;
+		const int instruction_argument_count = code[p_ip + 1];
+		const int argument_count = code[p_ip + 2 + instruction_argument_count];
+		MethodBind *method = methods[code[p_ip + 3 + instruction_argument_count]];
+
+		for (int i = 0; i < argument_count; i++) {
+			emit_unboxed_pointer(code[p_ip + 2 + i], SLJIT_R0);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), ptrcall_arguments_offset + i * sizeof(void *), SLJIT_R0, 0);
+		}
+
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(method));
+		if (is_static) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
+		} else {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+		}
+		if (argument_count == 0) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
+		} else {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_SP, 0, SLJIT_IMM, ptrcall_arguments_offset);
+		}
+		if (has_return) {
+			const int destination = code[p_ip + 1 + instruction_argument_count];
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), stack_slot_offsets[destination & GDScriptFunction::ADDR_MASK], SLJIT_IMM, 0);
+			emit_unboxed_pointer(destination, SLJIT_R3);
+		} else {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 0);
+		}
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS4V(P, P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_ptrcall));
 	}
 
 	void emit_initialize_unboxed_slots() {
@@ -565,12 +703,15 @@ class BaselineCompiler {
 	}
 
 public:
-	BaselineCompiler(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, const Vector<Variant::Type> &p_argument_types, Variant::Type p_return_type, bool p_typed_entry) :
-			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constant_count(p_constant_count), constants(p_constants), argument_types(p_argument_types), return_type(p_return_type), typed_entry(p_typed_entry) {
+	BaselineCompiler(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, MethodBind *const *p_methods, int p_method_count, const Vector<Variant::Type> &p_argument_types, Variant::Type p_return_type, bool p_typed_entry) :
+			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constant_count(p_constant_count), constants(p_constants), method_count(p_method_count), methods(p_methods), argument_types(p_argument_types), return_type(p_return_type), typed_entry(p_typed_entry) {
 		Variant probe;
 		variant_type_offset = reinterpret_cast<uint8_t *>(VariantInternal::get_type_ptr(&probe)) - reinterpret_cast<uint8_t *>(&probe);
 		variant_data_offset = reinterpret_cast<uint8_t *>(VariantInternal::get_int(&probe)) - reinterpret_cast<uint8_t *>(&probe);
 	}
+
+	int get_ptrcall_count() const { return ptrcall_count; }
+	bool get_requires_self() const { return requires_self; }
 
 	void *compile(uint64_t &r_code_size) {
 		if (!validate()) {
@@ -583,7 +724,7 @@ public:
 		}
 
 		labels.resize(code_size + 1);
-		sljit_emit_enter(compiler, 0, typed_entry ? SLJIT_ARGS1(W, P) : SLJIT_ARGS1(P, P), 3 | SLJIT_ENTER_FLOAT(2), 1, native_frame_size);
+		sljit_emit_enter(compiler, 0, typed_entry ? SLJIT_ARGS2(W, P, P) : SLJIT_ARGS2(P, P, P), 4 | SLJIT_ENTER_FLOAT(2), 2, native_frame_size);
 		emit_initialize_unboxed_slots();
 
 		int ip = 0;
@@ -591,6 +732,9 @@ public:
 			labels.write[ip] = sljit_emit_label(compiler);
 			GDScriptFunction::Opcode opcode = GDScriptFunction::Opcode(code[ip]);
 			switch (opcode) {
+				case GDScriptFunction::OPCODE_ASSIGN_NULL:
+					ip += 2;
+					break;
 				case GDScriptFunction::OPCODE_ASSIGN_BOOL:
 					emit_load_bool(code[ip + 2], SLJIT_R0);
 					emit_store_bool(code[ip + 1], SLJIT_R0);
@@ -645,6 +789,13 @@ public:
 					add_pending_jump(sljit_emit_jump(compiler, SLJIT_JUMP), code[ip + 1]);
 					ip += 2;
 					break;
+				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
+				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
+				case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN:
+				case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_NO_RETURN:
+					emit_ptrcall(ip, opcode);
+					ip += 4 + code[ip + 1];
+					break;
 				case GDScriptFunction::OPCODE_RETURN:
 					emit_return_value(code[ip + 1]);
 					ip += 2;
@@ -688,8 +839,8 @@ public:
 
 } // namespace
 
-GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type) :
-		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_return_type(p_typed_return_type) {
+GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self) :
+		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_return_type(p_typed_return_type), ptrcall_count(p_ptrcall_count), requires_self(p_requires_self) {
 }
 
 GDScriptBaselineJIT *GDScriptBaselineJIT::compile(const GDScriptFunction *p_function) {
@@ -706,7 +857,7 @@ GDScriptBaselineJIT *GDScriptBaselineJIT::compile(const GDScriptFunction *p_func
 		has_typed_signature = has_typed_signature && builtin_type != Variant::NIL;
 	}
 
-	BaselineCompiler compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, typed_argument_types, Variant::NIL, false);
+	BaselineCompiler compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, p_function->_methods_ptr, p_function->_methods_count, typed_argument_types, Variant::NIL, false);
 	uint64_t generated_size = 0;
 	void *generated_code = compiler.compile(generated_size);
 	if (!generated_code) {
@@ -715,22 +866,25 @@ GDScriptBaselineJIT *GDScriptBaselineJIT::compile(const GDScriptFunction *p_func
 
 	void *typed_generated_code = nullptr;
 	if (has_typed_signature) {
-		BaselineCompiler typed_compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, typed_argument_types, p_function->return_type.builtin_type, true);
+		BaselineCompiler typed_compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, p_function->_methods_ptr, p_function->_methods_count, typed_argument_types, p_function->return_type.builtin_type, true);
 		uint64_t typed_generated_size = 0;
 		typed_generated_code = typed_compiler.compile(typed_generated_size);
 		generated_size += typed_generated_size;
 	}
 
-	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL));
+	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL, compiler.get_ptrcall_count(), compiler.get_requires_self()));
 }
 
-Variant *GDScriptBaselineJIT::execute(Variant **p_variant_addresses) const {
-	typedef Variant *(SLJIT_FUNC *EntryPoint)(Variant **);
-	return reinterpret_cast<EntryPoint>(entry_point)(p_variant_addresses);
+Variant *GDScriptBaselineJIT::execute(Variant **p_variant_addresses, Object *p_self) const {
+	if (requires_self && p_self == nullptr) {
+		return nullptr;
+	}
+	typedef Variant *(SLJIT_FUNC *EntryPoint)(Variant **, Object *);
+	return reinterpret_cast<EntryPoint>(entry_point)(p_variant_addresses, p_self);
 }
 
-bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argument_count, Variant &r_return) const {
-	if (typed_entry_point == nullptr || p_argument_count != typed_argument_types.size()) {
+bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argument_count, Object *p_self, Variant &r_return) const {
+	if (typed_entry_point == nullptr || p_argument_count != typed_argument_types.size() || (requires_self && p_self == nullptr)) {
 		return false;
 	}
 
@@ -754,8 +908,8 @@ bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argum
 		}
 	}
 
-	typedef uint64_t(SLJIT_FUNC * TypedEntryPoint)(const uint64_t *);
-	const uint64_t result = reinterpret_cast<TypedEntryPoint>(typed_entry_point)(raw_arguments);
+	typedef uint64_t(SLJIT_FUNC * TypedEntryPoint)(const uint64_t *, Object *);
+	const uint64_t result = reinterpret_cast<TypedEntryPoint>(typed_entry_point)(raw_arguments, p_self);
 	switch (typed_return_type) {
 		case Variant::BOOL:
 			r_return = bool(result);

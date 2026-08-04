@@ -35,6 +35,7 @@
 #include "core/variant/variant.h"
 
 class GDScriptFunction;
+class Object;
 
 class GDScriptBaselineJIT {
 	void *entry_point = nullptr;
@@ -42,15 +43,19 @@ class GDScriptBaselineJIT {
 	uint64_t code_size = 0;
 	Vector<Variant::Type> typed_argument_types;
 	Variant::Type typed_return_type = Variant::NIL;
+	int ptrcall_count = 0;
+	bool requires_self = false;
 
-	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type);
+	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self);
 
 public:
 	static GDScriptBaselineJIT *compile(const GDScriptFunction *p_function);
 
-	Variant *execute(Variant **p_variant_addresses) const;
-	bool execute_typed(const Variant **p_arguments, int p_argument_count, Variant &r_return) const;
+	Variant *execute(Variant **p_variant_addresses, Object *p_self) const;
+	bool execute_typed(const Variant **p_arguments, int p_argument_count, Object *p_self, Variant &r_return) const;
 	bool has_typed_entry() const { return typed_entry_point != nullptr; }
+	bool has_ptrcalls() const { return ptrcall_count > 0; }
+	int get_ptrcall_count() const { return ptrcall_count; }
 	uint64_t get_code_size() const { return code_size; }
 
 	~GDScriptBaselineJIT();

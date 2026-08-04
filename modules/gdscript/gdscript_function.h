@@ -540,6 +540,7 @@ public:
 #endif
 	}
 	bool has_typed_baseline_jit() const;
+	int get_baseline_jit_ptrcall_count() const;
 
 	Variant get_constant(int p_idx) const;
 	StringName get_global_name(int p_idx) const;

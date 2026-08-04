@@ -35,6 +35,7 @@
 
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
+#include "core/object/class_db.h"
 #include "tests/test_macros.h"
 #include "tests/test_utils.h"
 
@@ -202,6 +203,94 @@ func interpreter_fallback(value: int) -> String:
 	REQUIRE(reloaded_function != nullptr);
 	CHECK((*reloaded_function)->has_typed_baseline_jit());
 	CHECK(int64_t(reload_instance->call(SNAME("increment"), 40)) == 42);
+}
+
+TEST_CASE("[Modules][GDScript] Baseline JIT lowers unboxed native calls to ptrcall") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends RefCounted
+
+func native_bool_roundtrip(value: bool) -> bool:
+	set_block_signals(value)
+	return is_blocking_signals()
+
+func native_integer_result() -> int:
+	return get_reference_count()
+
+func native_static_result() -> bool:
+	return Thread.is_main_thread()
+
+func native_nonprimitive_fallback() -> bool:
+	return has_meta(&"missing")
+)");
+
+	ERR_PRINT_OFF;
+	const Error error = gdscript->reload();
+	ERR_PRINT_ON;
+	REQUIRE_MESSAGE(error == OK, "The ptrcall lowering test script should parse successfully.");
+
+	const HashMap<StringName, GDScriptFunction *> &functions = gdscript->get_member_functions();
+	const GDScriptFunction *const *bool_function = functions.getptr(SNAME("native_bool_roundtrip"));
+	const GDScriptFunction *const *integer_function = functions.getptr(SNAME("native_integer_result"));
+	const GDScriptFunction *const *static_function = functions.getptr(SNAME("native_static_result"));
+	const GDScriptFunction *const *fallback_function = functions.getptr(SNAME("native_nonprimitive_fallback"));
+	REQUIRE(bool_function != nullptr);
+	REQUIRE(integer_function != nullptr);
+	REQUIRE(static_function != nullptr);
+	REQUIRE(fallback_function != nullptr);
+	CHECK((*bool_function)->has_typed_baseline_jit());
+	CHECK((*bool_function)->get_baseline_jit_ptrcall_count() == 2);
+	CHECK((*integer_function)->has_typed_baseline_jit());
+	CHECK((*integer_function)->get_baseline_jit_ptrcall_count() == 1);
+	CHECK((*static_function)->has_typed_baseline_jit());
+	CHECK((*static_function)->get_baseline_jit_ptrcall_count() == 1);
+	CHECK_FALSE_MESSAGE((*fallback_function)->has_baseline_jit(), "A StringName argument still requires the Variant interpreter path.");
+
+	Ref<RefCounted> ref_counted = memnew(RefCounted);
+	ref_counted->set_script(gdscript);
+	CHECK(bool(ref_counted->call(SNAME("native_bool_roundtrip"), true)));
+	CHECK_FALSE(bool(ref_counted->call(SNAME("native_bool_roundtrip"), false)));
+	CHECK(int64_t(ref_counted->call(SNAME("native_integer_result"))) > 0);
+	CHECK(bool(ref_counted->call(SNAME("native_static_result"))));
+	CHECK_FALSE(bool(ref_counted->call(SNAME("native_nonprimitive_fallback"))));
+
+	Ref<GDScript> float_script = memnew(GDScript);
+	float_script->set_source_code(R"(
+extends Node2D
+
+func native_float_roundtrip(value: float) -> float:
+	move_local_x(0.0, false)
+	set_rotation(value)
+	return get_rotation()
+)");
+	REQUIRE(float_script->reload() == OK);
+	const GDScriptFunction *const *float_function = float_script->get_member_functions().getptr(SNAME("native_float_roundtrip"));
+	REQUIRE(float_function != nullptr);
+	CHECK((*float_function)->has_typed_baseline_jit());
+	CHECK((*float_function)->get_baseline_jit_ptrcall_count() == 3);
+	Object *float_instance = ClassDB::instantiate(SNAME("Node2D"));
+	REQUIRE(float_instance != nullptr);
+	float_instance->set_script(float_script);
+	CHECK(Math::is_equal_approx(double(float_instance->call(SNAME("native_float_roundtrip"), 0.375)), 0.375));
+	// An implicitly convertible argument rejects the raw entry, then exercises
+	// ptrcall lowering through the interpreter-compatible Variant-frame entry.
+	CHECK(Math::is_equal_approx(double(float_instance->call(SNAME("native_float_roundtrip"), 1)), 1.0));
+
+	float_script->set_source_code(R"(
+extends Node2D
+
+func native_float_roundtrip(value: float) -> float:
+	move_local_x(0.0, false)
+	set_rotation(value + 0.125)
+	return get_rotation()
+)");
+	REQUIRE(float_script->reload(true) == OK);
+	float_function = float_script->get_member_functions().getptr(SNAME("native_float_roundtrip"));
+	REQUIRE(float_function != nullptr);
+	CHECK((*float_function)->get_baseline_jit_ptrcall_count() == 3);
+	CHECK(Math::is_equal_approx(double(float_instance->call(SNAME("native_float_roundtrip"), 0.375)), 0.5));
+	memdelete(float_instance);
 }
 #endif // GDSCRIPT_BASELINE_JIT_ENABLED
 

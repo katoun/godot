@@ -244,6 +244,14 @@ bool GDScriptFunction::has_typed_baseline_jit() const {
 #endif
 }
 
+int GDScriptFunction::get_baseline_jit_ptrcall_count() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	return _baseline_jit != nullptr ? _baseline_jit->get_ptrcall_count() : 0;
+#else
+	return 0;
+#endif
+}
+
 GDScriptFunction::~GDScriptFunction() {
 	get_script()->member_functions.erase(name);
 
