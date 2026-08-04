@@ -672,7 +672,37 @@ void EditorAssetInstaller::_notification(int p_what) {
 				}
 
 				extension_icon_map["res"] = get_editor_theme_icon(SNAME("Resource"));
-	
+				extension_icon_map["anim"] = get_editor_theme_icon(SNAME("Animation"));
+				extension_icon_map["animlib"] = get_editor_theme_icon(SNAME("AnimationLibrary"));
+				extension_icon_map["atlastex"] = get_editor_theme_icon(SNAME("AtlasTexture"));
+				extension_icon_map["img"] = get_editor_theme_icon(SNAME("Image"));
+				extension_icon_map["mat"] = get_editor_theme_icon(SNAME("Material"));
+				extension_icon_map["mesh"] = get_editor_theme_icon(SNAME("Mesh"));
+				extension_icon_map["meshlib"] = get_editor_theme_icon(SNAME("MeshLibrary"));
+				extension_icon_map["navmesh"] = get_editor_theme_icon(SNAME("NavigationMesh"));
+				extension_icon_map["skin"] = get_editor_theme_icon(SNAME("Skin"));
+				extension_icon_map["spriteframes"] = get_editor_theme_icon(SNAME("SpriteFrames"));
+				extension_icon_map["tex"] = get_editor_theme_icon(SNAME("Texture2D"));
+				extension_icon_map["theme"] = get_editor_theme_icon(SNAME("Theme"));
+
+				extension_icon_map["bonemap"] = get_editor_theme_icon(SNAME("BoneMap"));
+				extension_icon_map["colpalette"] = get_editor_theme_icon(SNAME("ColorPalette"));
+				extension_icon_map["compositor"] = get_editor_theme_icon(SNAME("Compositor"));
+				extension_icon_map["compositorfx"] = get_editor_theme_icon(SNAME("CompositorEffect"));
+				extension_icon_map["env"] = get_editor_theme_icon(SNAME("Environment"));
+				extension_icon_map["gradient"] = get_editor_theme_icon(SNAME("Gradient"));
+				extension_icon_map["sky"] = get_editor_theme_icon(SNAME("Sky"));
+				extension_icon_map["world2d"] = get_editor_theme_icon(SNAME("World2D"));
+				extension_icon_map["world"] = get_editor_theme_icon(SNAME("World3D"));
+				extension_icon_map["gradient"] = get_editor_theme_icon(SNAME("Gradient"));
+				extension_icon_map["gradient"] = get_editor_theme_icon(SNAME("Gradient"));
+
+				extension_icon_map["animnode"] = get_editor_theme_icon(SNAME("AnimationNode"));
+				extension_icon_map["occ2d"] = get_editor_theme_icon(SNAME("OccluderPolygon2D"));
+				extension_icon_map["inputevent"] = get_editor_theme_icon(SNAME("InputEvent"));
+
+				extension_icon_map["vxgidata"] = get_editor_theme_icon(SNAME("VoxelGIData"));
+
 				// By default, OBJ files are imported as Mesh resources rather than PackedScenes.
 				extension_icon_map["obj"] = get_editor_theme_icon(SNAME("MeshItem"));
 
