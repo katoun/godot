@@ -30,6 +30,10 @@
 
 #include "gdscript_byte_codegen.h"
 
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+#include "gdscript_baseline_jit.h"
+#endif
+
 #include "core/object/class_db.h"
 
 uint32_t GDScriptByteCodeGenerator::add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) {
@@ -409,6 +413,10 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 	}
 	function->_stack_size = GDScriptFunction::FIXED_ADDRESSES_MAX + max_locals + temporaries.size();
 	function->_instruction_args_size = instr_args_max;
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	function->_baseline_jit = GDScriptBaselineJIT::compile(function);
+#endif
 
 #ifdef DEBUG_ENABLED
 	function->operator_names = operator_names;
@@ -1085,7 +1093,20 @@ void GDScriptByteCodeGenerator::write_assign_with_conversion(const Address &p_ta
 }
 
 void GDScriptByteCodeGenerator::write_assign(const Address &p_target, const Address &p_source) {
-	if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
+	bool target_is_dirty = p_target.mode == Address::LOCAL_VARIABLE && dirty_locals.has(p_target.address);
+	if (!target_is_dirty && IS_BUILTIN_TYPE(p_target, Variant::BOOL) && IS_BUILTIN_TYPE(p_source, Variant::BOOL)) {
+		append_opcode(GDScriptFunction::OPCODE_ASSIGN_BOOL);
+		append(p_target);
+		append(p_source);
+	} else if (!target_is_dirty && IS_BUILTIN_TYPE(p_target, Variant::INT) && IS_BUILTIN_TYPE(p_source, Variant::INT)) {
+		append_opcode(GDScriptFunction::OPCODE_ASSIGN_INT);
+		append(p_target);
+		append(p_source);
+	} else if (!target_is_dirty && IS_BUILTIN_TYPE(p_target, Variant::FLOAT) && IS_BUILTIN_TYPE(p_source, Variant::FLOAT)) {
+		append_opcode(GDScriptFunction::OPCODE_ASSIGN_FLOAT);
+		append(p_target);
+		append(p_source);
+	} else if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
 		const GDScriptDataType &element_type = p_target.type.get_container_element_type(0);
 		append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY);
 		append(p_target);

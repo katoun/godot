@@ -93,6 +93,8 @@ Similar optimizations are possible for `my_var.some_func()`. With untyped GDScri
 
 Typed code is safer code and faster code!
 
+On supported 64-bit desktop and Android targets, the experimental `gdscript_baseline_jit` build option also compiles eligible typed functions to native code when their bytecode is finalized. The native entry uses the same stack, constant, and member `Variant` address table as the interpreter, so calls keep the normal GDScript frame layout and C++ cleanup path. Compilation is all-or-nothing per function: unsupported opcodes, active debugger sessions, and resumed coroutine calls use the bytecode interpreter. The generated code is owned by `GDScriptFunction` and is not serialized with the script.
+
 
 ## Loading scripts
 

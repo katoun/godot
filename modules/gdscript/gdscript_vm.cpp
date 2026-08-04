@@ -29,6 +29,9 @@
 /**************************************************************************/
 
 #include "gdscript.h"
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+#include "gdscript_baseline_jit.h"
+#endif
 #include "gdscript_function.h"
 #include "gdscript_lambda_callable.h"
 
@@ -302,6 +305,9 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_SET_STATIC_VARIABLE, \
 		&&OPCODE_GET_STATIC_VARIABLE, \
 		&&OPCODE_ASSIGN, \
+		&&OPCODE_ASSIGN_BOOL, \
+		&&OPCODE_ASSIGN_INT, \
+		&&OPCODE_ASSIGN_FLOAT, \
 		&&OPCODE_ASSIGN_NULL, \
 		&&OPCODE_ASSIGN_TRUE, \
 		&&OPCODE_ASSIGN_FALSE, \
@@ -770,6 +776,19 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 	bool awaited = false;
 	Variant *variant_addresses[ADDR_TYPE_MAX] = { stack, _constants_ptr, p_instance ? p_instance->members.ptr() : nullptr };
+	bool baseline_jit_executed = false;
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	if (_baseline_jit != nullptr && p_state == nullptr && !EngineDebugger::is_active()) {
+		Variant *native_result = _baseline_jit->execute(variant_addresses);
+		if (native_result != nullptr) {
+			retvalue = *native_result;
+			baseline_jit_executed = true;
+		}
+	}
+#endif
+
+	if (!baseline_jit_executed) {
 
 #ifdef DEBUG_ENABLED
 	OPCODE_WHILE(ip < _code_size) {
@@ -1603,6 +1622,23 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				ip += 3;
 			}
 			DISPATCH_OPCODE;
+
+#define OPCODE_ASSIGN_PRIMITIVE(m_v_type, m_getter) \
+	OPCODE(OPCODE_ASSIGN_##m_v_type) { \
+		CHECK_SPACE(3); \
+		GET_VARIANT_PTR(dst, 0); \
+		GET_VARIANT_PTR(src, 1); \
+		VariantInternal::set_type(*dst, Variant::m_v_type); \
+		*VariantInternal::m_getter(dst) = *VariantInternal::m_getter(src); \
+		ip += 3; \
+	} \
+	DISPATCH_OPCODE
+
+OPCODE_ASSIGN_PRIMITIVE(BOOL, get_bool);
+OPCODE_ASSIGN_PRIMITIVE(INT, get_int);
+OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
+
+#undef OPCODE_ASSIGN_PRIMITIVE
 
 			OPCODE(OPCODE_ASSIGN_NULL) {
 				CHECK_SPACE(2);
@@ -4286,6 +4322,8 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	}
 
 	OPCODES_OUT
+	;
+	}
 #ifdef DEBUG_ENABLED
 	if (GDScriptLanguage::get_singleton()->profiling) {
 		uint64_t time_taken = OS::get_singleton()->get_ticks_usec() - function_start_time;

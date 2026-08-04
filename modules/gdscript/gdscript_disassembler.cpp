@@ -456,6 +456,16 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 3;
 			} break;
+			case OPCODE_ASSIGN_BOOL:
+			case OPCODE_ASSIGN_INT:
+			case OPCODE_ASSIGN_FLOAT: {
+				text += opcode == OPCODE_ASSIGN_BOOL ? "assign bool " : opcode == OPCODE_ASSIGN_INT ? "assign int " : "assign float ";
+				text += DADDR(1);
+				text += " = ";
+				text += DADDR(2);
+
+				incr += 3;
+			} break;
 			case OPCODE_ASSIGN_NULL: {
 				text += "assign ";
 				text += DADDR(1);

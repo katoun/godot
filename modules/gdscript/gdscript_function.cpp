@@ -31,6 +31,9 @@
 #include "gdscript_function.h"
 
 #include "gdscript.h"
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+#include "gdscript_baseline_jit.h"
+#endif
 
 #include "core/object/class_db.h"
 
@@ -235,6 +238,12 @@ GDScriptFunction::GDScriptFunction() {
 
 GDScriptFunction::~GDScriptFunction() {
 	get_script()->member_functions.erase(name);
+
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	if (_baseline_jit != nullptr) {
+		memdelete(_baseline_jit);
+	}
+#endif
 
 	for (int i = 0; i < lambdas.size(); i++) {
 		memdelete(lambdas[i]);

@@ -42,6 +42,9 @@
 
 class GDScriptInstance;
 class GDScript;
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+class GDScriptBaselineJIT;
+#endif
 
 class GDScriptDataType {
 public:
@@ -178,6 +181,9 @@ public:
 		OPCODE_SET_STATIC_VARIABLE, // Only for GDScript.
 		OPCODE_GET_STATIC_VARIABLE, // Only for GDScript.
 		OPCODE_ASSIGN,
+		OPCODE_ASSIGN_BOOL,
+		OPCODE_ASSIGN_INT,
+		OPCODE_ASSIGN_FLOAT,
 		OPCODE_ASSIGN_NULL,
 		OPCODE_ASSIGN_TRUE,
 		OPCODE_ASSIGN_FALSE,
@@ -348,6 +354,9 @@ private:
 	friend class GDScriptCompiler;
 	friend class GDScriptByteCodeGenerator;
 	friend class GDScriptLanguage;
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	friend class GDScriptBaselineJIT;
+#endif
 
 	static constexpr int FEEDBACK_CACHE_SIZE = 4;
 
@@ -418,6 +427,9 @@ private:
 	int _operator_feedback_count = 0;
 	int _call_feedback_count = 0;
 	Mutex feedback_mutex;
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	GDScriptBaselineJIT *_baseline_jit = nullptr;
+#endif
 
 	int _code_size = 0;
 	int _default_arg_count = 0;
@@ -520,6 +532,13 @@ public:
 	_FORCE_INLINE_ int get_argument_count() const { return _argument_count; }
 	_FORCE_INLINE_ Variant get_rpc_config() const { return rpc_config; }
 	_FORCE_INLINE_ int get_max_stack_size() const { return _stack_size; }
+	_FORCE_INLINE_ bool has_baseline_jit() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+		return _baseline_jit != nullptr;
+#else
+		return false;
+#endif
+	}
 
 	Variant get_constant(int p_idx) const;
 	StringName get_global_name(int p_idx) const;

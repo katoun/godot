@@ -91,6 +91,81 @@ func _init():
 	CHECK_MESSAGE(int(ref_counted->get_meta("result")) == 42, "The script should assign object metadata successfully.");
 }
 
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+TEST_CASE("[Modules][GDScript] Baseline JIT preserves Variant frame semantics") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends RefCounted
+
+func integer_math(limit: int) -> int:
+	var index: int = 0
+	var total: int = 0
+	while index < limit:
+		if (index & 1) == 0:
+			total += index * 2
+		else:
+			total -= 1
+		index += 1
+	return total
+
+func float_math(limit: int) -> float:
+	var index: int = 0
+	var value: float = 1.5
+	while index < limit:
+		value = value * 1.25 + 0.5
+		index += 1
+	return value
+
+func bool_branch(condition: bool) -> int:
+	var value: int = 1
+	if condition:
+		value = 7
+	else:
+		value = 9
+	return value
+
+func wide_integer(value: int) -> int:
+	return value + 4_000_000_000
+
+func float_not_equal(left: float, right: float) -> bool:
+	return left != right
+
+func float_less(left: float, right: float) -> bool:
+	return left < right
+
+func interpreter_fallback(value: int) -> String:
+	return str(value)
+)");
+
+	ERR_PRINT_OFF;
+	const Error error = gdscript->reload();
+	ERR_PRINT_ON;
+	REQUIRE_MESSAGE(error == OK, "The baseline JIT test script should parse successfully.");
+
+	const HashMap<StringName, GDScriptFunction *> &functions = gdscript->get_member_functions();
+	for (const StringName &function_name : { SNAME("integer_math"), SNAME("float_math"), SNAME("bool_branch"), SNAME("wide_integer"), SNAME("float_not_equal"), SNAME("float_less") }) {
+		const GDScriptFunction *const *function = functions.getptr(function_name);
+		REQUIRE_MESSAGE(function != nullptr, "The expected test function should be compiled.");
+		CHECK_MESSAGE((*function)->has_baseline_jit(), vformat("Function '%s' should have baseline native code.", function_name));
+	}
+	const GDScriptFunction *const *fallback_function = functions.getptr(SNAME("interpreter_fallback"));
+	REQUIRE(fallback_function != nullptr);
+	CHECK_FALSE_MESSAGE((*fallback_function)->has_baseline_jit(), "Unsupported bytecode should keep the function on the interpreter.");
+
+	Ref<RefCounted> ref_counted = memnew(RefCounted);
+	ref_counted->set_script(gdscript);
+	CHECK(int64_t(ref_counted->call(SNAME("integer_math"), 6)) == 9);
+	CHECK(Math::is_equal_approx(double(ref_counted->call(SNAME("float_math"), 3)), 4.8359375));
+	CHECK(int64_t(ref_counted->call(SNAME("bool_branch"), true)) == 7);
+	CHECK(int64_t(ref_counted->call(SNAME("bool_branch"), false)) == 9);
+	CHECK(int64_t(ref_counted->call(SNAME("wide_integer"), 5'000'000'000)) == 9'000'000'000);
+	CHECK(bool(ref_counted->call(SNAME("float_not_equal"), Math::NaN, 1.0)));
+	CHECK_FALSE(bool(ref_counted->call(SNAME("float_less"), Math::NaN, 1.0)));
+	CHECK(String(ref_counted->call(SNAME("interpreter_fallback"), 42)) == "42");
+}
+#endif // GDSCRIPT_BASELINE_JIT_ENABLED
+
 TEST_CASE("[Modules][GDScript] Loading keeps ResourceCache and GDScriptCache in sync") {
 	GDScriptLanguage::get_singleton()->init();
 	const String path = TestUtils::get_temp_path("gdscript_load_test.gd");

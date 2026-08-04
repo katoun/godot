@@ -51,6 +51,9 @@ class VariantInternal {
 
 public:
 	// Set type.
+	_FORCE_INLINE_ static Variant::Type *get_type_ptr(Variant *v) { return &v->type; }
+	_FORCE_INLINE_ static const Variant::Type *get_type_ptr(const Variant *v) { return &v->type; }
+
 	_FORCE_INLINE_ static void set_type(Variant &v, Variant::Type p_type) {
 		v.type = p_type;
 	}

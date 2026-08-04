@@ -3,6 +3,19 @@ def can_build(env, platform):
     return True
 
 
+def get_opts(platform):
+    from SCons.Variables import BoolVariable
+
+    jit_supported = platform in ["android", "linuxbsd", "macos", "windows"]
+    return [
+        BoolVariable(
+            "gdscript_baseline_jit",
+            "Enable the experimental GDScript baseline JIT compiler",
+            jit_supported,
+        ),
+    ]
+
+
 def configure(env):
     pass
 

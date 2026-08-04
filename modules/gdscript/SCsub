@@ -6,6 +6,29 @@ Import("env_modules")
 
 env_gdscript = env_modules.Clone()
 
+jit_supported = env["platform"] in ["android", "linuxbsd", "macos", "windows"] and env["arch"] in [
+    "arm64",
+    "loongarch64",
+    "ppc64",
+    "rv64",
+    "x86_64",
+]
+
+if env["gdscript_baseline_jit"] and not jit_supported:
+    print_warning("The GDScript baseline JIT is only available on supported 64-bit desktop and Android targets.")
+
+if env["gdscript_baseline_jit"] and jit_supported:
+    # GDScriptFunction's layout contains the native entry, so every translation
+    # unit which includes its header must see the same feature definition.
+    env.Append(CPPDEFINES=["GDSCRIPT_BASELINE_JIT_ENABLED"])
+    env_modules.Append(CPPDEFINES=["GDSCRIPT_BASELINE_JIT_ENABLED"])
+    env_gdscript.Append(CPPDEFINES=["GDSCRIPT_BASELINE_JIT_ENABLED"])
+    env_gdscript.Prepend(CPPPATH=["#thirdparty/pcre2/deps/sljit/sljit_src"])
+
+    env_sljit = env_gdscript.Clone()
+    env_sljit.disable_warnings()
+    env_sljit.add_source_files(env.modules_sources, "gdscript_baseline_jit_sljit.c")
+
 env_gdscript.add_source_files(env.modules_sources, "*.cpp")
 
 if env.editor_build:
