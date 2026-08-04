@@ -457,6 +457,9 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 		opcodes.write[p_address] = opcodes.size();
 	}
 
+	int write_typed_comparison_jump(const Address &p_condition, bool p_jump_if_true);
+	int write_condition_jump(const Address &p_condition, bool p_jump_if_true);
+
 public:
 	virtual uint32_t add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) override;
 	virtual uint32_t add_local(const StringName &p_name, const GDScriptDataType &p_type) override;

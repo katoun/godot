@@ -440,6 +440,59 @@ void GDScriptByteCodeGenerator::set_initial_line(int p_line) {
 #define IS_BUILTIN_TYPE(m_var, m_type) \
 	(m_var.type.kind == GDScriptDataType::BUILTIN && m_var.type.builtin_type == m_type && m_type != Variant::NIL)
 
+static bool is_direct_int_operator(Variant::Operator p_operator) {
+	switch (p_operator) {
+		case Variant::OP_ADD:
+		case Variant::OP_SUBTRACT:
+		case Variant::OP_MULTIPLY:
+		case Variant::OP_POWER:
+		case Variant::OP_NEGATE:
+		case Variant::OP_POSITIVE:
+		case Variant::OP_SHIFT_LEFT:
+		case Variant::OP_SHIFT_RIGHT:
+		case Variant::OP_BIT_OR:
+		case Variant::OP_BIT_AND:
+		case Variant::OP_BIT_XOR:
+		case Variant::OP_BIT_NEGATE:
+		case Variant::OP_EQUAL:
+		case Variant::OP_NOT_EQUAL:
+		case Variant::OP_LESS:
+		case Variant::OP_LESS_EQUAL:
+		case Variant::OP_GREATER:
+		case Variant::OP_GREATER_EQUAL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool is_direct_float_operator(Variant::Operator p_operator) {
+	switch (p_operator) {
+		case Variant::OP_ADD:
+		case Variant::OP_SUBTRACT:
+		case Variant::OP_MULTIPLY:
+		case Variant::OP_DIVIDE:
+		case Variant::OP_POWER:
+		case Variant::OP_NEGATE:
+		case Variant::OP_POSITIVE:
+		case Variant::OP_EQUAL:
+		case Variant::OP_NOT_EQUAL:
+		case Variant::OP_LESS:
+		case Variant::OP_LESS_EQUAL:
+		case Variant::OP_GREATER:
+		case Variant::OP_GREATER_EQUAL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool is_direct_comparison_operator(Variant::Operator p_operator) {
+	return p_operator == Variant::OP_EQUAL || p_operator == Variant::OP_NOT_EQUAL ||
+			p_operator == Variant::OP_LESS || p_operator == Variant::OP_LESS_EQUAL ||
+			p_operator == Variant::OP_GREATER || p_operator == Variant::OP_GREATER_EQUAL;
+}
+
 void GDScriptByteCodeGenerator::write_type_adjust(const Address &p_target, Variant::Type p_new_type) {
 	switch (p_new_type) {
 		case Variant::BOOL:
@@ -564,6 +617,23 @@ void GDScriptByteCodeGenerator::write_type_adjust(const Address &p_target, Varia
 }
 
 void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Variant::Operator p_operator, const Address &p_left_operand) {
+	if (IS_BUILTIN_TYPE(p_left_operand, Variant::INT) && is_direct_int_operator(p_operator)) {
+		append_opcode(GDScriptFunction::OPCODE_OPERATOR_INT);
+		append(p_left_operand);
+		append(Address());
+		append(p_target);
+		append(p_operator);
+		return;
+	}
+	if (IS_BUILTIN_TYPE(p_left_operand, Variant::FLOAT) && is_direct_float_operator(p_operator)) {
+		append_opcode(GDScriptFunction::OPCODE_OPERATOR_FLOAT);
+		append(p_left_operand);
+		append(Address());
+		append(p_target);
+		append(p_operator);
+		return;
+	}
+
 	if (HAS_BUILTIN_TYPE(p_left_operand)) {
 		// Gather specific operator.
 		Variant::ValidatedOperatorEvaluator op_func = Variant::get_validated_operator_evaluator(p_operator, p_left_operand.type.builtin_type, Variant::NIL);
@@ -589,6 +659,23 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 }
 
 void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, Variant::Operator p_operator, const Address &p_left_operand, const Address &p_right_operand) {
+	if (IS_BUILTIN_TYPE(p_left_operand, Variant::INT) && IS_BUILTIN_TYPE(p_right_operand, Variant::INT) && is_direct_int_operator(p_operator)) {
+		append_opcode(GDScriptFunction::OPCODE_OPERATOR_INT);
+		append(p_left_operand);
+		append(p_right_operand);
+		append(p_target);
+		append(p_operator);
+		return;
+	}
+	if (IS_BUILTIN_TYPE(p_left_operand, Variant::FLOAT) && IS_BUILTIN_TYPE(p_right_operand, Variant::FLOAT) && is_direct_float_operator(p_operator)) {
+		append_opcode(GDScriptFunction::OPCODE_OPERATOR_FLOAT);
+		append(p_left_operand);
+		append(p_right_operand);
+		append(p_target);
+		append(p_operator);
+		return;
+	}
+
 	bool valid = HAS_BUILTIN_TYPE(p_left_operand) && HAS_BUILTIN_TYPE(p_right_operand);
 
 	// Avoid validated evaluator for modulo and division when operands are int or integer vector, since there's no check for division by zero.
@@ -692,18 +779,57 @@ void GDScriptByteCodeGenerator::write_type_test(const Address &p_target, const A
 	}
 }
 
-void GDScriptByteCodeGenerator::write_and_left_operand(const Address &p_left_operand) {
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF_NOT);
-	append(p_left_operand);
-	logic_op_jump_pos1.push_back(opcodes.size());
+int GDScriptByteCodeGenerator::write_typed_comparison_jump(const Address &p_condition, bool p_jump_if_true) {
+	if (p_condition.mode != Address::TEMPORARY || opcodes.size() < 5) {
+		return -1;
+	}
+
+	int operator_pos = opcodes.size() - 5;
+	GDScriptFunction::Opcode operator_opcode = GDScriptFunction::Opcode(opcodes[operator_pos]);
+	if (operator_opcode != GDScriptFunction::OPCODE_OPERATOR_INT && operator_opcode != GDScriptFunction::OPCODE_OPERATOR_FLOAT) {
+		return -1;
+	}
+
+	Variant::Operator op = Variant::Operator(opcodes[operator_pos + 4]);
+	if (!is_direct_comparison_operator(op)) {
+		return -1;
+	}
+
+	Vector<int> &condition_indices = temporaries.write[p_condition.address].bytecode_indices;
+	if (condition_indices.is_empty() || condition_indices[condition_indices.size() - 1] != operator_pos + 3) {
+		return -1;
+	}
+	condition_indices.resize(condition_indices.size() - 1);
+
+	opcodes.write[operator_pos] = operator_opcode == GDScriptFunction::OPCODE_OPERATOR_INT ? GDScriptFunction::OPCODE_JUMP_COMPARE_INT : GDScriptFunction::OPCODE_JUMP_COMPARE_FLOAT;
+	opcodes.write[operator_pos + 3] = op;
+	opcodes.write[operator_pos + 4] = p_jump_if_true;
 	append(0); // Jump target, will be patched.
+	return opcodes.size() - 1;
+}
+
+int GDScriptByteCodeGenerator::write_condition_jump(const Address &p_condition, bool p_jump_if_true) {
+	int jump_pos = write_typed_comparison_jump(p_condition, p_jump_if_true);
+	if (jump_pos >= 0) {
+		return jump_pos;
+	}
+
+	if (IS_BUILTIN_TYPE(p_condition, Variant::BOOL)) {
+		append_opcode(p_jump_if_true ? GDScriptFunction::OPCODE_JUMP_IF_BOOL : GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL);
+	} else {
+		append_opcode(p_jump_if_true ? GDScriptFunction::OPCODE_JUMP_IF : GDScriptFunction::OPCODE_JUMP_IF_NOT);
+	}
+	append(p_condition);
+	append(0); // Jump target, will be patched.
+	return opcodes.size() - 1;
+}
+
+void GDScriptByteCodeGenerator::write_and_left_operand(const Address &p_left_operand) {
+	logic_op_jump_pos1.push_back(write_condition_jump(p_left_operand, false));
 }
 
 void GDScriptByteCodeGenerator::write_and_right_operand(const Address &p_right_operand) {
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF_NOT);
-	append(p_right_operand);
-	logic_op_jump_pos2.push_back(opcodes.size());
-	append(0); // Jump target, will be patched.
+	logic_op_jump_pos2.push_back(write_condition_jump(p_right_operand, false));
 }
 
 void GDScriptByteCodeGenerator::write_end_and(const Address &p_target) {
@@ -723,17 +849,11 @@ void GDScriptByteCodeGenerator::write_end_and(const Address &p_target) {
 }
 
 void GDScriptByteCodeGenerator::write_or_left_operand(const Address &p_left_operand) {
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF);
-	append(p_left_operand);
-	logic_op_jump_pos1.push_back(opcodes.size());
-	append(0); // Jump target, will be patched.
+	logic_op_jump_pos1.push_back(write_condition_jump(p_left_operand, true));
 }
 
 void GDScriptByteCodeGenerator::write_or_right_operand(const Address &p_right_operand) {
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF);
-	append(p_right_operand);
-	logic_op_jump_pos2.push_back(opcodes.size());
-	append(0); // Jump target, will be patched.
+	logic_op_jump_pos2.push_back(write_condition_jump(p_right_operand, true));
 }
 
 void GDScriptByteCodeGenerator::write_end_or(const Address &p_target) {
@@ -757,10 +877,7 @@ void GDScriptByteCodeGenerator::write_start_ternary(const Address &p_target) {
 }
 
 void GDScriptByteCodeGenerator::write_ternary_condition(const Address &p_condition) {
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF_NOT);
-	append(p_condition);
-	ternary_jump_fail_pos.push_back(opcodes.size());
-	append(0); // Jump target, will be patched.
+	ternary_jump_fail_pos.push_back(write_condition_jump(p_condition, false));
 }
 
 void GDScriptByteCodeGenerator::write_ternary_true_expr(const Address &p_expr) {
@@ -1516,10 +1633,7 @@ void GDScriptByteCodeGenerator::write_await(const Address &p_target, const Addre
 }
 
 void GDScriptByteCodeGenerator::write_if(const Address &p_condition) {
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF_NOT);
-	append(p_condition);
-	if_jmp_addrs.push_back(opcodes.size());
-	append(0); // Jump destination, will be patched.
+	if_jmp_addrs.push_back(write_condition_jump(p_condition, false));
 }
 
 void GDScriptByteCodeGenerator::write_else() {
@@ -1791,10 +1905,7 @@ void GDScriptByteCodeGenerator::start_while_condition() {
 
 void GDScriptByteCodeGenerator::write_while(const Address &p_condition) {
 	// Condition check.
-	append_opcode(GDScriptFunction::OPCODE_JUMP_IF_NOT);
-	append(p_condition);
-	while_jmp_addrs.push_back(opcodes.size());
-	append(0); // End of loop address, will be patched.
+	while_jmp_addrs.push_back(write_condition_jump(p_condition, false));
 }
 
 void GDScriptByteCodeGenerator::write_endwhile() {

@@ -251,11 +251,37 @@ void (*type_init_function_table[])(Variant *) = {
 	&VariantInitializer<PackedVector4Array>::init, // PACKED_VECTOR4_ARRAY.
 };
 
+template <typename T>
+_FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_right) {
+	switch (p_operator) {
+		case Variant::OP_EQUAL:
+			return p_left == p_right;
+		case Variant::OP_NOT_EQUAL:
+			return p_left != p_right;
+		case Variant::OP_LESS:
+			return p_left < p_right;
+		case Variant::OP_LESS_EQUAL:
+			return p_left <= p_right;
+		case Variant::OP_GREATER:
+			return p_left > p_right;
+		case Variant::OP_GREATER_EQUAL:
+			return p_left >= p_right;
+		default:
+			ERR_FAIL_V_MSG(false, "Invalid operator for a typed comparison opcode.");
+	}
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 #define OPCODES_TABLE \
 	static const void *switch_table_ops[] = { \
 		&&OPCODE_OPERATOR, \
 		&&OPCODE_OPERATOR_VALIDATED, \
+		&&OPCODE_OPERATOR_INT, \
+		&&OPCODE_OPERATOR_FLOAT, \
+		&&OPCODE_JUMP_COMPARE_INT, \
+		&&OPCODE_JUMP_COMPARE_FLOAT, \
+		&&OPCODE_JUMP_IF_BOOL, \
+		&&OPCODE_JUMP_IF_NOT_BOOL, \
 		&&OPCODE_TYPE_TEST_BUILTIN, \
 		&&OPCODE_TYPE_TEST_ARRAY, \
 		&&OPCODE_TYPE_TEST_DICTIONARY, \
@@ -885,6 +911,166 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				operator_func(a, b, dst);
 
 				ip += 5;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_OPERATOR_INT) {
+				CHECK_SPACE(5);
+
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				Variant::Operator op = Variant::Operator(_code_ptr[ip + 4]);
+				int64_t left = *VariantInternal::get_int(a);
+
+				switch (op) {
+					case Variant::OP_ADD:
+						*VariantInternal::get_int(dst) = left + *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_SUBTRACT:
+						*VariantInternal::get_int(dst) = left - *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_MULTIPLY:
+						*VariantInternal::get_int(dst) = left * *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_POWER:
+						*VariantInternal::get_int(dst) = int64_t(Math::pow(double(left), double(*VariantInternal::get_int(b))));
+						break;
+					case Variant::OP_NEGATE:
+						*VariantInternal::get_int(dst) = -left;
+						break;
+					case Variant::OP_POSITIVE:
+						*VariantInternal::get_int(dst) = left;
+						break;
+					case Variant::OP_SHIFT_LEFT:
+						*VariantInternal::get_int(dst) = left << *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_SHIFT_RIGHT:
+						*VariantInternal::get_int(dst) = left >> *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_BIT_OR:
+						*VariantInternal::get_int(dst) = left | *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_BIT_AND:
+						*VariantInternal::get_int(dst) = left & *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_BIT_XOR:
+						*VariantInternal::get_int(dst) = left ^ *VariantInternal::get_int(b);
+						break;
+					case Variant::OP_BIT_NEGATE:
+						*VariantInternal::get_int(dst) = ~left;
+						break;
+					case Variant::OP_EQUAL:
+					case Variant::OP_NOT_EQUAL:
+					case Variant::OP_LESS:
+					case Variant::OP_LESS_EQUAL:
+					case Variant::OP_GREATER:
+					case Variant::OP_GREATER_EQUAL:
+						*VariantInternal::get_bool(dst) = _typed_compare(op, left, *VariantInternal::get_int(b));
+						break;
+					default:
+						ERR_FAIL_V_MSG(Variant(), "Invalid operator for a typed integer opcode.");
+				}
+
+				ip += 5;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_OPERATOR_FLOAT) {
+				CHECK_SPACE(5);
+
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+				Variant::Operator op = Variant::Operator(_code_ptr[ip + 4]);
+				double left = *VariantInternal::get_float(a);
+
+				switch (op) {
+					case Variant::OP_ADD:
+						*VariantInternal::get_float(dst) = left + *VariantInternal::get_float(b);
+						break;
+					case Variant::OP_SUBTRACT:
+						*VariantInternal::get_float(dst) = left - *VariantInternal::get_float(b);
+						break;
+					case Variant::OP_MULTIPLY:
+						*VariantInternal::get_float(dst) = left * *VariantInternal::get_float(b);
+						break;
+					case Variant::OP_DIVIDE:
+						*VariantInternal::get_float(dst) = left / *VariantInternal::get_float(b);
+						break;
+					case Variant::OP_POWER:
+						*VariantInternal::get_float(dst) = Math::pow(left, *VariantInternal::get_float(b));
+						break;
+					case Variant::OP_NEGATE:
+						*VariantInternal::get_float(dst) = -left;
+						break;
+					case Variant::OP_POSITIVE:
+						*VariantInternal::get_float(dst) = left;
+						break;
+					case Variant::OP_EQUAL:
+					case Variant::OP_NOT_EQUAL:
+					case Variant::OP_LESS:
+					case Variant::OP_LESS_EQUAL:
+					case Variant::OP_GREATER:
+					case Variant::OP_GREATER_EQUAL:
+						*VariantInternal::get_bool(dst) = _typed_compare(op, left, *VariantInternal::get_float(b));
+						break;
+					default:
+						ERR_FAIL_V_MSG(Variant(), "Invalid operator for a typed floating-point opcode.");
+				}
+
+				ip += 5;
+			}
+			DISPATCH_OPCODE;
+
+#define OPCODE_JUMP_COMPARE(m_type, m_getter) \
+	OPCODE(OPCODE_JUMP_COMPARE_##m_type) { \
+		CHECK_SPACE(6); \
+		GET_VARIANT_PTR(a, 0); \
+		GET_VARIANT_PTR(b, 1); \
+		Variant::Operator op = Variant::Operator(_code_ptr[ip + 3]); \
+		bool jump_if_true = _code_ptr[ip + 4]; \
+		bool result = _typed_compare(op, *VariantInternal::m_getter(a), *VariantInternal::m_getter(b)); \
+		if (result == jump_if_true) { \
+			int to = _code_ptr[ip + 5]; \
+			GD_ERR_BREAK(to < 0 || to > _code_size); \
+			ip = to; \
+		} else { \
+			ip += 6; \
+		} \
+	} \
+	DISPATCH_OPCODE
+
+			OPCODE_JUMP_COMPARE(INT, get_int);
+			OPCODE_JUMP_COMPARE(FLOAT, get_float);
+
+#undef OPCODE_JUMP_COMPARE
+
+			OPCODE(OPCODE_JUMP_IF_BOOL) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(test, 0);
+
+				if (*VariantInternal::get_bool(test)) {
+					int to = _code_ptr[ip + 2];
+					GD_ERR_BREAK(to < 0 || to > _code_size);
+					ip = to;
+				} else {
+					ip += 3;
+				}
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_JUMP_IF_NOT_BOOL) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(test, 0);
+
+				if (!*VariantInternal::get_bool(test)) {
+					int to = _code_ptr[ip + 2];
+					GD_ERR_BREAK(to < 0 || to > _code_size);
+					ip = to;
+				} else {
+					ip += 3;
+				}
 			}
 			DISPATCH_OPCODE;
 

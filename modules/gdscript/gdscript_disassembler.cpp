@@ -141,6 +141,51 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 5;
 			} break;
+			case OPCODE_OPERATOR_INT:
+			case OPCODE_OPERATOR_FLOAT: {
+				text += opcode == OPCODE_OPERATOR_INT ? "int operator " : "float operator ";
+				text += DADDR(3);
+				text += " = ";
+				text += DADDR(1);
+				text += " ";
+				text += Variant::get_operator_name(Variant::Operator(_code_ptr[ip + 4]));
+				text += " ";
+				text += DADDR(2);
+
+				incr += 5;
+			} break;
+			case OPCODE_JUMP_COMPARE_INT:
+			case OPCODE_JUMP_COMPARE_FLOAT: {
+				text += opcode == OPCODE_JUMP_COMPARE_INT ? "jump-int-compare " : "jump-float-compare ";
+				if (!_code_ptr[ip + 4]) {
+					text += "not ";
+				}
+				text += DADDR(1);
+				text += " ";
+				text += Variant::get_operator_name(Variant::Operator(_code_ptr[ip + 3]));
+				text += " ";
+				text += DADDR(2);
+				text += " to ";
+				text += itos(_code_ptr[ip + 5]);
+
+				incr += 6;
+			} break;
+			case OPCODE_JUMP_IF_BOOL: {
+				text += "jump-if-bool ";
+				text += DADDR(1);
+				text += " to ";
+				text += itos(_code_ptr[ip + 2]);
+
+				incr = 3;
+			} break;
+			case OPCODE_JUMP_IF_NOT_BOOL: {
+				text += "jump-if-not-bool ";
+				text += DADDR(1);
+				text += " to ";
+				text += itos(_code_ptr[ip + 2]);
+
+				incr = 3;
+			} break;
 			case OPCODE_TYPE_TEST_BUILTIN: {
 				text += "type test ";
 				text += DADDR(1);
