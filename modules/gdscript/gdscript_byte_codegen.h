@@ -99,6 +99,8 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	int max_locals = 0;
 	int current_line = 0;
 	int instr_args_max = 0;
+	int operator_feedback_count = 0;
+	int call_feedback_count = 0;
 
 #ifdef DEBUG_ENABLED
 	List<int> temp_stack;

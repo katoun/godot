@@ -754,34 +754,60 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 		OPCODE_SWITCH(_code_ptr[ip]) {
 			OPCODE(OPCODE_OPERATOR) {
-				constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*_code_ptr);
-				CHECK_SPACE(7 + _pointer_size);
+				CHECK_SPACE(6);
 
 				bool valid;
 				Variant::Operator op = (Variant::Operator)_code_ptr[ip + 4];
 				GD_ERR_BREAK(op >= Variant::OP_MAX);
+				int feedback_idx = _code_ptr[ip + 5];
+				GD_ERR_BREAK(feedback_idx < 0 || feedback_idx >= _operator_feedback_count);
+				OperatorFeedback *feedback = reinterpret_cast<OperatorFeedback *>(_operator_feedback_ptr[feedback_idx].get());
+				if (unlikely(feedback == nullptr)) {
+					OperatorFeedback *new_feedback = memnew(OperatorFeedback);
+					{
+						MutexLock lock(feedback_mutex);
+						feedback = reinterpret_cast<OperatorFeedback *>(_operator_feedback_ptr[feedback_idx].get());
+						if (feedback == nullptr) {
+							feedback = new_feedback;
+							new_feedback = nullptr;
+							_operator_feedback_ptr[feedback_idx].set(reinterpret_cast<uintptr_t>(feedback));
+						}
+					}
+					if (new_feedback != nullptr) {
+						memdelete(new_feedback);
+					}
+				}
 
 				GET_VARIANT_PTR(a, 0);
 				GET_VARIANT_PTR(b, 1);
 				GET_VARIANT_PTR(dst, 2);
-				// Compute signatures (types of operands) so it can be optimized when matching.
-				uint32_t op_signature = _code_ptr[ip + 5];
-				uint32_t actual_signature = (a->get_type() << 8) | (b->get_type());
+				// Add one so the zero value remains available for an uninitialized entry.
+				uint32_t actual_signature = ((a->get_type() << 8) | b->get_type()) + 1;
+				OperatorFeedback::Entry *cached_entry = nullptr;
+				bool cacheable = true;
 
 #ifdef DEBUG_ENABLED
 				if (op == Variant::OP_DIVIDE || op == Variant::OP_MODULE) {
 					// Don't optimize division and modulo since there's not check for division by zero with validated calls.
-					op_signature = 0xFFFF;
-					_code_ptr[ip + 5] = op_signature;
+					cacheable = false;
 				}
 #endif
 
-				// Check if this is the first run. If so, store the current signature for the optimized path.
-				if (unlikely(op_signature == 0)) {
-					static Mutex initializer_mutex;
-					initializer_mutex.lock();
-					Variant::Type a_type = (Variant::Type)((actual_signature >> 8) & 0xFF);
-					Variant::Type b_type = (Variant::Type)(actual_signature & 0xFF);
+				if (cacheable) {
+					for (int i = 0; i < FEEDBACK_CACHE_SIZE; i++) {
+						if (feedback->entries[i].signature.get() == actual_signature) {
+							cached_entry = &feedback->entries[i];
+							break;
+						}
+					}
+				}
+
+				if (likely(cached_entry != nullptr)) {
+					VariantInternal::initialize(dst, cached_entry->return_type);
+					cached_entry->evaluator(a, b, dst);
+				} else if (cacheable && !feedback->saturated.is_set()) {
+					Variant::Type a_type = a->get_type();
+					Variant::Type b_type = b->get_type();
 
 					Variant::ValidatedOperatorEvaluator op_func = Variant::get_validated_operator_evaluator(op, a_type, b_type);
 
@@ -789,32 +815,37 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 #ifdef DEBUG_ENABLED
 						err_text = "Invalid operands '" + Variant::get_type_name(a->get_type()) + "' and '" + Variant::get_type_name(b->get_type()) + "' in operator '" + Variant::get_operator_name(op) + "'.";
 #endif
-						initializer_mutex.unlock();
 						OPCODE_BREAK;
 					} else {
 						Variant::Type ret_type = Variant::get_operator_return_type(op, a_type, b_type);
 						VariantInternal::initialize(dst, ret_type);
 						op_func(a, b, dst);
 
-						// Check again in case another thread already set it.
-						if (_code_ptr[ip + 5] == 0) {
-							_code_ptr[ip + 5] = actual_signature;
-							_code_ptr[ip + 6] = static_cast<int>(ret_type);
-							Variant::ValidatedOperatorEvaluator *tmp = reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
-							*tmp = op_func;
+						MutexLock lock(feedback_mutex);
+						OperatorFeedback::Entry *empty_entry = nullptr;
+						bool already_cached = false;
+						for (int i = 0; i < FEEDBACK_CACHE_SIZE; i++) {
+							uint32_t signature = feedback->entries[i].signature.get();
+							if (signature == actual_signature) {
+								already_cached = true;
+								break;
+							}
+							if (signature == 0 && empty_entry == nullptr) {
+								empty_entry = &feedback->entries[i];
+							}
+						}
+						if (!already_cached) {
+							if (empty_entry != nullptr) {
+								empty_entry->return_type = ret_type;
+								empty_entry->evaluator = op_func;
+								empty_entry->signature.set(actual_signature);
+							} else {
+								feedback->saturated.set();
+							}
 						}
 					}
-					initializer_mutex.unlock();
-				} else if (likely(op_signature == actual_signature)) {
-					// If the signature matches, we can use the optimized path.
-					Variant::Type ret_type = static_cast<Variant::Type>(_code_ptr[ip + 6]);
-					Variant::ValidatedOperatorEvaluator op_func = *reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
-
-					// Make sure the return value has the correct type.
-					VariantInternal::initialize(dst, ret_type);
-					op_func(a, b, dst);
 				} else {
-					// If the signature doesn't match, we have to use the slow path.
+					// Megamorphic sites and operations that need extra checks use the slow path.
 #ifdef DEBUG_ENABLED
 
 					Variant ret;
@@ -836,7 +867,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					*dst = ret;
 #endif
 				}
-				ip += 7 + _pointer_size;
+				ip += 6;
 			}
 			DISPATCH_OPCODE;
 
@@ -1901,7 +1932,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				bool call_async = (_code_ptr[ip]) == OPCODE_CALL_ASYNC;
 #endif
 				LOAD_INSTRUCTION_ARGS
-				CHECK_SPACE(3 + instr_arg_count);
+				CHECK_SPACE(4 + instr_arg_count);
 
 				ip += instr_arg_count;
 
@@ -1911,6 +1942,8 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				int methodname_idx = _code_ptr[ip + 2];
 				GD_ERR_BREAK(methodname_idx < 0 || methodname_idx >= _global_names_count);
 				const StringName *methodname = &_global_names_ptr[methodname_idx];
+				int feedback_idx = _code_ptr[ip + 3];
+				GD_ERR_BREAK(feedback_idx < 0 || feedback_idx >= _call_feedback_count);
 
 				GodotProfileZoneScriptSystemCall(methodname, source, name, *methodname, line);
 
@@ -1929,9 +1962,98 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				Variant temp_ret;
 				Callable::CallError err;
+				GDScriptFunction *script_function = nullptr;
+				GDScriptInstance *script_instance = nullptr;
+
+				// `_ready` has extra implicit-ready behavior in GDScriptInstance::callp(), and
+				// `free` must be handled by Object::callp() before script method lookup.
+				if (*methodname != SNAME("_ready") && *methodname != CoreStringName(free_) && base->get_type() == Variant::OBJECT) {
+					Object *object = base->get_validated_object();
+					ScriptInstance *instance = object != nullptr ? object->get_script_instance() : nullptr;
+					if (instance != nullptr && !instance->is_placeholder() && instance->get_language() == GDScriptLanguage::get_singleton()) {
+						CallFeedback *feedback = reinterpret_cast<CallFeedback *>(_call_feedback_ptr[feedback_idx].get());
+						if (unlikely(feedback == nullptr)) {
+							CallFeedback *new_feedback = memnew(CallFeedback);
+							{
+								MutexLock lock(feedback_mutex);
+								feedback = reinterpret_cast<CallFeedback *>(_call_feedback_ptr[feedback_idx].get());
+								if (feedback == nullptr) {
+									feedback = new_feedback;
+									new_feedback = nullptr;
+									_call_feedback_ptr[feedback_idx].set(reinterpret_cast<uintptr_t>(feedback));
+								}
+							}
+							if (new_feedback != nullptr) {
+								memdelete(new_feedback);
+							}
+						}
+						script_instance = static_cast<GDScriptInstance *>(instance);
+						GDScript *receiver_script = script_instance->script.ptr();
+						uint64_t receiver_script_id = receiver_script->get_instance_id();
+						uint64_t cache_epoch = GDScriptLanguage::get_singleton()->function_call_cache_epoch.get();
+
+						for (int i = 0; i < FEEDBACK_CACHE_SIZE; i++) {
+							CallFeedback::Entry &entry = feedback->entries[i];
+							if (entry.epoch.get() == cache_epoch && entry.receiver_script_id.get() == receiver_script_id) {
+								script_function = reinterpret_cast<GDScriptFunction *>(entry.function.get());
+								break;
+							}
+						}
+						if (script_function != nullptr && !script_function->get_script()->valid) {
+							script_function = nullptr;
+						}
+
+						if (script_function == nullptr) {
+							GDScript *lookup_script = receiver_script;
+							while (lookup_script != nullptr) {
+								if (likely(lookup_script->valid)) {
+									HashMap<StringName, GDScriptFunction *>::Iterator method = lookup_script->member_functions.find(*methodname);
+									if (method) {
+										script_function = method->value;
+										break;
+									}
+								}
+								lookup_script = lookup_script->base.ptr();
+							}
+
+							if (script_function != nullptr && feedback->saturated_epoch.get() != cache_epoch) {
+								MutexLock lock(feedback_mutex);
+								CallFeedback::Entry *stale_entry = nullptr;
+								bool already_cached = false;
+								for (int i = 0; i < FEEDBACK_CACHE_SIZE; i++) {
+									CallFeedback::Entry &entry = feedback->entries[i];
+									uint64_t entry_epoch = entry.epoch.get();
+									if (entry_epoch == cache_epoch && entry.receiver_script_id.get() == receiver_script_id) {
+										already_cached = true;
+										break;
+									}
+									if (entry_epoch != cache_epoch && stale_entry == nullptr) {
+										stale_entry = &entry;
+									}
+								}
+								if (!already_cached) {
+									if (stale_entry != nullptr) {
+										stale_entry->epoch.set(0);
+										stale_entry->function.set(reinterpret_cast<uintptr_t>(script_function));
+										stale_entry->receiver_script_id.set(receiver_script_id);
+										stale_entry->epoch.set(cache_epoch);
+									} else {
+										feedback->saturated_epoch.set(cache_epoch);
+									}
+								}
+							}
+						}
+					}
+				}
+
+				if (script_function != nullptr) {
+					temp_ret = script_function->call(script_instance, (const Variant **)argptrs, argc, err);
+				} else {
+					base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
+				}
+
 				if (call_ret) {
 					GET_INSTRUCTION_ARG(ret, argc + 1);
-					base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 					*ret = temp_ret;
 #ifdef DEBUG_ENABLED
 					if (ret->get_type() == Variant::NIL) {
@@ -1965,8 +2087,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 						}
 					}
 #endif
-				} else {
-					base->callp(*methodname, (const Variant **)argptrs, argc, temp_ret, err);
 				}
 #ifdef DEBUG_ENABLED
 
@@ -2022,7 +2142,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 #endif // DEBUG_ENABLED
 
-				ip += 3;
+				ip += 4;
 			}
 			DISPATCH_OPCODE;
 

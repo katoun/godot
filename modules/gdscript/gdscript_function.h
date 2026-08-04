@@ -343,6 +343,32 @@ private:
 	friend class GDScriptByteCodeGenerator;
 	friend class GDScriptLanguage;
 
+	static constexpr int FEEDBACK_CACHE_SIZE = 4;
+
+	struct OperatorFeedback {
+		struct Entry {
+			// Published last so readers see the evaluator and return type initialized.
+			SafeNumeric<uint32_t> signature;
+			Variant::Type return_type = Variant::NIL;
+			Variant::ValidatedOperatorEvaluator evaluator = nullptr;
+		};
+
+		Entry entries[FEEDBACK_CACHE_SIZE];
+		SafeFlag saturated;
+	};
+
+	struct CallFeedback {
+		struct Entry {
+			SafeNumeric<uint64_t> receiver_script_id;
+			// Published last so readers see the script ID and function initialized.
+			SafeNumeric<uint64_t> epoch;
+			SafeNumeric<uintptr_t> function;
+		};
+
+		Entry entries[FEEDBACK_CACHE_SIZE];
+		SafeNumeric<uint64_t> saturated_epoch;
+	};
+
 	StringName name;
 	StringName source;
 	bool _static = false;
@@ -381,6 +407,11 @@ private:
 	Vector<GDScriptUtilityFunctions::FunctionPtr> gds_utilities;
 	Vector<MethodBind *> methods;
 	Vector<GDScriptFunction *> lambdas;
+	SafeNumeric<uintptr_t> *_operator_feedback_ptr = nullptr;
+	SafeNumeric<uintptr_t> *_call_feedback_ptr = nullptr;
+	int _operator_feedback_count = 0;
+	int _call_feedback_count = 0;
+	Mutex feedback_mutex;
 
 	int _code_size = 0;
 	int _default_arg_count = 0;

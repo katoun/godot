@@ -1,0 +1,9 @@
+GDTEST_OK
+~~ WARNING at line 25: (UNSAFE_METHOD_ACCESS) The method "value()" is not present on the inferred type "Variant" (but may be present on a subtype).
+~~ WARNING at line 28: (UNSAFE_METHOD_ACCESS) The method "value()" is not present on the inferred type "Variant" (but may be present on a subtype).
+~~ WARNING at line 44: (UNSAFE_CALL_ARGUMENT) The argument 1 of the function "call_value()" requires the subtype "Variant" but the supertype "Variant" was provided.
+~~ WARNING at line 46: (UNSAFE_CALL_ARGUMENT) The argument 1 of the function "call_value()" requires the subtype "Variant" but the supertype "Variant" was provided.
+~~ WARNING at line 47: (UNSAFE_CALL_ARGUMENT) The argument 1 of the function "call_value()" requires the subtype "Variant" but the supertype "Variant" was provided.
+operator feedback: ok
+call feedback: ok
+call feedback invalidation: ok

@@ -128,6 +128,7 @@ private:
 	Mutex func_ptrs_to_update_mutex;
 
 	void _recurse_replace_function_ptrs(const HashMap<GDScriptFunction *, GDScriptFunction *> &p_replacements) const;
+	void _invalidate_function_call_caches();
 
 #ifdef TOOLS_ENABLED
 	// For static data storage during hot-reloading.
@@ -447,6 +448,8 @@ class GDScriptLanguage : public ScriptLanguage {
 	friend class GDScriptFunction;
 
 	SelfList<GDScriptFunction>::List function_list;
+	// Raw function pointers in call feedback are valid only for this epoch.
+	SafeNumeric<uint64_t> function_call_cache_epoch{ 1 };
 #ifdef DEBUG_ENABLED
 	bool profiling;
 	bool profile_native_calls;

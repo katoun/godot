@@ -809,6 +809,7 @@ Error GDScript::reload(bool p_keep_state) {
 	}
 #endif
 
+	_invalidate_function_call_caches();
 	valid = false;
 	GDScriptParser parser;
 	Error err;
@@ -1426,11 +1427,18 @@ void GDScript::_recurse_replace_function_ptrs(const HashMap<GDScriptFunction *, 
 	}
 }
 
+void GDScript::_invalidate_function_call_caches() {
+	if (GDScriptLanguage::get_singleton()) {
+		GDScriptLanguage::get_singleton()->function_call_cache_epoch.increment();
+	}
+}
+
 void GDScript::clear() {
 	if (clearing) {
 		return;
 	}
 	clearing = true;
+	_invalidate_function_call_caches();
 
 	RBSet<GDScriptFunction *> functions_to_clear;
 

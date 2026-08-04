@@ -239,6 +239,24 @@ GDScriptFunction::~GDScriptFunction() {
 	for (int i = 0; i < lambdas.size(); i++) {
 		memdelete(lambdas[i]);
 	}
+	for (int i = 0; i < _operator_feedback_count; i++) {
+		OperatorFeedback *feedback = reinterpret_cast<OperatorFeedback *>(_operator_feedback_ptr[i].get());
+		if (feedback != nullptr) {
+			memdelete(feedback);
+		}
+	}
+	if (_operator_feedback_ptr != nullptr) {
+		memdelete_arr(_operator_feedback_ptr);
+	}
+	for (int i = 0; i < _call_feedback_count; i++) {
+		CallFeedback *feedback = reinterpret_cast<CallFeedback *>(_call_feedback_ptr[i].get());
+		if (feedback != nullptr) {
+			memdelete(feedback);
+		}
+	}
+	if (_call_feedback_ptr != nullptr) {
+		memdelete_arr(_call_feedback_ptr);
+	}
 
 	for (int i = 0; i < argument_types.size(); i++) {
 		argument_types.write[i].script_type_ref = Ref<Script>();

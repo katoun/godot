@@ -231,6 +231,15 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 		function->_code_size = 0;
 	}
 
+	function->_operator_feedback_count = operator_feedback_count;
+	if (operator_feedback_count > 0) {
+		function->_operator_feedback_ptr = memnew_arr(SafeNumeric<uintptr_t>, operator_feedback_count);
+	}
+	function->_call_feedback_count = call_feedback_count;
+	if (call_feedback_count > 0) {
+		function->_call_feedback_ptr = memnew_arr(SafeNumeric<uintptr_t>, call_feedback_count);
+	}
+
 	if (function->default_arguments.size()) {
 		function->_default_arg_count = function->default_arguments.size() - 1;
 		function->_default_arg_ptr = &function->default_arguments[0];
@@ -576,12 +585,7 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 	append(Address());
 	append(p_target);
 	append(p_operator);
-	append(0); // Signature storage.
-	append(0); // Return type storage.
-	constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*(opcodes.ptr()));
-	for (int i = 0; i < _pointer_size; i++) {
-		append(0); // Space for function pointer.
-	}
+	append(operator_feedback_count++);
 }
 
 void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, Variant::Operator p_operator, const Address &p_left_operand, const Address &p_right_operand) {
@@ -633,12 +637,7 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 	append(p_right_operand);
 	append(p_target);
 	append(p_operator);
-	append(0); // Signature storage.
-	append(0); // Return type storage.
-	constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*(opcodes.ptr()));
-	for (int i = 0; i < _pointer_size; i++) {
-		append(0); // Space for function pointer.
-	}
+	append(operator_feedback_count++);
 }
 
 void GDScriptByteCodeGenerator::write_type_test(const Address &p_target, const Address &p_source, const GDScriptDataType &p_type) {
@@ -1093,6 +1092,7 @@ void GDScriptByteCodeGenerator::write_call(const Address &p_target, const Addres
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_function_name);
+	append(call_feedback_count++);
 	ct.cleanup();
 }
 
@@ -1118,6 +1118,7 @@ void GDScriptByteCodeGenerator::write_call_async(const Address &p_target, const 
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_function_name);
+	append(call_feedback_count++);
 	ct.cleanup();
 }
 
@@ -1352,6 +1353,7 @@ void GDScriptByteCodeGenerator::write_call_self(const Address &p_target, const S
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_function_name);
+	append(call_feedback_count++);
 	ct.cleanup();
 }
 
@@ -1365,6 +1367,7 @@ void GDScriptByteCodeGenerator::write_call_self_async(const Address &p_target, c
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_function_name);
+	append(call_feedback_count++);
 	ct.cleanup();
 }
 
@@ -1378,6 +1381,7 @@ void GDScriptByteCodeGenerator::write_call_script_function(const Address &p_targ
 	append(ct.target);
 	append(p_arguments.size());
 	append(p_function_name);
+	append(call_feedback_count++);
 	ct.cleanup();
 }
 
