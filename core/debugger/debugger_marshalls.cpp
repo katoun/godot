@@ -31,6 +31,7 @@
 #include "debugger_marshalls.h"
 
 #include "core/io/marshalls.h"
+#include "core/variant/struct_value.h"
 
 #define CHECK_SIZE(arr, expected, what) ERR_FAIL_COND_V_MSG((uint32_t)arr.size() < (uint32_t)(expected), false, String("Malformed ") + what + " message from script debugger, message too short. Expected size: " + itos(expected) + ", actual size: " + itos(arr.size()))
 #define CHECK_END(arr, expected, what) ERR_FAIL_COND_V_MSG((uint32_t)arr.size() > (uint32_t)expected, false, String("Malformed ") + what + " message from script debugger, message too long. Expected size: " + itos(expected) + ", actual size: " + itos(arr.size()))
@@ -184,6 +185,11 @@ Ref<Shortcut> DebuggerMarshalls::deserialize_key_shortcut(const Array &p_keys) {
 
 String DebuggerMarshalls::parse_type_from_variant(const Variant &p_variant) {
 	String name;
+	if (p_variant.get_type() == Variant::STRUCT) {
+		const StructValue value = p_variant;
+		const Ref<StructLayout> layout = value.get_layout();
+		return layout.is_valid() ? layout->get_type_descriptor() : String();
+	}
 
 	if (p_variant.get_type() == Variant::OBJECT) {
 		const Object *obj = p_variant.get_validated_object();

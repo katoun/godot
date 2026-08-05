@@ -738,6 +738,15 @@ public:
 	EditorPropertyRID();
 };
 
+class EditorPropertyStruct : public EditorProperty {
+	GDCLASS(EditorPropertyStruct, EditorProperty);
+	Label *label = nullptr;
+
+public:
+	virtual void update_property() override;
+	EditorPropertyStruct();
+};
+
 class EditorPropertyResource : public EditorProperty {
 	GDCLASS(EditorPropertyResource, EditorProperty);
 

@@ -36,6 +36,7 @@
 #include "core/io/marshalls.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
+#include "core/variant/struct_value.h"
 #include "editor/debugger/debug_adapter/debug_adapter_parser.h"
 #include "editor/debugger/script_editor_debugger.h"
 #include "editor/editor_log.h"
@@ -389,6 +390,27 @@ int DebugAdapterProtocol::parse_variant(const Variant &p_var) {
 			a.value = rtos(color.a);
 
 			Array arr = { r.to_json(), g.to_json(), b.to_json(), a.to_json() };
+			variable_list.insert(id, arr);
+			return id;
+		}
+		case Variant::STRUCT: {
+			const StructValue value = p_var;
+			const Ref<StructLayout> layout = value.get_layout();
+			if (layout.is_null()) {
+				return 0;
+			}
+			const int id = variable_id++;
+			Array arr;
+			for (int i = 0; i < layout->get_field_count(); i++) {
+				const StructLayout::Field &field = layout->get_field(i);
+				const Variant field_value = value.get(i);
+				DAP::Variable var;
+				var.name = field.name;
+				var.type = field.type == Variant::STRUCT && field.struct_layout.is_valid() ? field.struct_layout->get_type_descriptor() : Variant::get_type_name(field.type);
+				var.value = field_value;
+				var.variablesReference = parse_variant(field_value);
+				arr.push_back(var.to_json());
+			}
 			variable_list.insert(id, arr);
 			return id;
 		}

@@ -288,12 +288,17 @@ Variant StructLayout::get_default_value(int p_index) const {
 	return fields[p_index].default_value;
 }
 
+String StructLayout::get_type_descriptor() const {
+	ERR_FAIL_COND_V(!finalized, String());
+	return String(type_identifier) + "@" + String::num_uint64(schema_version) + "#" + String::num_uint64(schema_hash, 16).pad_zeros(16);
+}
+
 Dictionary StructLayout::to_dictionary() const {
 	ERR_FAIL_COND_V(!finalized, Dictionary());
 	Dictionary result;
 	result["type_identifier"] = String(type_identifier);
 	result["schema_version"] = int64_t(schema_version);
-	result["schema_hash"] = int64_t(schema_hash);
+	result["schema_fingerprint"] = String::num_uint64(schema_hash, 16).pad_zeros(16);
 
 	Array serialized_fields;
 	serialized_fields.resize(fields.size());
@@ -302,7 +307,6 @@ Dictionary StructLayout::to_dictionary() const {
 		Dictionary serialized_field;
 		serialized_field["name"] = String(field.name);
 		serialized_field["type"] = int64_t(field.type);
-		serialized_field["default_value"] = field.default_value;
 		if (field.type == Variant::STRUCT) {
 			serialized_field["struct_layout"] = field.struct_layout->to_dictionary();
 		}
@@ -335,7 +339,7 @@ Ref<StructLayout> StructLayout::from_dictionary(const Dictionary &p_data, Error 
 		const Variant field_value = serialized_fields[i];
 		ERR_FAIL_COND_V(field_value.get_type() != Variant::DICTIONARY, Ref<StructLayout>());
 		const Dictionary serialized_field = field_value;
-		ERR_FAIL_COND_V(!serialized_field.has("name") || !serialized_field.has("type") || !serialized_field.has("default_value"), Ref<StructLayout>());
+		ERR_FAIL_COND_V(!serialized_field.has("name") || !serialized_field.has("type"), Ref<StructLayout>());
 
 		const Variant name_value = serialized_field["name"];
 		const Variant type_value = serialized_field["type"];
@@ -351,14 +355,21 @@ Ref<StructLayout> StructLayout::from_dictionary(const Dictionary &p_data, Error 
 			nested_layout = from_dictionary(serialized_field["struct_layout"], &nested_error, p_recursion_count + 1);
 			ERR_FAIL_COND_V(nested_error != OK || nested_layout.is_null(), Ref<StructLayout>());
 		}
-		const Error field_error = result->add_field(StringName(name_value), Variant::Type(serialized_type), serialized_field["default_value"], nested_layout);
+		const Variant default_value = serialized_field.get("default_value", Variant()); // Compatibility with manifests emitted before schema descriptors stopped carrying defaults.
+		const Error field_error = result->add_field(StringName(name_value), Variant::Type(serialized_type), default_value, nested_layout);
 		ERR_FAIL_COND_V(field_error != OK, Ref<StructLayout>());
 	}
 
 	ERR_FAIL_COND_V(result->finalize() != OK, Ref<StructLayout>());
-	if (p_data.has("schema_hash")) {
-		const Variant schema_hash_value = p_data["schema_hash"];
-		ERR_FAIL_COND_V(schema_hash_value.get_type() != Variant::INT || uint64_t(int64_t(schema_hash_value)) != result->get_schema_hash(), Ref<StructLayout>());
+	const StringName fingerprint_key = p_data.has("schema_fingerprint") ? SNAME("schema_fingerprint") : SNAME("schema_hash");
+	if (p_data.has(fingerprint_key)) {
+		const Variant schema_hash_value = p_data[fingerprint_key];
+		if (fingerprint_key == SNAME("schema_fingerprint")) {
+			ERR_FAIL_COND_V(schema_hash_value.get_type() != Variant::STRING && schema_hash_value.get_type() != Variant::STRING_NAME, Ref<StructLayout>());
+			ERR_FAIL_COND_V(String(schema_hash_value).to_lower() != String::num_uint64(result->get_schema_fingerprint(), 16).pad_zeros(16), Ref<StructLayout>());
+		} else {
+			ERR_FAIL_COND_V(schema_hash_value.get_type() != Variant::INT || uint64_t(int64_t(schema_hash_value)) != result->get_schema_hash(), Ref<StructLayout>());
+		}
 	}
 	if (r_error != nullptr) {
 		*r_error = OK;
@@ -642,12 +653,11 @@ Dictionary StructValue::to_dictionary() const {
 	}
 	Dictionary result;
 	result["layout"] = _data->layout->to_dictionary();
-	Array serialized_values;
-	serialized_values.resize(_data->values.size());
+	Dictionary serialized_fields;
 	for (int i = 0; i < _data->values.size(); i++) {
-		serialized_values[i] = _data->values[i];
+		serialized_fields[_data->layout->get_field(i).name] = _data->values[i];
 	}
-	result["values"] = serialized_values;
+	result["fields"] = serialized_fields;
 	return result;
 }
 
@@ -662,18 +672,30 @@ StructValue StructValue::from_dictionary(const Dictionary &p_data, Error *r_erro
 		return StructValue();
 	}
 	ERR_FAIL_COND_V(p_recursion_count > Variant::MAX_RECURSION_DEPTH, StructValue());
-	ERR_FAIL_COND_V(!p_data.has("layout") || !p_data.has("values"), StructValue());
-	ERR_FAIL_COND_V(p_data["layout"].get_type() != Variant::DICTIONARY || p_data["values"].get_type() != Variant::ARRAY, StructValue());
+	ERR_FAIL_COND_V(!p_data.has("layout") || (!p_data.has("fields") && !p_data.has("values")), StructValue());
+	ERR_FAIL_COND_V(p_data["layout"].get_type() != Variant::DICTIONARY, StructValue());
 
 	Error layout_error = OK;
 	Ref<StructLayout> layout = StructLayout::from_dictionary(p_data["layout"], &layout_error, p_recursion_count + 1);
 	ERR_FAIL_COND_V(layout_error != OK || layout.is_null(), StructValue());
-	const Array serialized_values = p_data["values"];
-	ERR_FAIL_COND_V(serialized_values.size() != layout->get_field_count(), StructValue());
-
 	StructValue result(layout);
-	for (int i = 0; i < serialized_values.size(); i++) {
-		ERR_FAIL_COND_V(result.set(i, serialized_values[i]) != OK, StructValue());
+	if (p_data.has("fields")) {
+		ERR_FAIL_COND_V(p_data["fields"].get_type() != Variant::DICTIONARY, StructValue());
+		const Dictionary serialized_fields = p_data["fields"];
+		ERR_FAIL_COND_V(serialized_fields.size() != layout->get_field_count(), StructValue());
+		for (int i = 0; i < layout->get_field_count(); i++) {
+			const StringName field_name = layout->get_field(i).name;
+			ERR_FAIL_COND_V(!serialized_fields.has(field_name), StructValue());
+			ERR_FAIL_COND_V(result.set(i, serialized_fields[field_name]) != OK, StructValue());
+		}
+	} else {
+		// Compatibility with the initial positional wire representation.
+		ERR_FAIL_COND_V(p_data["values"].get_type() != Variant::ARRAY, StructValue());
+		const Array serialized_values = p_data["values"];
+		ERR_FAIL_COND_V(serialized_values.size() != layout->get_field_count(), StructValue());
+		for (int i = 0; i < serialized_values.size(); i++) {
+			ERR_FAIL_COND_V(result.set(i, serialized_values[i]) != OK, StructValue());
+		}
 	}
 	if (r_error != nullptr) {
 		*r_error = OK;

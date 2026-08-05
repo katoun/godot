@@ -5536,7 +5536,10 @@ String GDScriptParser::DataType::to_property_info_hint_string() const {
 				return native_type;
 			}
 		case STRUCT:
-			return struct_type != nullptr ? struct_type->fqsn : "StructValue";
+			if (struct_type != nullptr && struct_type->layout.is_valid()) {
+				return itos(Variant::STRUCT) + ":" + struct_type->layout->get_type_descriptor();
+			}
+			return Variant::get_type_name(Variant::STRUCT);
 		case ENUM:
 			return String(native_type).replace("::", ".");
 		case VARIANT:
@@ -5611,6 +5614,9 @@ PropertyInfo GDScriptParser::DataType::to_property_info(const String &p_name) co
 		case STRUCT:
 			result.type = Variant::STRUCT;
 			result.class_name = struct_type != nullptr ? StringName(struct_type->fqsn) : StringName();
+			if (struct_type != nullptr && struct_type->layout.is_valid()) {
+				result.hint_string = struct_type->layout->get_type_descriptor();
+			}
 			break;
 		case ENUM:
 			if (is_meta_type) {

@@ -663,7 +663,7 @@ public:
 		int bsize = array_b.size();
 
 		if (array_a.is_typed() && array_a.is_same_typed(array_b)) {
-			sum.set_typed(array_a.get_typed_builtin(), array_a.get_typed_class_name(), array_a.get_typed_script());
+			sum.set_typed(array_a.get_typed_builtin(), array_a.get_typed_class_name(), array_a.get_typed_type_descriptor());
 		}
 
 		sum.resize(asize + bsize);

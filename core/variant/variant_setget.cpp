@@ -1308,7 +1308,12 @@ void Variant::get_property_list(List<PropertyInfo> *p_list) const {
 		if (layout.is_valid()) {
 			for (int i = 0; i < layout->get_field_count(); i++) {
 				const StructLayout::Field &field = layout->get_field(i);
-				p_list->push_back(PropertyInfo(field.type, field.name));
+				PropertyInfo property(field.type, field.name);
+				if (field.type == STRUCT && field.struct_layout.is_valid()) {
+					property.class_name = field.struct_layout->get_type_identifier();
+					property.hint_string = field.struct_layout->get_type_descriptor();
+				}
+				p_list->push_back(property);
 			}
 		}
 	} else if (type == OBJECT) {

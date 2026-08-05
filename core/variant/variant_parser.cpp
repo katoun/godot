@@ -36,6 +36,7 @@
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
 #include "core/string/string_buffer.h"
+#include "core/variant/container_type_validate.h"
 #include "core/variant/struct_value.h"
 
 char32_t VariantParser::Stream::get_char() {
@@ -1215,6 +1216,25 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			bool got_comma_token = false;
 			if (builtin_types.has(token.value)) {
 				key_type = builtin_types.get(token.value);
+				if (key_type == Variant::STRUCT) {
+					Variant descriptor;
+					err = parse_value(token, descriptor, p_stream, line, r_err_str, p_res_parser);
+					if (err != OK) {
+						if (err == ERR_PARSE_ERROR && token.type == TK_COMMA) {
+							err = OK;
+							r_err_str = String();
+							got_comma_token = true;
+						} else {
+							return err;
+						}
+					} else {
+						if (descriptor.get_type() != Variant::STRUCT) {
+							r_err_str = "Expected a StructValue descriptor for dictionary key type";
+							return ERR_PARSE_ERROR;
+						}
+						key_script = descriptor;
+					}
+				}
 			} else if (token.value == "Resource" || token.value == "SubResource" || token.value == "ExtResource") {
 				Variant resource;
 				err = parse_value(token, resource, p_stream, line, r_err_str, p_res_parser);
@@ -1261,6 +1281,25 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			bool got_bracket_token = false;
 			if (builtin_types.has(token.value)) {
 				value_type = builtin_types.get(token.value);
+				if (value_type == Variant::STRUCT) {
+					Variant descriptor;
+					err = parse_value(token, descriptor, p_stream, line, r_err_str, p_res_parser);
+					if (err != OK) {
+						if (err == ERR_PARSE_ERROR && token.type == TK_BRACKET_CLOSE) {
+							err = OK;
+							r_err_str = String();
+							got_bracket_token = true;
+						} else {
+							return err;
+						}
+					} else {
+						if (descriptor.get_type() != Variant::STRUCT) {
+							r_err_str = "Expected a StructValue descriptor for dictionary value type";
+							return ERR_PARSE_ERROR;
+						}
+						value_script = descriptor;
+					}
+				}
 			} else if (token.value == "Resource" || token.value == "SubResource" || token.value == "ExtResource") {
 				Variant resource;
 				err = parse_value(token, resource, p_stream, line, r_err_str, p_res_parser);
@@ -1351,7 +1390,29 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Array array = Array();
 			bool got_bracket_token = false;
 			if (builtin_types.has(token.value)) {
-				array.set_typed(builtin_types.get(token.value), StringName(), Variant());
+				const Variant::Type builtin_type = builtin_types.get(token.value);
+				if (builtin_type == Variant::STRUCT) {
+					Variant descriptor;
+					err = parse_value(token, descriptor, p_stream, line, r_err_str, p_res_parser);
+					if (err != OK) {
+						if (err == ERR_PARSE_ERROR && token.type == TK_BRACKET_CLOSE) {
+							err = OK;
+							r_err_str = String();
+							got_bracket_token = true;
+							array.set_typed(builtin_type, StringName(), Variant());
+						} else {
+							return err;
+						}
+					} else {
+						if (descriptor.get_type() != Variant::STRUCT) {
+							r_err_str = "Expected a StructValue descriptor for array element type";
+							return ERR_PARSE_ERROR;
+						}
+						array.set_typed(builtin_type, StringName(), descriptor);
+					}
+				} else {
+					array.set_typed(builtin_type, StringName(), Variant());
+				}
 			} else if (token.value == "Resource" || token.value == "SubResource" || token.value == "ExtResource") {
 				Variant resource;
 				err = parse_value(token, resource, p_stream, line, r_err_str, p_res_parser);
@@ -2277,11 +2338,14 @@ Error VariantWriter::write(const Variant &p_variant, StoreStringFunc p_store_str
 			if (dict.is_typed()) {
 				p_store_string_func(p_store_string_ud, "Dictionary[");
 
-				Variant::Type key_builtin_type = (Variant::Type)dict.get_typed_key_builtin();
+				const ContainerType key_type = dict.get_key_type();
+				Variant::Type key_builtin_type = key_type.builtin_type;
 				StringName key_class_name = dict.get_typed_key_class_name();
 				Ref<Script> key_script = dict.get_typed_key_script();
 
-				if (key_script.is_valid()) {
+				if (key_type.struct_layout.is_valid()) {
+					write(StructValue(key_type.struct_layout), p_store_string_func, p_store_string_ud, p_encode_res_func, p_encode_res_ud, p_recursion_count + 1, p_compat);
+				} else if (key_script.is_valid()) {
 					String resource_text;
 					if (p_encode_res_func) {
 						resource_text = p_encode_res_func(p_encode_res_ud, key_script);
@@ -2306,11 +2370,14 @@ Error VariantWriter::write(const Variant &p_variant, StoreStringFunc p_store_str
 
 				p_store_string_func(p_store_string_ud, ", ");
 
-				Variant::Type value_builtin_type = (Variant::Type)dict.get_typed_value_builtin();
+				const ContainerType value_type = dict.get_value_type();
+				Variant::Type value_builtin_type = value_type.builtin_type;
 				StringName value_class_name = dict.get_typed_value_class_name();
 				Ref<Script> value_script = dict.get_typed_value_script();
 
-				if (value_script.is_valid()) {
+				if (value_type.struct_layout.is_valid()) {
+					write(StructValue(value_type.struct_layout), p_store_string_func, p_store_string_ud, p_encode_res_func, p_encode_res_ud, p_recursion_count + 1, p_compat);
+				} else if (value_script.is_valid()) {
 					String resource_text;
 					if (p_encode_res_func) {
 						resource_text = p_encode_res_func(p_encode_res_ud, value_script);
@@ -2378,11 +2445,14 @@ Error VariantWriter::write(const Variant &p_variant, StoreStringFunc p_store_str
 			if (array.is_typed()) {
 				p_store_string_func(p_store_string_ud, "Array[");
 
-				Variant::Type builtin_type = (Variant::Type)array.get_typed_builtin();
+				const ContainerType element_type = array.get_element_type();
+				Variant::Type builtin_type = element_type.builtin_type;
 				StringName class_name = array.get_typed_class_name();
 				Ref<Script> script = array.get_typed_script();
 
-				if (script.is_valid()) {
+				if (element_type.struct_layout.is_valid()) {
+					write(StructValue(element_type.struct_layout), p_store_string_func, p_store_string_ud, p_encode_res_func, p_encode_res_ud, p_recursion_count + 1, p_compat);
+				} else if (script.is_valid()) {
 					String resource_text = String();
 					if (p_encode_res_func) {
 						resource_text = p_encode_res_func(p_encode_res_ud, script);

@@ -697,13 +697,16 @@ void GDScript::_static_default_init() {
 		if (type.builtin_type == Variant::ARRAY && type.has_container_element_type(0)) {
 			const GDScriptDataType element_type = type.get_container_element_type(0);
 			Array default_value;
-			default_value.set_typed(element_type.builtin_type, element_type.native_type, element_type.script_type);
+			const Variant descriptor = element_type.builtin_type == Variant::STRUCT && element_type.struct_layout.is_valid() ? Variant(StructValue(element_type.struct_layout)) : Variant(element_type.script_type);
+			default_value.set_typed(element_type.builtin_type, element_type.native_type, descriptor);
 			static_variables.write[E.value.index] = default_value;
 		} else if (type.builtin_type == Variant::DICTIONARY && type.has_container_element_types()) {
 			const GDScriptDataType key_type = type.get_container_element_type_or_variant(0);
 			const GDScriptDataType value_type = type.get_container_element_type_or_variant(1);
 			Dictionary default_value;
-			default_value.set_typed(key_type.builtin_type, key_type.native_type, key_type.script_type, value_type.builtin_type, value_type.native_type, value_type.script_type);
+			const Variant key_descriptor = key_type.builtin_type == Variant::STRUCT && key_type.struct_layout.is_valid() ? Variant(StructValue(key_type.struct_layout)) : Variant(key_type.script_type);
+			const Variant value_descriptor = value_type.builtin_type == Variant::STRUCT && value_type.struct_layout.is_valid() ? Variant(StructValue(value_type.struct_layout)) : Variant(value_type.script_type);
+			default_value.set_typed(key_type.builtin_type, key_type.native_type, key_descriptor, value_type.builtin_type, value_type.native_type, value_descriptor);
 			static_variables.write[E.value.index] = default_value;
 		} else {
 			Variant default_value;

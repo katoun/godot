@@ -35,6 +35,7 @@
 #include "core/io/resource_loader.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
+#include "core/variant/struct_value.h"
 #include "core/variant/typed_dictionary.h"
 #include "editor/docks/inspector_dock.h"
 #include "editor/editor_node.h"
@@ -451,6 +452,8 @@ void EditorDebuggerInspector::add_stack_variable(const Array &p_array, int p_off
 		if (n == "self") {
 			_object_selected(v);
 		}
+	} else if (var.var_type == Variant::STRUCT) {
+		hs = var.type_hint;
 	}
 
 	String type;
@@ -482,6 +485,12 @@ void EditorDebuggerInspector::add_stack_variable(const Array &p_array, int p_off
 	pinfo.type = v.get_type();
 	pinfo.hint = h;
 	pinfo.hint_string = hs;
+	if (var.var_type == Variant::STRUCT) {
+		const StructValue struct_value = v;
+		if (struct_value.is_valid()) {
+			pinfo.class_name = struct_value.get_layout()->get_type_identifier();
+		}
+	}
 
 	if ((p_offset == -1) || variables->prop_list.is_empty()) {
 		variables->prop_list.push_back(pinfo);

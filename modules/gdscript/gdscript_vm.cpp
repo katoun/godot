@@ -38,6 +38,26 @@
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
+#include "core/variant/container_type_validate.h"
+
+static Variant _get_container_type_descriptor(const GDScriptDataType &p_type) {
+	if (p_type.kind == GDScriptDataType::BUILTIN && p_type.builtin_type == Variant::STRUCT && p_type.struct_layout.is_valid()) {
+		return StructValue(p_type.struct_layout);
+	}
+	return p_type.script_type;
+}
+
+static bool _container_type_matches(const ContainerType &p_actual, Variant::Type p_builtin_type, const StringName &p_native_type, const Variant &p_descriptor) {
+	if (p_actual.builtin_type != p_builtin_type || p_actual.class_name != p_native_type) {
+		return false;
+	}
+	if (p_builtin_type == Variant::STRUCT && p_descriptor.get_type() == Variant::STRUCT) {
+		const StructValue descriptor = p_descriptor;
+		return descriptor.is_valid() && p_actual.struct_layout.is_valid() && descriptor.get_layout()->is_compatible(p_actual.struct_layout);
+	}
+	const Ref<Script> script_type = p_descriptor;
+	return p_actual.script == script_type;
+}
 
 #ifdef DEBUG_ENABLED
 
@@ -52,14 +72,23 @@ static bool _profile_count_as_native(const Object *p_base_obj, const StringName 
 	return ClassDB::class_exists(cname) && ClassDB::has_method(cname, p_methodname, false);
 }
 
-static String _get_element_type(Variant::Type builtin_type, const StringName &native_type, const Ref<Script> &script_type) {
+static String _get_element_type(Variant::Type p_builtin_type, const StringName &p_native_type, const Variant &p_descriptor) {
+	if (p_builtin_type == Variant::STRUCT && p_descriptor.get_type() == Variant::STRUCT) {
+		const StructValue value = p_descriptor;
+		return value.is_valid() ? value.get_layout()->get_type_descriptor() : Variant::get_type_name(p_builtin_type);
+	}
+	const Ref<Script> script_type = p_descriptor;
 	if (script_type.is_valid() && script_type->is_valid()) {
 		return GDScript::debug_get_script_name(script_type);
-	} else if (native_type != StringName()) {
-		return native_type.string();
+	} else if (p_native_type != StringName()) {
+		return p_native_type;
 	} else {
-		return Variant::get_type_name(builtin_type);
+		return Variant::get_type_name(p_builtin_type);
 	}
+}
+
+static String _get_element_type(const ContainerType &p_type) {
+	return p_type.struct_layout.is_valid() ? p_type.struct_layout->get_type_descriptor() : _get_element_type(p_type.builtin_type, p_type.class_name, p_type.script);
 }
 
 static String _get_var_type(const Variant *p_var) {
@@ -90,14 +119,13 @@ static String _get_var_type(const Variant *p_var) {
 			basestr = "Array";
 			const Array *p_array = VariantInternal::get_array(p_var);
 			if (p_array->is_typed()) {
-				basestr += "[" + _get_element_type((Variant::Type)p_array->get_typed_builtin(), p_array->get_typed_class_name(), p_array->get_typed_script()) + "]";
+				basestr += "[" + _get_element_type(p_array->get_element_type()) + "]";
 			}
 		} else if (p_var->get_type() == Variant::DICTIONARY) {
 			basestr = "Dictionary";
 			const Dictionary *p_dictionary = VariantInternal::get_dictionary(p_var);
 			if (p_dictionary->is_typed()) {
-				basestr += "[" + _get_element_type((Variant::Type)p_dictionary->get_typed_key_builtin(), p_dictionary->get_typed_key_class_name(), p_dictionary->get_typed_key_script()) +
-						", " + _get_element_type((Variant::Type)p_dictionary->get_typed_value_builtin(), p_dictionary->get_typed_value_class_name(), p_dictionary->get_typed_value_script()) + "]";
+				basestr += "[" + _get_element_type(p_dictionary->get_key_type()) + ", " + _get_element_type(p_dictionary->get_value_type()) + "]";
 			}
 		} else {
 			basestr = Variant::get_type_name(p_var->get_type());
@@ -127,7 +155,7 @@ Variant GDScriptFunction::_get_default_variant_for_data_type(const GDScriptDataT
 			// Typed array.
 			if (p_data_type.has_container_element_type(0)) {
 				const GDScriptDataType &element_type = p_data_type.get_container_element_type(0);
-				array.set_typed(element_type.builtin_type, element_type.native_type, element_type.script_type);
+				array.set_typed(element_type.builtin_type, element_type.native_type, _get_container_type_descriptor(element_type));
 			}
 
 			return array;
@@ -137,7 +165,7 @@ Variant GDScriptFunction::_get_default_variant_for_data_type(const GDScriptDataT
 			if (p_data_type.has_container_element_types()) {
 				const GDScriptDataType &key_type = p_data_type.get_container_element_type_or_variant(0);
 				const GDScriptDataType &value_type = p_data_type.get_container_element_type_or_variant(1);
-				dict.set_typed(key_type.builtin_type, key_type.native_type, key_type.script_type, value_type.builtin_type, value_type.native_type, value_type.script_type);
+				dict.set_typed(key_type.builtin_type, key_type.native_type, _get_container_type_descriptor(key_type), value_type.builtin_type, value_type.native_type, _get_container_type_descriptor(value_type));
 			}
 
 			return dict;
@@ -1284,7 +1312,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				bool result = false;
 				if (value->get_type() == Variant::ARRAY) {
 					Array *array = VariantInternal::get_array(value);
-					result = array->get_typed_builtin() == ((uint32_t)builtin_type) && array->get_typed_class_name() == native_type && array->get_typed_script() == *script_type;
+					result = _container_type_matches(array->get_element_type(), builtin_type, native_type, *script_type);
 				}
 
 				*dst = result;
@@ -1313,8 +1341,8 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				bool result = false;
 				if (value->get_type() == Variant::DICTIONARY) {
 					Dictionary *dictionary = VariantInternal::get_dictionary(value);
-					result = dictionary->get_typed_key_builtin() == ((uint32_t)key_builtin_type) && dictionary->get_typed_key_class_name() == key_native_type && dictionary->get_typed_key_script() == *key_script_type &&
-							dictionary->get_typed_value_builtin() == ((uint32_t)value_builtin_type) && dictionary->get_typed_value_class_name() == value_native_type && dictionary->get_typed_value_script() == *value_script_type;
+					result = _container_type_matches(dictionary->get_key_type(), key_builtin_type, key_native_type, *key_script_type) &&
+							_container_type_matches(dictionary->get_value_type(), value_builtin_type, value_native_type, *value_script_type);
 				}
 
 				*dst = result;
@@ -2022,7 +2050,7 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 
 				Array *array = VariantInternal::get_array(src);
 
-				if (array->get_typed_builtin() != ((uint32_t)builtin_type) || array->get_typed_class_name() != native_type || array->get_typed_script() != *script_type) {
+				if (!_container_type_matches(array->get_element_type(), builtin_type, native_type, *script_type)) {
 #ifdef DEBUG_ENABLED
 					err_text = vformat(R"(Trying to assign an array of type "%s" to a variable of type "Array[%s]".)",
 							_get_var_type(src), _get_element_type(builtin_type, native_type, *script_type));
@@ -2064,8 +2092,8 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 
 				Dictionary *dictionary = VariantInternal::get_dictionary(src);
 
-				if (dictionary->get_typed_key_builtin() != ((uint32_t)key_builtin_type) || dictionary->get_typed_key_class_name() != key_native_type || dictionary->get_typed_key_script() != *key_script_type ||
-						dictionary->get_typed_value_builtin() != ((uint32_t)value_builtin_type) || dictionary->get_typed_value_class_name() != value_native_type || dictionary->get_typed_value_script() != *value_script_type) {
+				if (!_container_type_matches(dictionary->get_key_type(), key_builtin_type, key_native_type, *key_script_type) ||
+						!_container_type_matches(dictionary->get_value_type(), value_builtin_type, value_native_type, *value_script_type)) {
 #ifdef DEBUG_ENABLED
 					err_text = vformat(R"(Trying to assign a dictionary of type "%s" to a variable of type "Dictionary[%s, %s]".)",
 							_get_var_type(src), _get_element_type(key_builtin_type, key_native_type, *key_script_type),
@@ -3572,7 +3600,7 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 
 				Array *array = VariantInternal::get_array(r);
 
-				if (array->get_typed_builtin() != ((uint32_t)builtin_type) || array->get_typed_class_name() != native_type || array->get_typed_script() != *script_type) {
+				if (!_container_type_matches(array->get_element_type(), builtin_type, native_type, *script_type)) {
 #ifdef DEBUG_ENABLED
 					err_text = vformat(R"(Trying to return a value of type "%s" from a function whose return type is "Array[%s]".)",
 							_get_var_type(r), _get_element_type(builtin_type, native_type, *script_type));
@@ -3615,8 +3643,8 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 
 				Dictionary *dictionary = VariantInternal::get_dictionary(r);
 
-				if (dictionary->get_typed_key_builtin() != ((uint32_t)key_builtin_type) || dictionary->get_typed_key_class_name() != key_native_type || dictionary->get_typed_key_script() != *key_script_type ||
-						dictionary->get_typed_value_builtin() != ((uint32_t)value_builtin_type) || dictionary->get_typed_value_class_name() != value_native_type || dictionary->get_typed_value_script() != *value_script_type) {
+				if (!_container_type_matches(dictionary->get_key_type(), key_builtin_type, key_native_type, *key_script_type) ||
+						!_container_type_matches(dictionary->get_value_type(), value_builtin_type, value_native_type, *value_script_type)) {
 #ifdef DEBUG_ENABLED
 					err_text = vformat(R"(Trying to return a value of type "%s" from a function whose return type is "Dictionary[%s, %s]".)",
 							_get_var_type(r), _get_element_type(key_builtin_type, key_native_type, *key_script_type),

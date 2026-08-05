@@ -879,7 +879,19 @@ Array::Array(const Array &p_from, uint32_t p_type, const StringName &p_class_nam
 }
 
 void Array::set_typed(const ContainerType &p_element_type) {
-	set_typed(p_element_type.builtin_type, p_element_type.class_name, p_element_type.script);
+	ERR_FAIL_COND_MSG(_p->read_only, "Array is in read-only state.");
+	ERR_FAIL_COND_MSG(_p->array.size() > 0, "Type can only be set when array is empty.");
+	ERR_FAIL_COND_MSG(_p->refcount.get() > 1, "Type can only be set when array has no more than one user.");
+	ERR_FAIL_COND_MSG(_p->typed.type != Variant::NIL, "Type can only be set once.");
+	ERR_FAIL_COND_MSG(p_element_type.class_name != StringName() && p_element_type.builtin_type != Variant::OBJECT, "Class names can only be set for type OBJECT.");
+	ERR_FAIL_COND_MSG(p_element_type.script.is_valid() && p_element_type.class_name == StringName(), "Script class can only be set together with base class name.");
+	ERR_FAIL_COND_MSG(p_element_type.struct_layout.is_valid() && p_element_type.builtin_type != Variant::STRUCT, "Struct layouts can only be set for type STRUCT.");
+
+	_p->typed.type = p_element_type.builtin_type;
+	_p->typed.class_name = p_element_type.class_name;
+	_p->typed.script = p_element_type.script;
+	_p->typed.struct_layout = p_element_type.struct_layout;
+	_p->typed.where = "TypedArray";
 }
 
 void Array::set_typed(uint32_t p_type, const StringName &p_class_name, const Variant &p_script) {
@@ -888,12 +900,20 @@ void Array::set_typed(uint32_t p_type, const StringName &p_class_name, const Var
 	ERR_FAIL_COND_MSG(_p->refcount.get() > 1, "Type can only be set when array has no more than one user.");
 	ERR_FAIL_COND_MSG(_p->typed.type != Variant::NIL, "Type can only be set once.");
 	ERR_FAIL_COND_MSG(p_class_name != StringName() && p_type != Variant::OBJECT, "Class names can only be set for type OBJECT");
-	Ref<Script> script = p_script;
+	Ref<StructLayout> struct_layout;
+	Ref<Script> script;
+	if (p_type == Variant::STRUCT && p_script.get_type() == Variant::STRUCT) {
+		const StructValue descriptor = p_script;
+		struct_layout = descriptor.get_layout();
+	} else {
+		script = p_script;
+	}
 	ERR_FAIL_COND_MSG(script.is_valid() && p_class_name == StringName(), "Script class can only be set together with base class name");
 
 	_p->typed.type = Variant::Type(p_type);
 	_p->typed.class_name = p_class_name;
 	_p->typed.script = script;
+	_p->typed.struct_layout = struct_layout;
 	_p->typed.where = "TypedArray";
 }
 
@@ -914,6 +934,7 @@ ContainerType Array::get_element_type() const {
 	type.builtin_type = _p->typed.type;
 	type.class_name = _p->typed.class_name;
 	type.script = _p->typed.script;
+	type.struct_layout = _p->typed.struct_layout;
 	return type;
 }
 
@@ -927,6 +948,10 @@ StringName Array::get_typed_class_name() const {
 
 Variant Array::get_typed_script() const {
 	return _p->typed.script;
+}
+
+Variant Array::get_typed_type_descriptor() const {
+	return _p->typed.struct_layout.is_valid() ? Variant(StructValue(_p->typed.struct_layout)) : Variant(_p->typed.script);
 }
 
 Array Array::create_read_only() {

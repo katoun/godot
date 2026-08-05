@@ -87,6 +87,8 @@ enum ContainerTypeKind {
 	CONTAINER_TYPE_KIND_SCRIPT = 0b11,
 };
 
+static const char *STRUCT_LAYOUT_CONTAINER_TYPE = "@Godot.StructLayout";
+
 #define GET_CONTAINER_TYPE_KIND(m_header, m_field) \
 	((ContainerTypeKind)(((m_header) & HEADER_DATA_FIELD_##m_field##_MASK) >> HEADER_DATA_FIELD_##m_field##_SHIFT))
 
@@ -125,7 +127,7 @@ static Error _decode_string(const uint8_t *&buf, int &len, int *r_len, String &r
 	return OK;
 }
 
-static Error _decode_container_type(const uint8_t *&buf, int &len, int *r_len, bool p_allow_objects, ContainerTypeKind p_type_kind, ContainerType &r_type) {
+static Error _decode_container_type(const uint8_t *&buf, int &len, int *r_len, bool p_allow_objects, ContainerTypeKind p_type_kind, ContainerType &r_type, int p_depth) {
 	switch (p_type_kind) {
 		case CONTAINER_TYPE_KIND_NONE: {
 			return OK;
@@ -152,6 +154,24 @@ static Error _decode_container_type(const uint8_t *&buf, int &len, int *r_len, b
 			Error err = _decode_string(buf, len, r_len, str);
 			if (err) {
 				return err;
+			}
+
+			if (str == STRUCT_LAYOUT_CONTAINER_TYPE) {
+				Variant serialized_layout;
+				int used = 0;
+				err = decode_variant(serialized_layout, buf, len, &used, p_allow_objects, p_depth + 1);
+				ERR_FAIL_COND_V(err != OK, err);
+				ERR_FAIL_COND_V(serialized_layout.get_type() != Variant::DICTIONARY, ERR_INVALID_DATA);
+				Error layout_error = OK;
+				r_type.struct_layout = StructLayout::from_dictionary(serialized_layout, &layout_error, p_depth + 1);
+				ERR_FAIL_COND_V(layout_error != OK || r_type.struct_layout.is_null(), ERR_INVALID_DATA);
+				r_type.builtin_type = Variant::STRUCT;
+				buf += used;
+				len -= used;
+				if (r_len) {
+					*r_len += used;
+				}
+				return OK;
 			}
 
 			r_type.builtin_type = Variant::OBJECT;
@@ -810,7 +830,7 @@ Error decode_variant(Variant &r_variant, const uint8_t *p_buffer, int p_len, int
 
 			{
 				ContainerTypeKind key_type_kind = GET_CONTAINER_TYPE_KIND(header, TYPED_DICTIONARY_KEY);
-				Error err = _decode_container_type(buf, len, r_len, p_allow_objects, key_type_kind, key_type);
+				Error err = _decode_container_type(buf, len, r_len, p_allow_objects, key_type_kind, key_type, p_depth);
 				if (err) {
 					return err;
 				}
@@ -820,7 +840,7 @@ Error decode_variant(Variant &r_variant, const uint8_t *p_buffer, int p_len, int
 
 			{
 				ContainerTypeKind value_type_kind = GET_CONTAINER_TYPE_KIND(header, TYPED_DICTIONARY_VALUE);
-				Error err = _decode_container_type(buf, len, r_len, p_allow_objects, value_type_kind, value_type);
+				Error err = _decode_container_type(buf, len, r_len, p_allow_objects, value_type_kind, value_type, p_depth);
 				if (err) {
 					return err;
 				}
@@ -877,7 +897,7 @@ Error decode_variant(Variant &r_variant, const uint8_t *p_buffer, int p_len, int
 
 			{
 				ContainerTypeKind type_kind = GET_CONTAINER_TYPE_KIND(header, TYPED_ARRAY);
-				Error err = _decode_container_type(buf, len, r_len, p_allow_objects, type_kind, type);
+				Error err = _decode_container_type(buf, len, r_len, p_allow_objects, type_kind, type, p_depth);
 				if (err) {
 					return err;
 				}
@@ -1338,7 +1358,9 @@ static void _encode_string(const String &p_string, uint8_t *&buf, int &r_len) {
 
 static void _encode_container_type_header(const ContainerType &p_type, uint32_t &header, uint32_t p_shift, bool p_full_objects) {
 	if (p_type.builtin_type != Variant::NIL) {
-		if (p_type.script.is_valid()) {
+		if (p_type.struct_layout.is_valid()) {
+			header |= CONTAINER_TYPE_KIND_CLASS_NAME << p_shift;
+		} else if (p_type.script.is_valid()) {
 			header |= (p_full_objects ? CONTAINER_TYPE_KIND_SCRIPT : CONTAINER_TYPE_KIND_CLASS_NAME) << p_shift;
 		} else if (p_type.class_name != StringName()) {
 			header |= CONTAINER_TYPE_KIND_CLASS_NAME << p_shift;
@@ -1349,9 +1371,19 @@ static void _encode_container_type_header(const ContainerType &p_type, uint32_t 
 	}
 }
 
-static Error _encode_container_type(const ContainerType &p_type, uint8_t *&buf, int &r_len, bool p_full_objects) {
+static Error _encode_container_type(const ContainerType &p_type, uint8_t *&buf, int &r_len, bool p_full_objects, int p_depth) {
 	if (p_type.builtin_type != Variant::NIL) {
-		if (p_type.script.is_valid()) {
+		if (p_type.struct_layout.is_valid()) {
+			ERR_FAIL_COND_V(p_type.builtin_type != Variant::STRUCT, ERR_INVALID_DATA);
+			_encode_string(STRUCT_LAYOUT_CONTAINER_TYPE, buf, r_len);
+			int used = 0;
+			const Error err = encode_variant(p_type.struct_layout->to_dictionary(), buf, used, p_full_objects, p_depth + 1);
+			ERR_FAIL_COND_V(err != OK, err);
+			if (buf) {
+				buf += used;
+			}
+			r_len += used;
+		} else if (p_type.script.is_valid()) {
 			if (p_full_objects) {
 				String path = p_type.script->get_path();
 				ERR_FAIL_COND_V_MSG(path.is_empty() || !path.begins_with("res://"), ERR_UNAVAILABLE, "Failed to encode a path to a custom script for a container type.");
@@ -1847,14 +1879,14 @@ Error encode_variant(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bo
 			const Dictionary dict = p_variant;
 
 			{
-				Error err = _encode_container_type(dict.get_key_type(), buf, r_len, p_full_objects);
+				Error err = _encode_container_type(dict.get_key_type(), buf, r_len, p_full_objects, p_depth);
 				if (err) {
 					return err;
 				}
 			}
 
 			{
-				Error err = _encode_container_type(dict.get_value_type(), buf, r_len, p_full_objects);
+				Error err = _encode_container_type(dict.get_value_type(), buf, r_len, p_full_objects, p_depth);
 				if (err) {
 					return err;
 				}
@@ -1889,7 +1921,7 @@ Error encode_variant(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bo
 			const Array array = p_variant;
 
 			{
-				Error err = _encode_container_type(array.get_element_type(), buf, r_len, p_full_objects);
+				Error err = _encode_container_type(array.get_element_type(), buf, r_len, p_full_objects, p_depth);
 				if (err) {
 					return err;
 				}

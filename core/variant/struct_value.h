@@ -84,6 +84,8 @@ public:
 	StringName get_type_identifier() const { return type_identifier; }
 	uint32_t get_schema_version() const { return schema_version; }
 	uint64_t get_schema_hash() const { return schema_hash; }
+	uint64_t get_schema_fingerprint() const { return schema_hash; }
+	String get_type_descriptor() const;
 	int get_field_count() const { return fields.size(); }
 	const Field &get_field(int p_index) const;
 	int find_field(const StringName &p_name) const;

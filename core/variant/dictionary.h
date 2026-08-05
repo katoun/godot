@@ -121,6 +121,8 @@ public:
 	StringName get_typed_value_class_name() const;
 	Variant get_typed_key_script() const;
 	Variant get_typed_value_script() const;
+	Variant get_typed_key_type_descriptor() const;
+	Variant get_typed_value_type_descriptor() const;
 	const ContainerTypeValidate &get_key_validator() const;
 	const ContainerTypeValidate &get_value_validator() const;
 

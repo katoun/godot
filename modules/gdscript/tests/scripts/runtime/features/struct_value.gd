@@ -7,6 +7,11 @@ struct Wrapper:
 	var state: ProjectileState
 	var enabled: bool
 
+struct OtherState:
+	var position: Vector3
+	var velocity: Vector3
+	var lifetime: float = 1.0
+
 func make_state(x: float) -> ProjectileState:
 	return ProjectileState(Vector3(x, 2.0, 3.0), Vector3(4.0, 5.0, 6.0), 2.0)
 
@@ -58,3 +63,16 @@ func test():
 	var boxed: Variant = box_state(original)
 	print(typeof(boxed) == TYPE_STRUCT)
 	print(unbox_state(boxed) == original)
+
+	var states: Array[ProjectileState] = [original]
+	states.append(copy)
+	var boxed_states: Variant = states
+	print(states[0] == original)
+	print(boxed_states is Array[ProjectileState])
+	print(boxed_states is Array[OtherState])
+
+	var state_map: Dictionary[String, ProjectileState] = { "player": original }
+	var boxed_state_map: Variant = state_map
+	print(state_map["player"] == original)
+	print(boxed_state_map is Dictionary[String, ProjectileState])
+	print(boxed_state_map is Dictionary[String, OtherState])

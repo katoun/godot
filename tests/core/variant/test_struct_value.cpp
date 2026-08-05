@@ -32,9 +32,13 @@
 
 TEST_FORCE_LINK(test_struct_value)
 
+#include "core/debugger/debugger_marshalls.h"
+#include "core/io/json.h"
 #include "core/io/marshalls.h"
+#include "core/variant/container_type_validate.h"
 #include "core/variant/struct_value.h"
 #include "core/variant/variant_parser.h"
+#include "scene/main/multiplayer_api.h"
 
 namespace TestStructValue {
 
@@ -63,6 +67,8 @@ TEST_CASE("[Core][Variant][StructValue] Layout metadata is stable and preserves 
 	REQUIRE(layout.is_valid());
 	CHECK(layout->get_type_identifier() == SNAME("test.ProjectileState"));
 	CHECK(layout->get_schema_version() == 1);
+	CHECK(layout->get_schema_fingerprint() == layout->get_schema_hash());
+	CHECK(layout->get_type_descriptor().begins_with("test.ProjectileState@1#"));
 	CHECK(layout->get_field_count() == 3);
 	CHECK(layout->get_field(0).name == SNAME("position"));
 	CHECK(layout->get_field(1).type == Variant::VECTOR3);
@@ -178,6 +184,11 @@ TEST_CASE("[Core][Variant][StructValue] Nested trivial layouts stay inline") {
 	CHECK(double(boxed_coordinates.get(SNAME("x"))) == 12.0);
 	CHECK(double(boxed_coordinates.get(SNAME("y"))) == 24.0);
 	CHECK(bool(boxed.get(SNAME("enabled"))));
+	List<PropertyInfo> properties;
+	Variant(boxed).get_property_list(&properties);
+	REQUIRE(properties.front() != nullptr);
+	CHECK(properties.front()->get().class_name == coordinates->get_type_identifier());
+	CHECK(properties.front()->get().hint_string == coordinates->get_type_descriptor());
 	vertex->destroy_native(native);
 }
 
@@ -188,6 +199,25 @@ TEST_CASE("[Core][Variant][StructValue] Schema manifests and Variant serializers
 	REQUIRE(value.set(SNAME("position"), Vector3(10, 20, 30)) == OK);
 	REQUIRE(value.set(SNAME("lifetime"), 7.25) == OK);
 	const Variant source = value;
+	const Dictionary manifest = value.to_dictionary();
+	REQUIRE(manifest.has("layout"));
+	REQUIRE(manifest.has("fields"));
+	CHECK_FALSE(manifest.has("values"));
+	const Dictionary layout_manifest = manifest["layout"];
+	CHECK(layout_manifest["type_identifier"] == Variant("test.ProjectileState"));
+	CHECK(layout_manifest["schema_fingerprint"] == Variant(String::num_uint64(layout->get_schema_fingerprint(), 16).pad_zeros(16)));
+	CHECK_FALSE(layout_manifest.has("schema_hash"));
+	const Array field_layouts = layout_manifest["fields"];
+	for (const Variant &field_layout_variant : field_layouts) {
+		const Dictionary field_layout = field_layout_variant;
+		CHECK_FALSE(field_layout.has("native_offset"));
+		CHECK_FALSE(field_layout.has("native_size"));
+		CHECK_FALSE(field_layout.has("native_alignment"));
+		CHECK_FALSE(field_layout.has("default_value"));
+	}
+	const Dictionary named_fields = manifest["fields"];
+	CHECK(named_fields["position"] == Variant(Vector3(10, 20, 30)));
+	CHECK(named_fields["lifetime"] == Variant(7.25));
 
 	Error manifest_error = OK;
 	const StructValue manifest_copy = StructValue::from_dictionary(value.to_dictionary(), &manifest_error);
@@ -219,6 +249,101 @@ TEST_CASE("[Core][Variant][StructValue] Schema manifests and Variant serializers
 	const Error parse_error = VariantParser::parse(&stream, parsed, error_text, error_line);
 	REQUIRE(parse_error == OK);
 	CHECK(parsed == source);
+
+	CHECK(DebuggerMarshalls::parse_type_from_variant(source) == layout->get_type_descriptor());
+
+	int rpc_size = 0;
+	REQUIRE(MultiplayerAPI::encode_and_compress_variant(source, nullptr, rpc_size, false) == OK);
+	Vector<uint8_t> rpc_data;
+	rpc_data.resize(rpc_size);
+	int rpc_written = 0;
+	REQUIRE(MultiplayerAPI::encode_and_compress_variant(source, rpc_data.ptrw(), rpc_written, false) == OK);
+	CHECK(rpc_written == rpc_size);
+	Variant rpc_decoded;
+	int rpc_read = 0;
+	REQUIRE(MultiplayerAPI::decode_and_decompress_variant(rpc_decoded, rpc_data.ptr(), rpc_data.size(), &rpc_read, false) == OK);
+	CHECK(rpc_read == rpc_size);
+	CHECK(rpc_decoded == source);
+}
+
+TEST_CASE("[Core][Variant][StructValue] Typed containers retain and enforce schema descriptors") {
+	const Ref<StructLayout> layout = make_projectile_layout();
+	REQUIRE(layout.is_valid());
+	StructValue value(layout);
+	REQUIRE(value.set(SNAME("lifetime"), 8.0) == OK);
+
+	ContainerType struct_type;
+	struct_type.builtin_type = Variant::STRUCT;
+	struct_type.struct_layout = layout;
+	Array array;
+	array.set_typed(struct_type);
+	array.push_back(value);
+	REQUIRE(array.size() == 1);
+	CHECK(array.get_element_type().struct_layout->is_compatible(layout));
+	CHECK(StructValue(array.get_typed_type_descriptor()).get_layout()->is_compatible(layout));
+	ContainerTypeValidate validator;
+	validator.type = Variant::STRUCT;
+	validator.struct_layout = layout;
+	CHECK(validator.test_validate(value));
+	const StructValue incompatible_value(make_projectile_layout(2));
+	CHECK_FALSE(validator.test_validate(incompatible_value));
+	Variant concatenated;
+	bool concatenation_valid = false;
+	Variant::evaluate(Variant::OP_ADD, array, array, concatenated, concatenation_valid);
+	REQUIRE(concatenation_valid);
+	const Array concatenated_array = concatenated;
+	CHECK(concatenated_array.is_same_typed(array));
+
+	int encoded_size = 0;
+	REQUIRE(encode_variant(array, nullptr, encoded_size) == OK);
+	Vector<uint8_t> encoded;
+	encoded.resize(encoded_size);
+	int written_size = 0;
+	REQUIRE(encode_variant(array, encoded.ptrw(), written_size) == OK);
+	Variant decoded_variant;
+	REQUIRE(decode_variant(decoded_variant, encoded.ptr(), encoded.size()) == OK);
+	const Array decoded_array = decoded_variant;
+	CHECK(decoded_array.is_same_typed(array));
+	CHECK(decoded_array[0] == Variant(value));
+
+	const Variant json_native = JSON::to_native(JSON::from_native(array));
+	REQUIRE(json_native.get_type() == Variant::ARRAY);
+	const Array json_array = json_native;
+	CHECK(json_array.is_same_typed(array));
+	CHECK(json_array[0] == Variant(value));
+
+	String text;
+	REQUIRE(VariantWriter::write_to_string(array, text) == OK);
+	CHECK(text.begins_with("Array[StructValue("));
+	VariantParser::StreamString stream;
+	stream.s = text;
+	String error_text;
+	int error_line = 0;
+	Variant parsed;
+	REQUIRE(VariantParser::parse(&stream, parsed, error_text, error_line) == OK);
+	const Array parsed_array = parsed;
+	CHECK(parsed_array.is_same_typed(array));
+	CHECK(parsed_array[0] == Variant(value));
+
+	ContainerType string_type;
+	string_type.builtin_type = Variant::STRING;
+	Dictionary dictionary;
+	dictionary.set_typed(string_type, struct_type);
+	dictionary["projectile"] = value;
+	CHECK(StructValue(dictionary.get_typed_value_type_descriptor()).get_layout()->is_compatible(layout));
+	REQUIRE(encode_variant(dictionary, nullptr, encoded_size) == OK);
+	encoded.resize(encoded_size);
+	REQUIRE(encode_variant(dictionary, encoded.ptrw(), written_size) == OK);
+	REQUIRE(decode_variant(decoded_variant, encoded.ptr(), encoded.size()) == OK);
+	const Dictionary decoded_dictionary = decoded_variant;
+	CHECK(decoded_dictionary.is_same_typed(dictionary));
+	CHECK(decoded_dictionary["projectile"] == Variant(value));
+
+	const Variant json_native_dictionary = JSON::to_native(JSON::from_native(dictionary));
+	REQUIRE(json_native_dictionary.get_type() == Variant::DICTIONARY);
+	const Dictionary json_dictionary = json_native_dictionary;
+	CHECK(json_dictionary.is_same_typed(dictionary));
+	CHECK(json_dictionary["projectile"] == Variant(value));
 }
 
 } // namespace TestStructValue

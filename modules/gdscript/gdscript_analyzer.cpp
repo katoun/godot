@@ -5817,7 +5817,8 @@ Array GDScriptAnalyzer::make_array_from_element_datatype(const GDScriptParser::D
 
 		array.set_typed(p_element_datatype.builtin_type, p_element_datatype.native_type, script_type);
 	} else {
-		array.set_typed(p_element_datatype.builtin_type, StringName(), Variant());
+		const Variant descriptor = p_element_datatype.builtin_type == Variant::STRUCT && p_element_datatype.struct_type != nullptr && p_element_datatype.struct_type->layout.is_valid() ? Variant(StructValue(p_element_datatype.struct_type->layout)) : Variant();
+		array.set_typed(p_element_datatype.builtin_type, StringName(), descriptor);
 	}
 
 	return array;
@@ -5860,6 +5861,12 @@ Dictionary GDScriptAnalyzer::make_dictionary_from_element_datatype(const GDScrip
 
 		value_name = p_value_element_datatype.native_type;
 		value_script = script_type;
+	}
+	if (p_key_element_datatype.builtin_type == Variant::STRUCT && p_key_element_datatype.struct_type != nullptr && p_key_element_datatype.struct_type->layout.is_valid()) {
+		key_script = StructValue(p_key_element_datatype.struct_type->layout);
+	}
+	if (p_value_element_datatype.builtin_type == Variant::STRUCT && p_value_element_datatype.struct_type != nullptr && p_value_element_datatype.struct_type->layout.is_valid()) {
+		value_script = StructValue(p_value_element_datatype.struct_type->layout);
 	}
 
 	dictionary.set_typed(p_key_element_datatype.builtin_type, key_name, key_script, p_value_element_datatype.builtin_type, value_name, value_script);

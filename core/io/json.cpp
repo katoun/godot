@@ -32,9 +32,9 @@
 
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
-#include "core/variant/struct_value.h"
 #include "core/object/script_language.h"
 #include "core/variant/container_type_validate.h"
+#include "core/variant/struct_value.h"
 
 const char *JSON::tk_name[TK_MAX] = {
 	"'{'",
@@ -657,7 +657,10 @@ void JSON::_bind_methods() {
 
 static bool _encode_container_type(Dictionary &r_dict, const String &p_key, const ContainerType &p_type, bool p_full_objects) {
 	if (p_type.builtin_type != Variant::NIL) {
-		if (p_type.script.is_valid()) {
+		if (p_type.struct_layout.is_valid()) {
+			ERR_FAIL_COND_V(p_type.builtin_type != Variant::STRUCT, false);
+			r_dict[p_key] = p_type.struct_layout->to_dictionary();
+		} else if (p_type.script.is_valid()) {
 			ERR_FAIL_COND_V(!p_full_objects, false);
 			const String path = p_type.script->get_path();
 			ERR_FAIL_COND_V_MSG(path.is_empty() || !path.begins_with("res://"), false, "Failed to encode a path to a custom script for a container type.");
@@ -1034,7 +1037,16 @@ static bool _decode_container_type(const Dictionary &p_dict, const String &p_key
 		return true;
 	}
 
-	const String type_name = p_dict[p_key];
+	const Variant encoded_type = p_dict[p_key];
+	if (encoded_type.get_type() == Variant::DICTIONARY) {
+		Error layout_error = OK;
+		r_type.struct_layout = StructLayout::from_dictionary(encoded_type, &layout_error);
+		ERR_FAIL_COND_V(layout_error != OK || r_type.struct_layout.is_null(), false);
+		r_type.builtin_type = Variant::STRUCT;
+		return true;
+	}
+	ERR_FAIL_COND_V(encoded_type.get_type() != Variant::STRING && encoded_type.get_type() != Variant::STRING_NAME, false);
+	const String type_name = encoded_type;
 
 	const Variant::Type builtin_type = Variant::get_type_by_name(type_name);
 	if (builtin_type < Variant::VARIANT_MAX && builtin_type != Variant::OBJECT) {

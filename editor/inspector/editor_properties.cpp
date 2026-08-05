@@ -37,6 +37,7 @@
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/string/translation_server.h"
+#include "core/variant/struct_value.h"
 #include "editor/docks/inspector_dock.h"
 #include "editor/docks/scene_tree_dock.h"
 #include "editor/editor_node.h"
@@ -3389,6 +3390,26 @@ EditorPropertyRID::EditorPropertyRID() {
 	add_child(label);
 }
 
+////////////// STRUCT //////////////
+
+void EditorPropertyStruct::update_property() {
+	const StructValue value = get_edited_property_value();
+	const Ref<StructLayout> layout = value.get_layout();
+	if (layout.is_valid()) {
+		label->set_text(vformat("%s (%d fields)", String(layout->get_type_identifier()), layout->get_field_count()));
+		label->set_tooltip_text(layout->get_type_descriptor());
+	} else {
+		label->set_text(TTR("Invalid StructValue"));
+		label->set_tooltip_text(String());
+	}
+}
+
+EditorPropertyStruct::EditorPropertyStruct() {
+	label = memnew(Label);
+	label->set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
+	add_child(label);
+}
+
 ////////////// RESOURCE //////////////////////
 
 void EditorPropertyResource::_set_read_only(bool p_read_only) {
@@ -4271,6 +4292,10 @@ EditorProperty *EditorInspectorDefaultPlugin::get_editor_for_property(Object *p_
 				return editor;
 			}
 
+		} break;
+		case Variant::STRUCT: {
+			EditorPropertyStruct *editor = memnew(EditorPropertyStruct);
+			return editor;
 		} break;
 		case Variant::CALLABLE: {
 			EditorPropertyCallable *editor = memnew(EditorPropertyCallable);

@@ -32,18 +32,20 @@
 
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
-#include "core/variant/variant.h"
+#include "core/variant/struct_value.h"
 
 struct ContainerType {
 	Variant::Type builtin_type = Variant::NIL;
 	StringName class_name;
 	Ref<Script> script;
+	Ref<StructLayout> struct_layout;
 };
 
 struct ContainerTypeValidate {
 	Variant::Type type = Variant::NIL;
 	StringName class_name;
 	Ref<Script> script;
+	Ref<StructLayout> struct_layout;
 	const char *where = "container";
 
 private:
@@ -74,6 +76,17 @@ private:
 			} else {
 				return false;
 			}
+		}
+
+		if (type == Variant::STRUCT && struct_layout.is_valid()) {
+			const StructValue value = inout_variant;
+			if (!value.is_valid() || !struct_layout->is_compatible(value.get_layout())) {
+				if (p_output_errors) {
+					ERR_FAIL_V_MSG(false, vformat("Attempted to %s a struct of type '%s' into a %s of incompatible type '%s'.", String(p_operation), value.is_valid() ? value.get_layout()->get_type_descriptor() : String("<invalid>"), where, struct_layout->get_type_descriptor()));
+				}
+				return false;
+			}
+			return true;
 		}
 
 		if (type != Variant::OBJECT) {
@@ -166,6 +179,11 @@ public:
 	_FORCE_INLINE_ bool can_reference(const ContainerTypeValidate &p_type) const {
 		if (type != p_type.type) {
 			return false;
+		} else if (type == Variant::STRUCT) {
+			if (struct_layout.is_null()) {
+				return true;
+			}
+			return p_type.struct_layout.is_valid() && struct_layout->is_compatible(p_type.struct_layout);
 		} else if (type != Variant::OBJECT) {
 			return true;
 		}
@@ -190,9 +208,10 @@ public:
 	}
 
 	_FORCE_INLINE_ bool operator==(const ContainerTypeValidate &p_type) const {
-		return type == p_type.type && class_name == p_type.class_name && script == p_type.script;
+		const bool same_struct_layout = struct_layout == p_type.struct_layout || (struct_layout.is_valid() && struct_layout->is_compatible(p_type.struct_layout));
+		return type == p_type.type && class_name == p_type.class_name && script == p_type.script && same_struct_layout;
 	}
 	_FORCE_INLINE_ bool operator!=(const ContainerTypeValidate &p_type) const {
-		return type != p_type.type || class_name != p_type.class_name || script != p_type.script;
+		return !(*this == p_type);
 	}
 };

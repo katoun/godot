@@ -37,6 +37,23 @@
 
 #include "core/object/class_db.h"
 #include "core/templates/hashfuncs.h"
+#include "core/variant/container_type_validate.h"
+
+static bool _gdscript_container_type_matches(const GDScriptDataType &p_expected, const ContainerType &p_actual) {
+	if (p_actual.script.is_valid()) {
+		return (p_expected.kind == GDScriptDataType::SCRIPT || p_expected.kind == GDScriptDataType::GDSCRIPT) && p_expected.script_type == p_actual.script.ptr();
+	}
+	if (p_actual.class_name != StringName()) {
+		return p_expected.kind == GDScriptDataType::NATIVE && p_expected.native_type == p_actual.class_name;
+	}
+	if (p_expected.kind != GDScriptDataType::BUILTIN || p_expected.builtin_type != p_actual.builtin_type) {
+		return false;
+	}
+	if (p_expected.builtin_type == Variant::STRUCT && p_expected.struct_layout.is_valid()) {
+		return p_actual.struct_layout.is_valid() && p_expected.struct_layout->is_compatible(p_actual.struct_layout);
+	}
+	return true;
+}
 
 bool GDScriptDataType::is_type(const Variant &p_variant, bool p_allow_implicit_conversion) const {
 	switch (kind) {
@@ -52,18 +69,7 @@ bool GDScriptDataType::is_type(const Variant &p_variant, bool p_allow_implicit_c
 			} else if (valid && builtin_type == Variant::ARRAY && has_container_element_type(0)) {
 				Array array = p_variant;
 				if (array.is_typed()) {
-					const GDScriptDataType &elem_type = container_element_types[0];
-					Variant::Type array_builtin_type = (Variant::Type)array.get_typed_builtin();
-					StringName array_native_type = array.get_typed_class_name();
-					Ref<Script> array_script_type_ref = array.get_typed_script();
-
-					if (array_script_type_ref.is_valid()) {
-						valid = (elem_type.kind == SCRIPT || elem_type.kind == GDSCRIPT) && elem_type.script_type == array_script_type_ref.ptr();
-					} else if (array_native_type != StringName()) {
-						valid = elem_type.kind == NATIVE && elem_type.native_type == array_native_type;
-					} else {
-						valid = elem_type.kind == BUILTIN && elem_type.builtin_type == array_builtin_type;
-					}
+					valid = _gdscript_container_type_matches(container_element_types[0], array.get_element_type());
 				} else {
 					valid = false;
 				}
@@ -71,33 +77,11 @@ bool GDScriptDataType::is_type(const Variant &p_variant, bool p_allow_implicit_c
 				Dictionary dictionary = p_variant;
 				if (dictionary.is_typed()) {
 					if (dictionary.is_typed_key()) {
-						GDScriptDataType key = get_container_element_type_or_variant(0);
-						Variant::Type key_builtin_type = (Variant::Type)dictionary.get_typed_key_builtin();
-						StringName key_native_type = dictionary.get_typed_key_class_name();
-						Ref<Script> key_script_type_ref = dictionary.get_typed_key_script();
-
-						if (key_script_type_ref.is_valid()) {
-							valid = (key.kind == SCRIPT || key.kind == GDSCRIPT) && key.script_type == key_script_type_ref.ptr();
-						} else if (key_native_type != StringName()) {
-							valid = key.kind == NATIVE && key.native_type == key_native_type;
-						} else {
-							valid = key.kind == BUILTIN && key.builtin_type == key_builtin_type;
-						}
+						valid = _gdscript_container_type_matches(get_container_element_type_or_variant(0), dictionary.get_key_type());
 					}
 
 					if (valid && dictionary.is_typed_value()) {
-						GDScriptDataType value = get_container_element_type_or_variant(1);
-						Variant::Type value_builtin_type = (Variant::Type)dictionary.get_typed_value_builtin();
-						StringName value_native_type = dictionary.get_typed_value_class_name();
-						Ref<Script> value_script_type_ref = dictionary.get_typed_value_script();
-
-						if (value_script_type_ref.is_valid()) {
-							valid = (value.kind == SCRIPT || value.kind == GDSCRIPT) && value.script_type == value_script_type_ref.ptr();
-						} else if (value_native_type != StringName()) {
-							valid = value.kind == NATIVE && value.native_type == value_native_type;
-						} else {
-							valid = value.kind == BUILTIN && value.builtin_type == value_builtin_type;
-						}
+						valid = _gdscript_container_type_matches(get_container_element_type_or_variant(1), dictionary.get_value_type());
 					}
 				} else {
 					valid = false;

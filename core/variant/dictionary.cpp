@@ -386,7 +386,7 @@ uint32_t Dictionary::recursive_hash(int recursion_count) const {
 Array Dictionary::keys() const {
 	Array varr;
 	if (is_typed_key()) {
-		varr.set_typed(get_typed_key_builtin(), get_typed_key_class_name(), get_typed_key_script());
+		varr.set_typed(get_key_type());
 	}
 	if (_p->variant_map.is_empty()) {
 		return varr;
@@ -406,7 +406,7 @@ Array Dictionary::keys() const {
 Array Dictionary::values() const {
 	Array varr;
 	if (is_typed_value()) {
-		varr.set_typed(get_typed_value_builtin(), get_typed_value_class_name(), get_typed_value_script());
+		varr.set_typed(get_value_type());
 	}
 	if (_p->variant_map.is_empty()) {
 		return varr;
@@ -638,7 +638,26 @@ Dictionary Dictionary::recursive_duplicate(bool p_deep, ResourceDeepDuplicateMod
 }
 
 void Dictionary::set_typed(const ContainerType &p_key_type, const ContainerType &p_value_type) {
-	set_typed(p_key_type.builtin_type, p_key_type.class_name, p_key_type.script, p_value_type.builtin_type, p_value_type.class_name, p_key_type.script);
+	ERR_FAIL_COND_MSG(_p->read_only, "Dictionary is in read-only state.");
+	ERR_FAIL_COND_MSG(_p->variant_map.size() > 0, "Type can only be set when dictionary is empty.");
+	ERR_FAIL_COND_MSG(_p->refcount.get() > 1, "Type can only be set when dictionary has no more than one user.");
+	ERR_FAIL_COND_MSG(_p->typed_key.type != Variant::NIL || _p->typed_value.type != Variant::NIL, "Type can only be set once.");
+	ERR_FAIL_COND_MSG((p_key_type.class_name != StringName() && p_key_type.builtin_type != Variant::OBJECT) || (p_value_type.class_name != StringName() && p_value_type.builtin_type != Variant::OBJECT), "Class names can only be set for type OBJECT.");
+	ERR_FAIL_COND_MSG(p_key_type.script.is_valid() && p_key_type.class_name == StringName(), "Script class can only be set together with base class name.");
+	ERR_FAIL_COND_MSG(p_value_type.script.is_valid() && p_value_type.class_name == StringName(), "Script class can only be set together with base class name.");
+	ERR_FAIL_COND_MSG(p_key_type.struct_layout.is_valid() && p_key_type.builtin_type != Variant::STRUCT, "Struct layouts can only be set for type STRUCT.");
+	ERR_FAIL_COND_MSG(p_value_type.struct_layout.is_valid() && p_value_type.builtin_type != Variant::STRUCT, "Struct layouts can only be set for type STRUCT.");
+
+	_p->typed_key.type = p_key_type.builtin_type;
+	_p->typed_key.class_name = p_key_type.class_name;
+	_p->typed_key.script = p_key_type.script;
+	_p->typed_key.struct_layout = p_key_type.struct_layout;
+	_p->typed_key.where = "TypedDictionary.Key";
+	_p->typed_value.type = p_value_type.builtin_type;
+	_p->typed_value.class_name = p_value_type.class_name;
+	_p->typed_value.script = p_value_type.script;
+	_p->typed_value.struct_layout = p_value_type.struct_layout;
+	_p->typed_value.where = "TypedDictionary.Value";
 }
 
 void Dictionary::set_typed(uint32_t p_key_type, const StringName &p_key_class_name, const Variant &p_key_script, uint32_t p_value_type, const StringName &p_value_class_name, const Variant &p_value_script) {
@@ -647,19 +666,33 @@ void Dictionary::set_typed(uint32_t p_key_type, const StringName &p_key_class_na
 	ERR_FAIL_COND_MSG(_p->refcount.get() > 1, "Type can only be set when dictionary has no more than one user.");
 	ERR_FAIL_COND_MSG(_p->typed_key.type != Variant::NIL || _p->typed_value.type != Variant::NIL, "Type can only be set once.");
 	ERR_FAIL_COND_MSG((p_key_class_name != StringName() && p_key_type != Variant::OBJECT) || (p_value_class_name != StringName() && p_value_type != Variant::OBJECT), "Class names can only be set for type OBJECT.");
-	Ref<Script> key_script = p_key_script;
+	Ref<StructLayout> key_struct_layout;
+	Ref<Script> key_script;
+	if (p_key_type == Variant::STRUCT && p_key_script.get_type() == Variant::STRUCT) {
+		key_struct_layout = StructValue(p_key_script).get_layout();
+	} else {
+		key_script = p_key_script;
+	}
 	ERR_FAIL_COND_MSG(key_script.is_valid() && p_key_class_name == StringName(), "Script class can only be set together with base class name.");
-	Ref<Script> value_script = p_value_script;
+	Ref<StructLayout> value_struct_layout;
+	Ref<Script> value_script;
+	if (p_value_type == Variant::STRUCT && p_value_script.get_type() == Variant::STRUCT) {
+		value_struct_layout = StructValue(p_value_script).get_layout();
+	} else {
+		value_script = p_value_script;
+	}
 	ERR_FAIL_COND_MSG(value_script.is_valid() && p_value_class_name == StringName(), "Script class can only be set together with base class name.");
 
 	_p->typed_key.type = Variant::Type(p_key_type);
 	_p->typed_key.class_name = p_key_class_name;
 	_p->typed_key.script = key_script;
+	_p->typed_key.struct_layout = key_struct_layout;
 	_p->typed_key.where = "TypedDictionary.Key";
 
 	_p->typed_value.type = Variant::Type(p_value_type);
 	_p->typed_value.class_name = p_value_class_name;
 	_p->typed_value.script = value_script;
+	_p->typed_value.struct_layout = value_struct_layout;
 	_p->typed_value.where = "TypedDictionary.Value";
 }
 
@@ -696,6 +729,7 @@ ContainerType Dictionary::get_key_type() const {
 	type.builtin_type = _p->typed_key.type;
 	type.class_name = _p->typed_key.class_name;
 	type.script = _p->typed_key.script;
+	type.struct_layout = _p->typed_key.struct_layout;
 	return type;
 }
 
@@ -704,6 +738,7 @@ ContainerType Dictionary::get_value_type() const {
 	type.builtin_type = _p->typed_value.type;
 	type.class_name = _p->typed_value.class_name;
 	type.script = _p->typed_value.script;
+	type.struct_layout = _p->typed_value.struct_layout;
 	return type;
 }
 
@@ -729,6 +764,14 @@ Variant Dictionary::get_typed_key_script() const {
 
 Variant Dictionary::get_typed_value_script() const {
 	return _p->typed_value.script;
+}
+
+Variant Dictionary::get_typed_key_type_descriptor() const {
+	return _p->typed_key.struct_layout.is_valid() ? Variant(StructValue(_p->typed_key.struct_layout)) : Variant(_p->typed_key.script);
+}
+
+Variant Dictionary::get_typed_value_type_descriptor() const {
+	return _p->typed_value.struct_layout.is_valid() ? Variant(StructValue(_p->typed_value.struct_layout)) : Variant(_p->typed_value.script);
 }
 
 const ContainerTypeValidate &Dictionary::get_key_validator() const {
