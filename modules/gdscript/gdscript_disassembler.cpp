@@ -167,6 +167,35 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 6;
 			} break;
+			case OPCODE_GET_MATH_COMPONENT: {
+				const int metadata = _code_ptr[ip + 3];
+				text += "get math component ";
+				text += DADDR(2);
+				text += " = ";
+				text += DADDR(1);
+				text += "[";
+				text += itos(get_math_component_index(metadata));
+				text += "]";
+				incr += 4;
+			} break;
+			case OPCODE_SET_MATH_COMPONENT: {
+				const int metadata = _code_ptr[ip + 3];
+				text += "set math component ";
+				text += DADDR(1);
+				text += "[";
+				text += itos(get_math_component_index(metadata));
+				text += "] = ";
+				text += DADDR(2);
+				incr += 4;
+			} break;
+			case OPCODE_MATH_LENGTH: {
+				text += "math length ";
+				text += DADDR(2);
+				text += " = length(";
+				text += DADDR(1);
+				text += ")";
+				incr += 4;
+			} break;
 			case OPCODE_JUMP_COMPARE_INT:
 			case OPCODE_JUMP_COMPARE_FLOAT: {
 				text += opcode == OPCODE_JUMP_COMPARE_INT ? "jump-int-compare " : "jump-float-compare ";

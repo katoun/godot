@@ -158,6 +158,9 @@ public:
 		OPCODE_OPERATOR_INT,
 		OPCODE_OPERATOR_FLOAT,
 		OPCODE_OPERATOR_MATH,
+		OPCODE_GET_MATH_COMPONENT,
+		OPCODE_SET_MATH_COMPONENT,
+		OPCODE_MATH_LENGTH,
 		OPCODE_JUMP_COMPARE_INT,
 		OPCODE_JUMP_COMPARE_FLOAT,
 		OPCODE_JUMP_IF_BOOL,
@@ -353,6 +356,18 @@ public:
 
 	static Variant::Type get_math_result_type(int p_metadata) {
 		return Variant::Type((p_metadata >> MATH_RESULT_TYPE_SHIFT) & MATH_METADATA_MASK);
+	}
+
+	static int make_math_component_metadata(Variant::Type p_type, int p_component) {
+		return int(p_type) | (p_component << 8);
+	}
+
+	static Variant::Type get_math_component_type(int p_metadata) {
+		return Variant::Type(p_metadata & 0xff);
+	}
+
+	static int get_math_component_index(int p_metadata) {
+		return (p_metadata >> 8) & 0xff;
 	}
 
 	enum Address {
@@ -585,6 +600,7 @@ public:
 	bool has_optimizing_jit() const;
 	int get_optimizing_jit_ssa_node_count() const;
 	int get_optimizing_jit_eliminated_node_count() const;
+	int get_optimizing_jit_scalar_replaced_math_value_count() const;
 	String get_optimization_profile_key() const;
 	uint32_t get_optimization_fingerprint() const;
 

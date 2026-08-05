@@ -507,6 +507,34 @@ static bool is_direct_math_type(Variant::Type p_type) {
 	return p_type == Variant::VECTOR2 || p_type == Variant::VECTOR3 || p_type == Variant::COLOR;
 }
 
+static int get_direct_math_component(Variant::Type p_type, const StringName &p_name) {
+	if (p_type == Variant::VECTOR2 || p_type == Variant::VECTOR3) {
+		if (p_name == SNAME("x")) {
+			return 0;
+		}
+		if (p_name == SNAME("y")) {
+			return 1;
+		}
+		if (p_type == Variant::VECTOR3 && p_name == SNAME("z")) {
+			return 2;
+		}
+	} else if (p_type == Variant::COLOR) {
+		if (p_name == SNAME("r")) {
+			return 0;
+		}
+		if (p_name == SNAME("g")) {
+			return 1;
+		}
+		if (p_name == SNAME("b")) {
+			return 2;
+		}
+		if (p_name == SNAME("a")) {
+			return 3;
+		}
+	}
+	return -1;
+}
+
 static bool is_direct_math_operator(Variant::Operator p_operator, Variant::Type p_left_type, Variant::Type p_right_type, Variant::Type p_result_type) {
 	const bool unary = p_operator == Variant::OP_NEGATE || p_operator == Variant::OP_POSITIVE;
 	if (unary) {
@@ -1038,6 +1066,16 @@ void GDScriptByteCodeGenerator::write_get(const Address &p_target, const Address
 }
 
 void GDScriptByteCodeGenerator::write_set_named(const Address &p_target, const StringName &p_name, const Address &p_source) {
+	if (HAS_BUILTIN_TYPE(p_target) && IS_BUILTIN_TYPE(p_source, Variant::FLOAT)) {
+		const int component = get_direct_math_component(p_target.type.builtin_type, p_name);
+		if (component >= 0) {
+			append_opcode(GDScriptFunction::OPCODE_SET_MATH_COMPONENT);
+			append(p_target);
+			append(p_source);
+			append(GDScriptFunction::make_math_component_metadata(p_target.type.builtin_type, component));
+			return;
+		}
+	}
 	if (HAS_BUILTIN_TYPE(p_target) && Variant::get_member_validated_setter(p_target.type.builtin_type, p_name) &&
 			IS_BUILTIN_TYPE(p_source, Variant::get_member_type(p_target.type.builtin_type, p_name))) {
 		Variant::ValidatedSetter setter = Variant::get_member_validated_setter(p_target.type.builtin_type, p_name);
@@ -1057,6 +1095,16 @@ void GDScriptByteCodeGenerator::write_set_named(const Address &p_target, const S
 }
 
 void GDScriptByteCodeGenerator::write_get_named(const Address &p_target, const StringName &p_name, const Address &p_source) {
+	if (HAS_BUILTIN_TYPE(p_source)) {
+		const int component = get_direct_math_component(p_source.type.builtin_type, p_name);
+		if (component >= 0) {
+			append_opcode(GDScriptFunction::OPCODE_GET_MATH_COMPONENT);
+			append(p_source);
+			append(p_target);
+			append(GDScriptFunction::make_math_component_metadata(p_source.type.builtin_type, component));
+			return;
+		}
+	}
 	if (HAS_BUILTIN_TYPE(p_source) && Variant::get_member_validated_getter(p_source.type.builtin_type, p_name)) {
 		Variant::ValidatedGetter getter = Variant::get_member_validated_getter(p_source.type.builtin_type, p_name);
 		append_opcode(GDScriptFunction::OPCODE_GET_NAMED_VALIDATED);
@@ -1398,6 +1446,19 @@ void GDScriptByteCodeGenerator::write_call_utility(const Address &p_target, cons
 }
 
 void GDScriptByteCodeGenerator::write_call_builtin_type(const Address &p_target, const Address &p_base, Variant::Type p_type, const StringName &p_method, bool p_is_static, const Vector<Address> &p_arguments) {
+	if (!p_is_static && p_arguments.is_empty() && (p_type == Variant::VECTOR2 || p_type == Variant::VECTOR3) && p_method == SNAME("length")) {
+		CallTarget ct = get_call_target(p_target, Variant::FLOAT);
+		if (temporaries[ct.target.address].type != Variant::FLOAT) {
+			write_type_adjust(ct.target, Variant::FLOAT);
+		}
+		append_opcode(GDScriptFunction::OPCODE_MATH_LENGTH);
+		append(p_base);
+		append(ct.target);
+		append(p_type);
+		ct.cleanup();
+		return;
+	}
+
 	bool is_validated = false;
 
 	// Check if all types are correct.

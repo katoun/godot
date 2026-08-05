@@ -279,6 +279,15 @@ int GDScriptFunction::get_optimizing_jit_eliminated_node_count() const {
 #endif
 }
 
+int GDScriptFunction::get_optimizing_jit_scalar_replaced_math_value_count() const {
+#ifdef GDSCRIPT_BASELINE_JIT_ENABLED
+	const GDScriptBaselineJIT *jit = _get_optimizing_jit();
+	return jit != nullptr ? jit->get_scalar_replaced_math_value_count() : 0;
+#else
+	return 0;
+#endif
+}
+
 String GDScriptFunction::get_optimization_profile_key() const {
 	if (source.is_empty()) {
 		return String();

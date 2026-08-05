@@ -148,6 +148,14 @@ static void SLJIT_FUNC invoke_ptrcall(MethodBind *p_method, Object *p_instance, 
 	p_method->ptrcall(p_instance, p_arguments, r_return);
 }
 
+static double SLJIT_FUNC invoke_math_sqrt(double p_value) {
+	return Math::sqrt(p_value);
+}
+
+static float SLJIT_FUNC invoke_math_sqrt_f32(float p_value) {
+	return Math::sqrt(p_value);
+}
+
 class CompactSSAPlan {
 public:
 	enum ValueKind {
@@ -157,6 +165,11 @@ public:
 		VALUE_INT_OPERATOR,
 		VALUE_FLOAT_OPERATOR,
 		VALUE_MATH_OPERATOR,
+		VALUE_MATH_COMPONENT,
+		VALUE_MATH_EXTRACT,
+		VALUE_MATH_UPDATE,
+		VALUE_MATH_SET_COMPONENT,
+		VALUE_MATH_LENGTH,
 		VALUE_PTRCALL_RESULT,
 	};
 
@@ -169,7 +182,11 @@ public:
 		int constant_index = -1;
 		int replacement = -1;
 		int frame_offset = -1;
+		int component_index = -1;
 		Vector<int> inputs;
+		// Math aggregates have no frame slot in the optimizing tier. Their
+		// independently live scalar values are tracked here instead.
+		Vector<int> components;
 		uint64_t constant_bits = 0;
 		bool is_constant = false;
 		bool live = false;
@@ -216,6 +233,7 @@ private:
 	int ptrcall_arguments_offset = 0;
 	int ptrcall_return_offset = 0;
 	int eliminated_node_count = 0;
+	int scalar_replaced_math_value_count = 0;
 
 	static bool is_unary(Variant::Operator p_operator) {
 		return p_operator == Variant::OP_NEGATE || p_operator == Variant::OP_POSITIVE || p_operator == Variant::OP_BIT_NEGATE;
@@ -235,6 +253,9 @@ private:
 			case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
 				return 3;
 			case GDScriptFunction::OPCODE_ASSIGN_MATH:
+			case GDScriptFunction::OPCODE_GET_MATH_COMPONENT:
+			case GDScriptFunction::OPCODE_SET_MATH_COMPONENT:
+			case GDScriptFunction::OPCODE_MATH_LENGTH:
 				return 4;
 			case GDScriptFunction::OPCODE_OPERATOR_INT:
 			case GDScriptFunction::OPCODE_OPERATOR_FLOAT:
@@ -266,6 +287,27 @@ private:
 		return values.size() - 1;
 	}
 
+	void add_math_components(int p_value, ValueKind p_component_kind) {
+		const Variant::Type type = values[p_value].type;
+		const int component_count = get_math_component_count(type);
+		DEV_ASSERT(component_count > 0);
+		Vector<int> components;
+		for (int component = 0; component < component_count; component++) {
+			const int component_value = add_value(p_component_kind, type, values[p_value].block, values[p_value].ip);
+			values.write[component_value].component_index = component;
+			components.push_back(component_value);
+		}
+		values.write[p_value].components = components;
+		scalar_replaced_math_value_count++;
+	}
+
+	int get_math_component_value(int p_value, int p_component) const {
+		p_value = resolve(p_value);
+		DEV_ASSERT(p_value >= 0 && is_unboxed_math_type(values[p_value].type));
+		DEV_ASSERT(p_component >= 0 && p_component < values[p_value].components.size());
+		return resolve(values[p_value].components[p_component]);
+	}
+
 	int resolve(int p_value) const {
 		while (p_value >= 0 && values[p_value].replacement >= 0) {
 			p_value = values[p_value].replacement;
@@ -294,6 +336,28 @@ private:
 				break;
 			default:
 				break;
+		}
+		if (is_unboxed_math_type(type)) {
+			add_math_components(value_index, VALUE_MATH_COMPONENT);
+			for (int component = 0; component < get_math_component_count(type); component++) {
+				double component_value = 0.0;
+				switch (type) {
+					case Variant::VECTOR2:
+						component_value = (*VariantInternal::get_vector2(&constants[p_index]))[component];
+						break;
+					case Variant::VECTOR3:
+						component_value = (*VariantInternal::get_vector3(&constants[p_index]))[component];
+						break;
+					case Variant::COLOR:
+						component_value = (*VariantInternal::get_color(&constants[p_index]))[component];
+						break;
+					default:
+						break;
+				}
+				Value &component_node = values.write[values[value_index].components[component]];
+				component_node.is_constant = true;
+				memcpy(&component_node.constant_bits, &component_value, sizeof(component_value));
+			}
 		}
 		constant_values.write[p_index] = value_index;
 		return value_index;
@@ -347,7 +411,50 @@ private:
 						inputs.push_back(address_value(code[ip + 2], environment));
 					}
 					changed = set_inputs(instruction.output, inputs) || changed;
+					if (instruction.opcode == GDScriptFunction::OPCODE_OPERATOR_MATH && is_unboxed_math_type(values[instruction.output].type)) {
+						const int metadata = code[ip + 5];
+						const Variant::Type left_type = GDScriptFunction::get_math_left_type(metadata);
+						const Variant::Type right_type = GDScriptFunction::get_math_right_type(metadata);
+						for (int component = 0; component < values[instruction.output].components.size(); component++) {
+							Vector<int> component_inputs;
+							component_inputs.push_back(is_unboxed_math_type(left_type) ? get_math_component_value(inputs[0], component) : resolve(inputs[0]));
+							if (!is_unary(op)) {
+								component_inputs.push_back(is_unboxed_math_type(right_type) ? get_math_component_value(inputs[1], component) : resolve(inputs[1]));
+							}
+							changed = set_inputs(values[instruction.output].components[component], component_inputs) || changed;
+						}
+					}
 					const int destination = code[ip + 3] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
+				case GDScriptFunction::OPCODE_GET_MATH_COMPONENT: {
+					inputs.push_back(address_value(code[ip + 1], environment));
+					changed = set_inputs(instruction.output, inputs) || changed;
+					const int destination = code[ip + 2] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
+				case GDScriptFunction::OPCODE_SET_MATH_COMPONENT: {
+					inputs.push_back(address_value(code[ip + 1], environment));
+					inputs.push_back(address_value(code[ip + 2], environment));
+					changed = set_inputs(instruction.output, inputs) || changed;
+					const int component = GDScriptFunction::get_math_component_index(code[ip + 3]);
+					Vector<int> components = values[resolve(inputs[0])].components;
+					const int component_value = values[instruction.output].components[component];
+					Vector<int> component_inputs;
+					component_inputs.push_back(inputs[1]);
+					changed = set_inputs(component_value, component_inputs) || changed;
+					components.write[component] = component_value;
+					if (values[instruction.output].components != components) {
+						values.write[instruction.output].components = components;
+						changed = true;
+					}
+					const int destination = code[ip + 1] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
+				case GDScriptFunction::OPCODE_MATH_LENGTH: {
+					inputs.push_back(address_value(code[ip + 1], environment));
+					changed = set_inputs(instruction.output, inputs) || changed;
+					const int destination = code[ip + 2] & GDScriptFunction::ADDR_MASK;
 					environment.write[destination] = instruction.output;
 				} break;
 				case GDScriptFunction::OPCODE_JUMP_COMPARE_INT:
@@ -427,6 +534,9 @@ private:
 			if ((differs || block.phis[slot] >= 0) && incoming >= 0) {
 				if (block.phis[slot] < 0) {
 					block.phis.write[slot] = add_value(VALUE_PHI, stack_types[slot], p_block);
+					if (is_unboxed_math_type(stack_types[slot])) {
+						add_math_components(block.phis[slot], VALUE_PHI);
+					}
 				}
 				incoming = block.phis[slot];
 			}
@@ -457,6 +567,15 @@ private:
 					}
 				}
 				values.write[phi].inputs = phi_inputs;
+				if (is_unboxed_math_type(values[phi].type)) {
+					for (int component = 0; component < values[phi].components.size(); component++) {
+						Vector<int> component_inputs;
+						for (int input : phi_inputs) {
+							component_inputs.push_back(get_math_component_value(input, component));
+						}
+						values.write[values[phi].components[component]].inputs = component_inputs;
+					}
+				}
 			}
 		}
 	}
@@ -465,7 +584,7 @@ private:
 		if (!p_left.is_constant || !p_right.is_constant || p_left.type != p_right.type) {
 			return false;
 		}
-		if (is_unboxed_math_type(p_left.type)) {
+		if (is_unboxed_math_type(p_left.type) && (!p_left.components.is_empty() || !p_right.components.is_empty())) {
 			return p_left.constant_index >= 0 && p_left.constant_index == p_right.constant_index;
 		}
 		return p_left.constant_bits == p_right.constant_bits;
@@ -535,6 +654,65 @@ private:
 		return true;
 	}
 
+	double get_constant_numeric(int p_value) const {
+		const Value &value = values[resolve(p_value)];
+		DEV_ASSERT(value.is_constant);
+		if (value.type == Variant::INT) {
+			return double(int64_t(value.constant_bits));
+		}
+		double result = 0.0;
+		memcpy(&result, &value.constant_bits, sizeof(result));
+		return result;
+	}
+
+	bool fold_math_component(Value &r_value) {
+		if (r_value.inputs.is_empty()) {
+			return false;
+		}
+		for (int input : r_value.inputs) {
+			if (!values[resolve(input)].is_constant) {
+				return false;
+			}
+		}
+
+		double result = 0.0;
+		if (r_value.kind == VALUE_MATH_SET_COMPONENT) {
+			result = get_constant_numeric(r_value.inputs[0]);
+			if (!math_uses_double_components(r_value.type)) {
+				result = float(result);
+			}
+		} else if (math_uses_double_components(r_value.type)) {
+			const double lhs = get_constant_numeric(r_value.inputs[0]);
+			const double rhs = r_value.inputs.size() > 1 ? get_constant_numeric(r_value.inputs[1]) : 0.0;
+			switch (r_value.op) {
+				case Variant::OP_ADD: result = lhs + rhs; break;
+				case Variant::OP_SUBTRACT: result = lhs - rhs; break;
+				case Variant::OP_MULTIPLY: result = lhs * rhs; break;
+				case Variant::OP_DIVIDE: result = lhs / rhs; break;
+				case Variant::OP_NEGATE: result = -lhs; break;
+				case Variant::OP_POSITIVE: result = lhs; break;
+				default: return false;
+			}
+		} else {
+			const float lhs = float(get_constant_numeric(r_value.inputs[0]));
+			const float rhs = r_value.inputs.size() > 1 ? float(get_constant_numeric(r_value.inputs[1])) : 0.0f;
+			float float_result = 0.0f;
+			switch (r_value.op) {
+				case Variant::OP_ADD: float_result = lhs + rhs; break;
+				case Variant::OP_SUBTRACT: float_result = lhs - rhs; break;
+				case Variant::OP_MULTIPLY: float_result = lhs * rhs; break;
+				case Variant::OP_DIVIDE: float_result = lhs / rhs; break;
+				case Variant::OP_NEGATE: float_result = -lhs; break;
+				case Variant::OP_POSITIVE: float_result = lhs; break;
+				default: return false;
+			}
+			result = float_result;
+		}
+		memcpy(&r_value.constant_bits, &result, sizeof(result));
+		r_value.is_constant = true;
+		return true;
+	}
+
 	void optimize_values() {
 		// Local value numbering removes repeated pure expressions without
 		// requiring global alias or invalidation guards.
@@ -589,7 +767,12 @@ private:
 						eliminated_node_count++;
 						changed = true;
 					}
-				} else if (value.kind == VALUE_PHI && !value.inputs.is_empty()) {
+				} else if ((value.kind == VALUE_MATH_COMPONENT || value.kind == VALUE_MATH_SET_COMPONENT) && !value.inputs.is_empty()) {
+					if (fold_math_component(value)) {
+						eliminated_node_count++;
+						changed = true;
+					}
+				} else if (value.kind == VALUE_PHI && !value.inputs.is_empty() && (!is_unboxed_math_type(value.type) || value.components.is_empty())) {
 					int first = -1;
 					bool same = true;
 					for (int input : value.inputs) {
@@ -621,6 +804,18 @@ private:
 		}
 		Value &value = values.write[p_value];
 		value.live = true;
+		if (is_unboxed_math_type(value.type) && !value.components.is_empty()) {
+			const Vector<int> components = value.components;
+			for (int component : components) {
+				mark_live(component);
+			}
+			return;
+		}
+		if (value.kind == VALUE_MATH_EXTRACT) {
+			DEV_ASSERT(value.inputs.size() == 1);
+			mark_live(get_math_component_value(value.inputs[0], value.component_index));
+			return;
+		}
 		for (int input : value.inputs) {
 			mark_live(input);
 		}
@@ -647,29 +842,57 @@ private:
 			}
 		}
 		for (Value &value : values) {
-			if ((value.kind == VALUE_INT_OPERATOR || value.kind == VALUE_FLOAT_OPERATOR || value.kind == VALUE_MATH_OPERATOR) && value.replacement < 0 && !value.is_constant && !value.live) {
+			if ((value.kind == VALUE_INT_OPERATOR || value.kind == VALUE_FLOAT_OPERATOR || value.kind == VALUE_MATH_OPERATOR || value.kind == VALUE_MATH_COMPONENT || value.kind == VALUE_MATH_EXTRACT || value.kind == VALUE_MATH_SET_COMPONENT || value.kind == VALUE_MATH_LENGTH) && value.replacement < 0 && !value.is_constant && !value.live) {
 				eliminated_node_count++;
 			}
 		}
 	}
 
+	static bool is_scalar_replaced_aggregate(const Value &p_value) {
+		return is_unboxed_math_type(p_value.type) && !p_value.components.is_empty();
+	}
+
+	static int get_value_size(const Value &p_value) {
+		if (p_value.kind == VALUE_MATH_COMPONENT || p_value.kind == VALUE_MATH_SET_COMPONENT || (p_value.kind == VALUE_PHI && is_unboxed_math_type(p_value.type) && p_value.components.is_empty())) {
+			return get_math_component_size(p_value.type);
+		}
+		return get_unboxed_value_size(p_value.type);
+	}
+
+	static int get_value_alignment(const Value &p_value) {
+		if (p_value.kind == VALUE_MATH_COMPONENT || p_value.kind == VALUE_MATH_SET_COMPONENT || (p_value.kind == VALUE_PHI && is_unboxed_math_type(p_value.type) && p_value.components.is_empty())) {
+			return get_math_component_size(p_value.type);
+		}
+		return get_unboxed_value_alignment(p_value.type);
+	}
+
 	void allocate_frame() {
 		int offset = 0;
 		for (Value &value : values) {
-			if (value.live && !value.is_constant && value.replacement < 0) {
-				offset = align_native_offset(offset, MAX(TYPED_ABI_ALIGNMENT, get_unboxed_value_alignment(value.type)));
+			if (value.live && !value.is_constant && value.replacement < 0 && !is_scalar_replaced_aggregate(value)) {
+				offset = align_native_offset(offset, get_value_alignment(value));
 				value.frame_offset = offset;
-				offset += get_unboxed_value_size(value.type);
+				offset += get_value_size(value);
 			}
 		}
 
 		for (const Block &block : blocks) {
 			int scratch_size = 0;
 			for (int phi : block.phis) {
-				if (phi >= 0 && values[resolve(phi)].live && !values[resolve(phi)].is_constant) {
-					const Variant::Type type = values[resolve(phi)].type;
-					scratch_size = align_native_offset(scratch_size, MAX(TYPED_ABI_ALIGNMENT, get_unboxed_value_alignment(type)));
-					scratch_size += get_unboxed_value_size(type);
+				if (phi >= 0) {
+					const Value &phi_value = values[resolve(phi)];
+					if (is_scalar_replaced_aggregate(phi_value)) {
+						for (int component : phi_value.components) {
+							const Value &component_value = values[resolve(component)];
+							if (component_value.live && !component_value.is_constant) {
+								scratch_size = align_native_offset(scratch_size, get_value_alignment(component_value));
+								scratch_size += get_value_size(component_value);
+							}
+						}
+					} else if (phi_value.live && !phi_value.is_constant) {
+						scratch_size = align_native_offset(scratch_size, get_value_alignment(phi_value));
+						scratch_size += get_value_size(phi_value);
+					}
 				}
 			}
 			max_phi_copies = MAX(max_phi_copies, scratch_size);
@@ -756,6 +979,9 @@ public:
 		for (int slot = 0; slot < stack_size; slot++) {
 			if (stack_types[slot] != Variant::NIL) {
 				initial_values.write[slot] = add_value(VALUE_INPUT, stack_types[slot]);
+				if (is_unboxed_math_type(stack_types[slot])) {
+					add_math_components(initial_values[slot], VALUE_MATH_COMPONENT);
+				}
 			}
 		}
 		constant_values.resize(constant_count);
@@ -772,10 +998,30 @@ public:
 					const ValueKind kind = instruction.opcode == GDScriptFunction::OPCODE_OPERATOR_INT ? VALUE_INT_OPERATOR : (instruction.opcode == GDScriptFunction::OPCODE_OPERATOR_FLOAT ? VALUE_FLOAT_OPERATOR : VALUE_MATH_OPERATOR);
 					instruction.output = add_value(kind, stack_types[destination], block_index, cursor);
 					values.write[instruction.output].op = instruction.opcode == GDScriptFunction::OPCODE_OPERATOR_MATH ? GDScriptFunction::get_math_operator(code[cursor + 5]) : Variant::Operator(code[cursor + 4]);
+					if (instruction.opcode == GDScriptFunction::OPCODE_OPERATOR_MATH && is_unboxed_math_type(stack_types[destination])) {
+						add_math_components(instruction.output, VALUE_MATH_COMPONENT);
+						for (int component : values[instruction.output].components) {
+							values.write[component].op = values[instruction.output].op;
+						}
+					}
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_GET_MATH_COMPONENT) {
+					const int destination = code[cursor + 2] & GDScriptFunction::ADDR_MASK;
+					instruction.output = add_value(VALUE_MATH_EXTRACT, stack_types[destination], block_index, cursor);
+					values.write[instruction.output].component_index = GDScriptFunction::get_math_component_index(code[cursor + 3]);
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_SET_MATH_COMPONENT) {
+					const int destination = code[cursor + 1] & GDScriptFunction::ADDR_MASK;
+					instruction.output = add_value(VALUE_MATH_UPDATE, stack_types[destination], block_index, cursor);
+					add_math_components(instruction.output, VALUE_MATH_SET_COMPONENT);
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_MATH_LENGTH) {
+					const int destination = code[cursor + 2] & GDScriptFunction::ADDR_MASK;
+					instruction.output = add_value(VALUE_MATH_LENGTH, stack_types[destination], block_index, cursor);
 				} else if (instruction.opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN || instruction.opcode == GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN) {
 					const int instruction_argument_count = code[cursor + 1];
 					const int destination = code[cursor + 1 + instruction_argument_count] & GDScriptFunction::ADDR_MASK;
 					instruction.output = add_value(VALUE_PTRCALL_RESULT, stack_types[destination], block_index, cursor);
+					if (is_unboxed_math_type(stack_types[destination])) {
+						add_math_components(instruction.output, VALUE_MATH_COMPONENT);
+					}
 				}
 				instructions.push_back(instruction);
 				const int instruction_index = instructions.size() - 1;
@@ -847,6 +1093,7 @@ public:
 	const Instruction &get_instruction_at(int p_ip) const { return instructions[ip_to_instruction[p_ip]]; }
 	int get_block_at_ip(int p_ip) const { return ip_to_block[p_ip]; }
 	int get_resolved_value(int p_value) const { return resolve(p_value); }
+	int get_component_value(int p_value, int p_component) const { return get_math_component_value(p_value, p_component); }
 	int get_initial_value(int p_slot) const { return initial_values[p_slot]; }
 	int get_frame_size() const { return frame_size; }
 	int get_phi_scratch_offset() const { return phi_scratch_offset; }
@@ -855,6 +1102,7 @@ public:
 	int get_ptrcall_return_offset() const { return ptrcall_return_offset; }
 	int get_node_count() const { return values.size(); }
 	int get_eliminated_node_count() const { return eliminated_node_count; }
+	int get_scalar_replaced_math_value_count() const { return scalar_replaced_math_value_count; }
 };
 
 class BaselineCompiler {
@@ -889,6 +1137,7 @@ class BaselineCompiler {
 	CompactSSAPlan *ssa_plan = nullptr;
 	int ssa_node_count = 0;
 	int eliminated_node_count = 0;
+	int scalar_replaced_math_value_count = 0;
 
 	static bool is_unboxed_type(Variant::Type p_type) {
 		return is_unboxed_value_type(p_type);
@@ -1158,6 +1407,36 @@ class BaselineCompiler {
 					}
 					has_native_work = true;
 					ip += 6;
+				} break;
+				case GDScriptFunction::OPCODE_GET_MATH_COMPONENT:
+				case GDScriptFunction::OPCODE_SET_MATH_COMPONENT: {
+					if (ip + 4 > code_size || !is_valid_address(code[ip + 1], opcode == GDScriptFunction::OPCODE_SET_MATH_COMPONENT) || !is_valid_address(code[ip + 2], opcode == GDScriptFunction::OPCODE_GET_MATH_COMPONENT)) {
+						return false;
+					}
+					const int metadata = code[ip + 3];
+					const Variant::Type type = GDScriptFunction::get_math_component_type(metadata);
+					const int component = GDScriptFunction::get_math_component_index(metadata);
+					if (!is_unboxed_math_type(type) || component < 0 || component >= get_math_component_count(type)) {
+						return false;
+					}
+					const int math_address = code[ip + 1];
+					const int float_address = code[ip + 2];
+					if (!mark_address_type(math_address, type) || !mark_address_type(float_address, Variant::FLOAT)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 4;
+				} break;
+				case GDScriptFunction::OPCODE_MATH_LENGTH: {
+					if (ip + 4 > code_size || !is_valid_address(code[ip + 1]) || !is_valid_address(code[ip + 2], true)) {
+						return false;
+					}
+					const Variant::Type type = Variant::Type(code[ip + 3]);
+					if ((type != Variant::VECTOR2 && type != Variant::VECTOR3) || !mark_address_type(code[ip + 1], type) || !mark_address_type(code[ip + 2], Variant::FLOAT)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 4;
 				} break;
 				case GDScriptFunction::OPCODE_JUMP_COMPARE_INT:
 				case GDScriptFunction::OPCODE_JUMP_COMPARE_FLOAT: {
@@ -1685,6 +1964,59 @@ class BaselineCompiler {
 		emit_math_operator_values(SLJIT_R0, SLJIT_R1, SLJIT_R2, op, left_type, right_type, result_type);
 	}
 
+	void emit_math_component_get(int p_ip) {
+		const int metadata = code[p_ip + 3];
+		const Variant::Type type = GDScriptFunction::get_math_component_type(metadata);
+		const int component = GDScriptFunction::get_math_component_index(metadata);
+		emit_unboxed_pointer(code[p_ip + 1], SLJIT_R0);
+		sljit_emit_fop1(compiler, math_uses_double_components(type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32, SLJIT_FR0, 0, SLJIT_MEM1(SLJIT_R0), component * get_math_component_size(type));
+		if (!math_uses_double_components(type)) {
+			sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_F32, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		}
+		emit_store_float(code[p_ip + 2], SLJIT_FR0);
+	}
+
+	void emit_math_component_set(int p_ip) {
+		const int metadata = code[p_ip + 3];
+		const Variant::Type type = GDScriptFunction::get_math_component_type(metadata);
+		const int component = GDScriptFunction::get_math_component_index(metadata);
+		emit_load_float(code[p_ip + 2], SLJIT_FR0);
+		if (!math_uses_double_components(type)) {
+			sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		}
+		emit_unboxed_pointer(code[p_ip + 1], SLJIT_R0);
+		sljit_emit_fop1(compiler, math_uses_double_components(type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32, SLJIT_MEM1(SLJIT_R0), component * get_math_component_size(type), SLJIT_FR0, 0);
+	}
+
+	void emit_math_length_from_pointer(int p_pointer, Variant::Type p_type, int p_destination_offset = -1) {
+		const bool use_f64 = math_uses_double_components(p_type);
+		const int move_op = use_f64 ? SLJIT_MOV_F64 : SLJIT_MOV_F32;
+		const int mul_op = use_f64 ? SLJIT_MUL_F64 : SLJIT_MUL_F32;
+		const int add_op = use_f64 ? SLJIT_ADD_F64 : SLJIT_ADD_F32;
+		sljit_emit_fop1(compiler, move_op, SLJIT_FR0, 0, SLJIT_MEM1(p_pointer), 0);
+		sljit_emit_fop2(compiler, mul_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		for (int component = 1; component < get_math_component_count(p_type); component++) {
+			sljit_emit_fop1(compiler, move_op, SLJIT_FR1, 0, SLJIT_MEM1(p_pointer), component * get_math_component_size(p_type));
+			sljit_emit_fop2(compiler, mul_op, SLJIT_FR1, 0, SLJIT_FR1, 0, SLJIT_FR1, 0);
+			sljit_emit_fop2(compiler, add_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
+		}
+		if (use_f64) {
+			sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1(F64, F64), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_math_sqrt));
+		} else {
+			sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1(F32, F32), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_math_sqrt_f32));
+			sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_F32, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		}
+		if (p_destination_offset >= 0) {
+			sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), p_destination_offset, SLJIT_FR0, 0);
+		}
+	}
+
+	void emit_math_length(int p_ip) {
+		emit_unboxed_pointer(code[p_ip + 1], SLJIT_R0);
+		emit_math_length_from_pointer(SLJIT_R0, Variant::Type(code[p_ip + 3]));
+		emit_store_float(code[p_ip + 2], SLJIT_FR0);
+	}
+
 	const CompactSSAPlan::Value &get_ssa_value(int p_value) const {
 		p_value = ssa_plan->get_resolved_value(p_value);
 		return ssa_plan->get_values()[p_value];
@@ -1712,6 +2044,45 @@ class BaselineCompiler {
 		}
 	}
 
+	void emit_ssa_load_math_component(int p_value, int p_float_register) {
+		const CompactSSAPlan::Value &value = get_ssa_value(p_value);
+		DEV_ASSERT(is_unboxed_math_type(value.type) && value.components.is_empty());
+		if (value.is_constant) {
+			double constant;
+			memcpy(&constant, &value.constant_bits, sizeof(constant));
+			sljit_emit_fset64(compiler, p_float_register, constant);
+			if (!math_uses_double_components(value.type)) {
+				sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, p_float_register, 0, p_float_register, 0);
+			}
+		} else {
+			DEV_ASSERT(value.frame_offset >= 0);
+			sljit_emit_fop1(compiler, math_uses_double_components(value.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32, p_float_register, 0, SLJIT_MEM1(SLJIT_SP), value.frame_offset);
+		}
+	}
+
+	void emit_ssa_store_math_component(const CompactSSAPlan::Value &p_value, int p_float_register) {
+		DEV_ASSERT(p_value.frame_offset >= 0 && is_unboxed_math_type(p_value.type) && p_value.components.is_empty());
+		sljit_emit_fop1(compiler, math_uses_double_components(p_value.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32, SLJIT_MEM1(SLJIT_SP), p_value.frame_offset, p_float_register, 0);
+	}
+
+	void emit_ssa_load_component_operand(int p_value, Variant::Type p_math_type, int p_float_register) {
+		const CompactSSAPlan::Value &value = get_ssa_value(p_value);
+		if (is_unboxed_math_type(value.type)) {
+			emit_ssa_load_math_component(p_value, p_float_register);
+			return;
+		}
+		if (value.type == Variant::FLOAT) {
+			emit_ssa_load_float(p_value, p_float_register);
+			if (!math_uses_double_components(p_math_type)) {
+				sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, p_float_register, 0, p_float_register, 0);
+			}
+			return;
+		}
+		DEV_ASSERT(value.type == Variant::INT);
+		emit_ssa_load_raw(p_value, SLJIT_R3);
+		sljit_emit_fop1(compiler, math_uses_double_components(p_math_type) ? SLJIT_CONV_F64_FROM_SW : SLJIT_CONV_F32_FROM_SW, p_float_register, 0, SLJIT_R3, 0);
+	}
+
 	void emit_ssa_initialize_inputs() {
 		for (int slot = 0; slot < stack_slot_types.size(); slot++) {
 			const int initial = ssa_plan->get_initial_value(slot);
@@ -1719,6 +2090,29 @@ class BaselineCompiler {
 				continue;
 			}
 			const CompactSSAPlan::Value &value = get_ssa_value(initial);
+			if (is_unboxed_math_type(value.type) && !value.components.is_empty()) {
+				const int argument_index = slot - GDScriptFunction::FIXED_ADDRESSES_MAX;
+				for (int component = 0; component < value.components.size(); component++) {
+					const CompactSSAPlan::Value &component_value = get_ssa_value(value.components[component]);
+					if (!component_value.live || component_value.frame_offset < 0) {
+						continue;
+					}
+					const int source_offset = component * get_math_component_size(value.type);
+					const int move_op = math_uses_double_components(value.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32;
+					if (argument_index >= 0 && argument_index < argument_types.size()) {
+						if (typed_entry) {
+							sljit_emit_fop1(compiler, move_op, SLJIT_FR0, 0, SLJIT_MEM1(SLJIT_S0), argument_index * TYPED_ABI_STRIDE + source_offset);
+						} else {
+							emit_load_base(slot, SLJIT_R0);
+							sljit_emit_fop1(compiler, move_op, SLJIT_FR0, 0, SLJIT_MEM1(SLJIT_R0), get_address_offset(slot, variant_data_offset) + source_offset);
+						}
+						emit_ssa_store_math_component(component_value, SLJIT_FR0);
+					} else {
+						emit_zero_memory(SLJIT_SP, component_value.frame_offset, get_math_component_size(value.type));
+					}
+				}
+				continue;
+			}
 			if (!value.live || value.frame_offset < 0) {
 				continue;
 			}
@@ -1744,16 +2138,59 @@ class BaselineCompiler {
 		}
 		const CompactSSAPlan::Value &value = ssa_plan->get_values()[output];
 		if (!value.live || value.is_constant || value.frame_offset < 0) {
-			return;
+			if (value.kind != CompactSSAPlan::VALUE_MATH_OPERATOR || !is_unboxed_math_type(value.type) || value.components.is_empty()) {
+				return;
+			}
 		}
 		if (value.kind == CompactSSAPlan::VALUE_MATH_OPERATOR) {
-			emit_ssa_pointer(value.inputs[0], 0, SLJIT_R0);
-			if (value.inputs.size() > 1) {
-				emit_ssa_pointer(value.inputs[1], 1, SLJIT_R1);
-			}
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_SP, 0, SLJIT_IMM, value.frame_offset);
 			const int metadata = code[p_instruction.ip + 5];
-			emit_math_operator_values(SLJIT_R0, SLJIT_R1, SLJIT_R2, value.op, GDScriptFunction::get_math_left_type(metadata), GDScriptFunction::get_math_right_type(metadata), value.type);
+			const Variant::Type left_type = GDScriptFunction::get_math_left_type(metadata);
+			const Variant::Type right_type = GDScriptFunction::get_math_right_type(metadata);
+			const Variant::Type math_type = is_unboxed_math_type(left_type) ? left_type : right_type;
+			if (value.op == Variant::OP_EQUAL || value.op == Variant::OP_NOT_EQUAL) {
+				Vector<struct sljit_jump *> mismatch_jumps;
+				int mismatch_condition = SLJIT_UNORDERED_OR_NOT_EQUAL;
+				if (!math_uses_double_components(math_type)) {
+					mismatch_condition |= SLJIT_32;
+				}
+				for (int component = 0; component < get_math_component_count(math_type); component++) {
+					emit_ssa_load_math_component(ssa_plan->get_component_value(value.inputs[0], component), SLJIT_FR0);
+					emit_ssa_load_math_component(ssa_plan->get_component_value(value.inputs[1], component), SLJIT_FR1);
+					mismatch_jumps.push_back(sljit_emit_fcmp(compiler, mismatch_condition, SLJIT_FR0, 0, SLJIT_FR1, 0));
+				}
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, value.op == Variant::OP_EQUAL ? 1 : 0);
+				struct sljit_jump *end_jump = sljit_emit_jump(compiler, SLJIT_JUMP);
+				struct sljit_label *mismatch_label = sljit_emit_label(compiler);
+				for (struct sljit_jump *jump : mismatch_jumps) {
+					sljit_set_label(jump, mismatch_label);
+				}
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, value.op == Variant::OP_EQUAL ? 0 : 1);
+				sljit_set_label(end_jump, sljit_emit_label(compiler));
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_SP), value.frame_offset, SLJIT_R0, 0);
+				return;
+			}
+
+			const bool use_f64 = math_uses_double_components(math_type);
+			for (int component_index = 0; component_index < value.components.size(); component_index++) {
+				const CompactSSAPlan::Value &component = get_ssa_value(value.components[component_index]);
+				if (!component.live || component.is_constant || component.frame_offset < 0) {
+					continue;
+				}
+				emit_ssa_load_component_operand(component.inputs[0], math_type, SLJIT_FR0);
+				if (component.inputs.size() > 1) {
+					emit_ssa_load_component_operand(component.inputs[1], math_type, SLJIT_FR1);
+				}
+				switch (value.op) {
+					case Variant::OP_ADD: sljit_emit_fop2(compiler, use_f64 ? SLJIT_ADD_F64 : SLJIT_ADD_F32, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0); break;
+					case Variant::OP_SUBTRACT: sljit_emit_fop2(compiler, use_f64 ? SLJIT_SUB_F64 : SLJIT_SUB_F32, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0); break;
+					case Variant::OP_MULTIPLY: sljit_emit_fop2(compiler, use_f64 ? SLJIT_MUL_F64 : SLJIT_MUL_F32, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0); break;
+					case Variant::OP_DIVIDE: sljit_emit_fop2(compiler, use_f64 ? SLJIT_DIV_F64 : SLJIT_DIV_F32, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0); break;
+					case Variant::OP_NEGATE: sljit_emit_fop1(compiler, use_f64 ? SLJIT_NEG_F64 : SLJIT_NEG_F32, SLJIT_FR0, 0, SLJIT_FR0, 0); break;
+					case Variant::OP_POSITIVE: break;
+					default: break;
+				}
+				emit_ssa_store_math_component(component, SLJIT_FR0);
+			}
 			return;
 		}
 
@@ -1805,6 +2242,62 @@ class BaselineCompiler {
 		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), value.frame_offset, SLJIT_FR0, 0);
 	}
 
+	void emit_ssa_math_extract(const CompactSSAPlan::Instruction &p_instruction) {
+		const CompactSSAPlan::Value &value = get_ssa_value(p_instruction.output);
+		if (!value.live || value.is_constant || value.frame_offset < 0) {
+			return;
+		}
+		const int component = GDScriptFunction::get_math_component_index(code[p_instruction.ip + 3]);
+		const int component_value = ssa_plan->get_component_value(value.inputs[0], component);
+		emit_ssa_load_math_component(component_value, SLJIT_FR0);
+		const CompactSSAPlan::Value &source_component = get_ssa_value(component_value);
+		if (!math_uses_double_components(source_component.type)) {
+			sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_F32, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		}
+		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), value.frame_offset, SLJIT_FR0, 0);
+	}
+
+	void emit_ssa_math_component_set(const CompactSSAPlan::Instruction &p_instruction) {
+		const CompactSSAPlan::Value &aggregate = get_ssa_value(p_instruction.output);
+		const int component_index = GDScriptFunction::get_math_component_index(code[p_instruction.ip + 3]);
+		const CompactSSAPlan::Value &component = get_ssa_value(aggregate.components[component_index]);
+		if (!component.live || component.is_constant || component.frame_offset < 0) {
+			return;
+		}
+		emit_ssa_load_float(component.inputs[0], SLJIT_FR0);
+		if (!math_uses_double_components(component.type)) {
+			sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		}
+		emit_ssa_store_math_component(component, SLJIT_FR0);
+	}
+
+	void emit_ssa_math_length(const CompactSSAPlan::Instruction &p_instruction) {
+		const CompactSSAPlan::Value &value = get_ssa_value(p_instruction.output);
+		if (!value.live || value.is_constant || value.frame_offset < 0) {
+			return;
+		}
+		const Variant::Type math_type = Variant::Type(code[p_instruction.ip + 3]);
+		const bool use_f64 = math_uses_double_components(math_type);
+		const int mul_op = use_f64 ? SLJIT_MUL_F64 : SLJIT_MUL_F32;
+		const int add_op = use_f64 ? SLJIT_ADD_F64 : SLJIT_ADD_F32;
+		for (int component = 0; component < get_math_component_count(math_type); component++) {
+			emit_ssa_load_math_component(ssa_plan->get_component_value(value.inputs[0], component), SLJIT_FR1);
+			sljit_emit_fop2(compiler, mul_op, SLJIT_FR1, 0, SLJIT_FR1, 0, SLJIT_FR1, 0);
+			if (component == 0) {
+				sljit_emit_fop1(compiler, use_f64 ? SLJIT_MOV_F64 : SLJIT_MOV_F32, SLJIT_FR0, 0, SLJIT_FR1, 0);
+			} else {
+				sljit_emit_fop2(compiler, add_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
+			}
+		}
+		if (use_f64) {
+			sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1(F64, F64), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_math_sqrt));
+		} else {
+			sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1(F32, F32), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_math_sqrt_f32));
+			sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_F32, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		}
+		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), value.frame_offset, SLJIT_FR0, 0);
+	}
+
 	void emit_ssa_pointer(int p_value, int p_argument, int p_register) {
 		const CompactSSAPlan::Value &value = get_ssa_value(p_value);
 		if (value.kind == CompactSSAPlan::VALUE_CONSTANT && value.constant_index >= 0) {
@@ -1813,6 +2306,14 @@ class BaselineCompiler {
 		} else if (value.is_constant) {
 			const int offset = ssa_plan->get_ptrcall_values_offset() + p_argument * TYPED_ABI_STRIDE;
 			sljit_emit_op1(compiler, value.type == Variant::BOOL ? SLJIT_MOV_U8 : SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), offset, SLJIT_IMM, sljit_sw(value.constant_bits));
+			sljit_emit_op2(compiler, SLJIT_ADD, p_register, 0, SLJIT_SP, 0, SLJIT_IMM, offset);
+		} else if (is_unboxed_math_type(value.type) && !value.components.is_empty()) {
+			const int offset = ssa_plan->get_ptrcall_values_offset() + p_argument * TYPED_ABI_STRIDE;
+			const int move_op = math_uses_double_components(value.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32;
+			for (int component = 0; component < value.components.size(); component++) {
+				emit_ssa_load_math_component(value.components[component], SLJIT_FR0);
+				sljit_emit_fop1(compiler, move_op, SLJIT_MEM1(SLJIT_SP), offset + component * get_math_component_size(value.type), SLJIT_FR0, 0);
+			}
 			sljit_emit_op2(compiler, SLJIT_ADD, p_register, 0, SLJIT_SP, 0, SLJIT_IMM, offset);
 		} else {
 			DEV_ASSERT(value.frame_offset >= 0);
@@ -1848,6 +2349,20 @@ class BaselineCompiler {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 0);
 		}
 		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS4V(P, P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_ptrcall));
+		if (has_return) {
+			const CompactSSAPlan::Value &output = get_ssa_value(p_instruction.output);
+			if (is_unboxed_math_type(output.type) && !output.components.is_empty()) {
+				const int move_op = math_uses_double_components(output.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32;
+				for (int component = 0; component < output.components.size(); component++) {
+					const CompactSSAPlan::Value &component_value = get_ssa_value(output.components[component]);
+					if (!component_value.live || component_value.frame_offset < 0) {
+						continue;
+					}
+					sljit_emit_fop1(compiler, move_op, SLJIT_FR0, 0, SLJIT_MEM1(SLJIT_SP), ssa_plan->get_ptrcall_return_offset() + component * get_math_component_size(output.type));
+					emit_ssa_store_math_component(component_value, SLJIT_FR0);
+				}
+			}
+		}
 	}
 
 	void emit_ssa_edge_copies(int p_predecessor, int p_successor) {
@@ -1872,7 +2387,24 @@ class BaselineCompiler {
 				continue;
 			}
 			const CompactSSAPlan::Value &destination = get_ssa_value(phi);
-			if (!destination.live || destination.is_constant || destination.frame_offset < 0) {
+			if (destination.is_constant) {
+				continue;
+			}
+			if (is_unboxed_math_type(destination.type) && !destination.components.is_empty()) {
+				const int incoming = ssa_plan->get_values()[phi].inputs[predecessor_input];
+				for (int component = 0; component < destination.components.size(); component++) {
+					const CompactSSAPlan::Value &component_destination = get_ssa_value(destination.components[component]);
+					if (!component_destination.live || component_destination.is_constant || component_destination.frame_offset < 0) {
+						continue;
+					}
+					copy_offset = align_native_offset(copy_offset, get_math_component_size(destination.type));
+					emit_ssa_load_math_component(ssa_plan->get_component_value(incoming, component), SLJIT_FR0);
+					sljit_emit_fop1(compiler, math_uses_double_components(destination.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32, SLJIT_MEM1(SLJIT_SP), ssa_plan->get_phi_scratch_offset() + copy_offset, SLJIT_FR0, 0);
+					copy_offset += get_math_component_size(destination.type);
+				}
+				continue;
+			}
+			if (!destination.live || destination.frame_offset < 0) {
 				continue;
 			}
 			copy_offset = align_native_offset(copy_offset, MAX(TYPED_ABI_ALIGNMENT, get_unboxed_value_alignment(destination.type)));
@@ -1886,7 +2418,22 @@ class BaselineCompiler {
 				continue;
 			}
 			const CompactSSAPlan::Value &destination = get_ssa_value(phi);
-			if (!destination.live || destination.is_constant || destination.frame_offset < 0) {
+			if (destination.is_constant) {
+				continue;
+			}
+			if (is_unboxed_math_type(destination.type) && !destination.components.is_empty()) {
+				for (int component = 0; component < destination.components.size(); component++) {
+					const CompactSSAPlan::Value &component_destination = get_ssa_value(destination.components[component]);
+					if (!component_destination.live || component_destination.is_constant || component_destination.frame_offset < 0) {
+						continue;
+					}
+					copy_offset = align_native_offset(copy_offset, get_math_component_size(destination.type));
+					emit_copy_memory(SLJIT_SP, component_destination.frame_offset, SLJIT_SP, ssa_plan->get_phi_scratch_offset() + copy_offset, get_math_component_size(destination.type));
+					copy_offset += get_math_component_size(destination.type);
+				}
+				continue;
+			}
+			if (!destination.live || destination.frame_offset < 0) {
 				continue;
 			}
 			copy_offset = align_native_offset(copy_offset, MAX(TYPED_ABI_ALIGNMENT, get_unboxed_value_alignment(destination.type)));
@@ -1993,6 +2540,15 @@ class BaselineCompiler {
 					case GDScriptFunction::OPCODE_OPERATOR_MATH:
 						emit_ssa_operator(instruction);
 						break;
+					case GDScriptFunction::OPCODE_GET_MATH_COMPONENT:
+						emit_ssa_math_extract(instruction);
+						break;
+					case GDScriptFunction::OPCODE_SET_MATH_COMPONENT:
+						emit_ssa_math_component_set(instruction);
+						break;
+					case GDScriptFunction::OPCODE_MATH_LENGTH:
+						emit_ssa_math_length(instruction);
+						break;
 					case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
 					case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
 					case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN:
@@ -2095,6 +2651,7 @@ public:
 	bool get_requires_self() const { return requires_self; }
 	int get_ssa_node_count() const { return ssa_node_count; }
 	int get_eliminated_node_count() const { return eliminated_node_count; }
+	int get_scalar_replaced_math_value_count() const { return scalar_replaced_math_value_count; }
 
 	void *compile(uint64_t &r_code_size) {
 		if (!validate()) {
@@ -2109,6 +2666,7 @@ public:
 			}
 			ssa_node_count = ssa_plan->get_node_count();
 			eliminated_node_count = ssa_plan->get_eliminated_node_count();
+			scalar_replaced_math_value_count = ssa_plan->get_scalar_replaced_math_value_count();
 		}
 
 		compiler = sljit_create_compiler(nullptr);
@@ -2168,6 +2726,18 @@ public:
 				case GDScriptFunction::OPCODE_OPERATOR_MATH:
 					emit_math_operator(ip);
 					ip += 6;
+					break;
+				case GDScriptFunction::OPCODE_GET_MATH_COMPONENT:
+					emit_math_component_get(ip);
+					ip += 4;
+					break;
+				case GDScriptFunction::OPCODE_SET_MATH_COMPONENT:
+					emit_math_component_set(ip);
+					ip += 4;
+					break;
+				case GDScriptFunction::OPCODE_MATH_LENGTH:
+					emit_math_length(ip);
+					ip += 4;
 					break;
 				case GDScriptFunction::OPCODE_JUMP_COMPARE_INT: {
 					emit_load_int(code[ip + 1], SLJIT_R0);
@@ -2250,8 +2820,8 @@ public:
 
 } // namespace
 
-GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count) :
-		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_return_type(p_typed_return_type), ptrcall_count(p_ptrcall_count), ssa_node_count(p_ssa_node_count), eliminated_node_count(p_eliminated_node_count), requires_self(p_requires_self), optimizing(p_optimizing) {
+GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count, int p_scalar_replaced_math_value_count) :
+		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_return_type(p_typed_return_type), ptrcall_count(p_ptrcall_count), ssa_node_count(p_ssa_node_count), eliminated_node_count(p_eliminated_node_count), scalar_replaced_math_value_count(p_scalar_replaced_math_value_count), requires_self(p_requires_self), optimizing(p_optimizing) {
 }
 
 GDScriptBaselineJIT *GDScriptBaselineJIT::_compile(const GDScriptFunction *p_function, bool p_optimizing) {
@@ -2283,7 +2853,7 @@ GDScriptBaselineJIT *GDScriptBaselineJIT::_compile(const GDScriptFunction *p_fun
 		generated_size += typed_generated_size;
 	}
 
-	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL, compiler.get_ptrcall_count(), compiler.get_requires_self(), p_optimizing, compiler.get_ssa_node_count(), compiler.get_eliminated_node_count()));
+	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL, compiler.get_ptrcall_count(), compiler.get_requires_self(), p_optimizing, compiler.get_ssa_node_count(), compiler.get_eliminated_node_count(), compiler.get_scalar_replaced_math_value_count()));
 }
 
 GDScriptBaselineJIT *GDScriptBaselineJIT::compile(const GDScriptFunction *p_function) {

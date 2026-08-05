@@ -349,11 +349,31 @@ func native_vector2_color(position_value: Vector2, color_value: Color) -> Color:
 	vector3_script->set_source_code(R"(
 extends Node3D
 
+const BASE_VELOCITY := Vector3(1.0, 2.0, 3.0)
+
 func vector3_phi(left: Vector3, right: Vector3, choose_right: bool, scale: float) -> Vector3:
 	var selected: Vector3 = left
 	if choose_right:
 		selected = right
 	return selected * scale
+
+func scalar_replaced_velocity(direction: Vector3, speed: float, gravity: float) -> float:
+	var velocity: Vector3 = direction * speed
+	velocity.y += gravity
+	return velocity.length()
+
+func scalar_replaced_y(direction: Vector3, speed: float) -> float:
+	var velocity: Vector3 = direction * speed
+	return velocity.y
+
+func scalar_replaced_constant() -> float:
+	var velocity: Vector3 = BASE_VELOCITY * 4.0
+	return velocity.y
+
+func scalar_replaced_ptrcall(direction: Vector3, speed: float) -> Vector3:
+	var velocity: Vector3 = direction * speed
+	set_position(velocity)
+	return get_position()
 
 func native_vector3_roundtrip(value: Vector3) -> Vector3:
 	set_position(value)
@@ -362,10 +382,23 @@ func native_vector3_roundtrip(value: Vector3) -> Vector3:
 	REQUIRE(vector3_script->reload() == OK);
 	const HashMap<StringName, GDScriptFunction *> &vector3_functions = vector3_script->get_member_functions();
 	const GDScriptFunction *const *phi_function = vector3_functions.getptr(SNAME("vector3_phi"));
+	const GDScriptFunction *const *scalar_replaced_function = vector3_functions.getptr(SNAME("scalar_replaced_velocity"));
+	const GDScriptFunction *const *scalar_replaced_y_function = vector3_functions.getptr(SNAME("scalar_replaced_y"));
+	const GDScriptFunction *const *scalar_replaced_constant_function = vector3_functions.getptr(SNAME("scalar_replaced_constant"));
+	const GDScriptFunction *const *scalar_replaced_ptrcall_function = vector3_functions.getptr(SNAME("scalar_replaced_ptrcall"));
 	const GDScriptFunction *const *vector3_native_function = vector3_functions.getptr(SNAME("native_vector3_roundtrip"));
 	REQUIRE(phi_function != nullptr);
+	REQUIRE(scalar_replaced_function != nullptr);
+	REQUIRE(scalar_replaced_y_function != nullptr);
+	REQUIRE(scalar_replaced_constant_function != nullptr);
+	REQUIRE(scalar_replaced_ptrcall_function != nullptr);
 	REQUIRE(vector3_native_function != nullptr);
 	CHECK((*phi_function)->has_typed_baseline_jit());
+	CHECK((*scalar_replaced_function)->has_typed_baseline_jit());
+	CHECK((*scalar_replaced_y_function)->has_typed_baseline_jit());
+	CHECK((*scalar_replaced_constant_function)->has_typed_baseline_jit());
+	CHECK((*scalar_replaced_ptrcall_function)->has_typed_baseline_jit());
+	CHECK((*scalar_replaced_ptrcall_function)->get_baseline_jit_ptrcall_count() == 2);
 	CHECK((*vector3_native_function)->has_typed_baseline_jit());
 	CHECK((*vector3_native_function)->get_baseline_jit_ptrcall_count() == 2);
 
@@ -377,6 +410,20 @@ func native_vector3_roundtrip(value: Vector3) -> Vector3:
 		CHECK(result.is_equal_approx(Vector3(-1.0, 2.0, 3.0)));
 	}
 	CHECK_MESSAGE((*phi_function)->has_optimizing_jit(), "The compact SSA tier should preserve unboxed Vector3 phis.");
+	for (uint32_t i = 0; i <= GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		CHECK(Math::is_equal_approx(double(node_3d->call(SNAME("scalar_replaced_velocity"), Vector3(1.0, 2.0, 3.0), 2.0, -1.0)), 7.0));
+		CHECK(Math::is_equal_approx(double(node_3d->call(SNAME("scalar_replaced_y"), Vector3(1.0, 2.0, 3.0), 4.0)), 8.0));
+		CHECK(Math::is_equal_approx(double(node_3d->call(SNAME("scalar_replaced_constant"))), 8.0));
+		CHECK(Vector3(node_3d->call(SNAME("scalar_replaced_ptrcall"), Vector3(1.0, -2.0, 3.0), 3.0)).is_equal_approx(Vector3(3.0, -6.0, 9.0)));
+	}
+	CHECK_MESSAGE((*scalar_replaced_function)->has_optimizing_jit(), "Component mutation and length should compile in the scalar-replacing SSA tier.");
+	CHECK_MESSAGE((*scalar_replaced_y_function)->has_optimizing_jit(), "A component-only consumer should compile in the scalar-replacing SSA tier.");
+	CHECK_MESSAGE((*scalar_replaced_constant_function)->has_optimizing_jit(), "Constant math components should propagate through scalar replacement.");
+	CHECK_MESSAGE((*scalar_replaced_ptrcall_function)->has_optimizing_jit(), "A native pointer boundary should materialize a scalar-replaced Vector3.");
+	CHECK((*scalar_replaced_function)->get_optimizing_jit_scalar_replaced_math_value_count() > 0);
+	CHECK((*scalar_replaced_y_function)->get_optimizing_jit_scalar_replaced_math_value_count() > 0);
+	CHECK_MESSAGE((*scalar_replaced_y_function)->get_optimizing_jit_eliminated_node_count() >= 2, "The component-only consumer should eliminate unused Vector3 component computations.");
+	CHECK_MESSAGE((*scalar_replaced_constant_function)->get_optimizing_jit_eliminated_node_count() >= 3, "Constant Vector3 arithmetic should fold independently per component.");
 	const Vector3 roundtrip_vector(8.0, -4.0, 2.5);
 	CHECK(Vector3(node_3d->call(SNAME("native_vector3_roundtrip"), roundtrip_vector)).is_equal_approx(roundtrip_vector));
 	memdelete(node_3d);

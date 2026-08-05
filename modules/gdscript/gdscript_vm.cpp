@@ -282,6 +282,9 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_OPERATOR_INT, \
 		&&OPCODE_OPERATOR_FLOAT, \
 		&&OPCODE_OPERATOR_MATH, \
+		&&OPCODE_GET_MATH_COMPONENT, \
+		&&OPCODE_SET_MATH_COMPONENT, \
+		&&OPCODE_MATH_LENGTH, \
 		&&OPCODE_JUMP_COMPARE_INT, \
 		&&OPCODE_JUMP_COMPARE_FLOAT, \
 		&&OPCODE_JUMP_IF_BOOL, \
@@ -1079,6 +1082,79 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				operator_func(a, b, dst);
 
 				ip += 6;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_GET_MATH_COMPONENT) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				const int metadata = _code_ptr[ip + 3];
+				const Variant::Type type = GDScriptFunction::get_math_component_type(metadata);
+				const int component = GDScriptFunction::get_math_component_index(metadata);
+				double result = 0.0;
+				switch (type) {
+					case Variant::VECTOR2:
+						result = (*VariantInternal::get_vector2(src))[component];
+						break;
+					case Variant::VECTOR3:
+						result = (*VariantInternal::get_vector3(src))[component];
+						break;
+					case Variant::COLOR:
+						result = (*VariantInternal::get_color(src))[component];
+						break;
+					default:
+						GD_ERR_BREAK(true);
+				}
+				VariantInternal::set_type(*dst, Variant::FLOAT);
+				*VariantInternal::get_float(dst) = result;
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_SET_MATH_COMPONENT) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(src, 1);
+				const int metadata = _code_ptr[ip + 3];
+				const Variant::Type type = GDScriptFunction::get_math_component_type(metadata);
+				const int component = GDScriptFunction::get_math_component_index(metadata);
+				const double value = *VariantInternal::get_float(src);
+				switch (type) {
+					case Variant::VECTOR2:
+						(*VariantInternal::get_vector2(dst))[component] = value;
+						break;
+					case Variant::VECTOR3:
+						(*VariantInternal::get_vector3(dst))[component] = value;
+						break;
+					case Variant::COLOR:
+						(*VariantInternal::get_color(dst))[component] = value;
+						break;
+					default:
+						GD_ERR_BREAK(true);
+				}
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_MATH_LENGTH) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				double result = 0.0;
+				switch (Variant::Type(_code_ptr[ip + 3])) {
+					case Variant::VECTOR2:
+						result = VariantInternal::get_vector2(src)->length();
+						break;
+					case Variant::VECTOR3:
+						result = VariantInternal::get_vector3(src)->length();
+						break;
+					default:
+						GD_ERR_BREAK(true);
+				}
+				VariantInternal::set_type(*dst, Variant::FLOAT);
+				*VariantInternal::get_float(dst) = result;
+				ip += 4;
 			}
 			DISPATCH_OPCODE;
 

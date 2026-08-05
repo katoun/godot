@@ -46,10 +46,11 @@ class GDScriptBaselineJIT {
 	int ptrcall_count = 0;
 	int ssa_node_count = 0;
 	int eliminated_node_count = 0;
+	int scalar_replaced_math_value_count = 0;
 	bool requires_self = false;
 	bool optimizing = false;
 
-	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count);
+	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count, int p_scalar_replaced_math_value_count);
 	static GDScriptBaselineJIT *_compile(const GDScriptFunction *p_function, bool p_optimizing);
 
 public:
@@ -66,6 +67,7 @@ public:
 	bool is_optimizing() const { return optimizing; }
 	int get_ssa_node_count() const { return ssa_node_count; }
 	int get_eliminated_node_count() const { return eliminated_node_count; }
+	int get_scalar_replaced_math_value_count() const { return scalar_replaced_math_value_count; }
 	uint64_t get_code_size() const { return code_size; }
 
 	~GDScriptBaselineJIT();
