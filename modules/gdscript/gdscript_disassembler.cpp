@@ -238,6 +238,16 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 4;
 			} break;
+			case OPCODE_TYPE_TEST_STRUCT: {
+				text += "type test struct ";
+				text += DADDR(1);
+				text += " = ";
+				text += DADDR(2);
+				text += " is ";
+				text += DADDR(3);
+
+				incr += 4;
+			} break;
 			case OPCODE_TYPE_TEST_ARRAY: {
 				text += "type test ";
 				text += DADDR(1);
@@ -407,6 +417,13 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 4;
 			} break;
+			case OPCODE_SET_STRUCT_FIELD: {
+				text += "set struct field ";
+				text += DADDR(1);
+				text += "[" + itos(_code_ptr[ip + 3]) + "] = ";
+				text += DADDR(2);
+				incr += 4;
+			} break;
 			case OPCODE_GET_NAMED: {
 				text += "get_named ";
 				text += DADDR(2);
@@ -427,6 +444,14 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 				text += getter_names[_code_ptr[ip + 3]];
 				text += "\"]";
 
+				incr += 4;
+			} break;
+			case OPCODE_GET_STRUCT_FIELD: {
+				text += "get struct field ";
+				text += DADDR(2);
+				text += " = ";
+				text += DADDR(1);
+				text += "[" + itos(_code_ptr[ip + 3]) + "]";
 				incr += 4;
 			} break;
 			case OPCODE_SET_MEMBER: {
@@ -547,6 +572,13 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 				text += " = ";
 				text += DADDR(2);
 
+				incr += 4;
+			} break;
+			case OPCODE_ASSIGN_TYPED_STRUCT: {
+				text += "assign typed struct ";
+				text += DADDR(1);
+				text += " = ";
+				text += DADDR(2);
 				incr += 4;
 			} break;
 			case OPCODE_ASSIGN_TYPED_ARRAY: {
@@ -1190,6 +1222,11 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 				text += ") ";
 				text += DADDR(1);
 
+				incr += 3;
+			} break;
+			case OPCODE_RETURN_TYPED_STRUCT: {
+				text += "return typed struct ";
+				text += DADDR(1);
 				incr += 3;
 			} break;
 			case OPCODE_RETURN_TYPED_ARRAY: {

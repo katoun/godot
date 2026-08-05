@@ -2702,6 +2702,7 @@ Vector<String> GDScriptLanguage::get_reserved_words() const {
 		"namespace", // Reserved for potential future use.
 		"signal",
 		"static",
+		"struct",
 		"trait", // Reserved for potential future use.
 		"var",
 		// Other keywords.

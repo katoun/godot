@@ -45,6 +45,7 @@
 #include "core/templates/hash_map.h"
 #include "core/templates/list.h"
 #include "core/templates/vector.h"
+#include "core/variant/struct_value.h"
 #include "core/variant/variant.h"
 
 #ifdef DEBUG_ENABLED
@@ -89,6 +90,7 @@ public:
 	struct ReturnNode;
 	struct SelfNode;
 	struct SignalNode;
+	struct StructNode;
 	struct SubscriptNode;
 	struct SuiteNode;
 	struct TernaryOpNode;
@@ -107,6 +109,7 @@ public:
 			NATIVE,
 			SCRIPT,
 			CLASS, // GDScript.
+			STRUCT, // GDScript value struct.
 			ENUM, // Enumeration.
 			VARIANT, // Can be any type.
 			RESOLVING, // Currently resolving.
@@ -134,6 +137,7 @@ public:
 		Ref<Script> script_type;
 		String script_path;
 		ClassNode *class_type = nullptr;
+		StructNode *struct_type = nullptr;
 
 		MethodInfo method_info; // For callable/signals.
 		HashMap<StringName, int64_t> enum_values; // For enums.
@@ -220,6 +224,8 @@ public:
 					return script_type == p_other.script_type;
 				case CLASS:
 					return class_type == p_other.class_type || class_type->fqcn == p_other.class_type->fqcn;
+				case STRUCT:
+					return struct_type == p_other.struct_type || (struct_type != nullptr && p_other.struct_type != nullptr && struct_type->fqsn == p_other.struct_type->fqsn);
 				case RESOLVING:
 				case UNRESOLVED:
 					break;
@@ -246,6 +252,7 @@ public:
 			script_type = p_other.script_type;
 			script_path = p_other.script_path;
 			class_type = p_other.class_type;
+			struct_type = p_other.struct_type;
 			method_info = p_other.method_info;
 			enum_values = p_other.enum_values;
 			container_element_types = p_other.container_element_types;
@@ -331,6 +338,7 @@ public:
 			RETURN,
 			SELF,
 			SIGNAL,
+			STRUCT,
 			SUBSCRIPT,
 			SUITE,
 			TERNARY_OPERATOR,
@@ -509,6 +517,7 @@ public:
 		ExpressionNode *callee = nullptr;
 		Vector<ExpressionNode *> arguments;
 		StringName function_name;
+		StructNode *struct_constructor = nullptr;
 		bool is_super = false;
 		bool is_static = false;
 
@@ -562,11 +571,38 @@ public:
 		}
 	};
 
+	struct StructNode : public Node {
+		enum ResolutionStatus {
+			UNRESOLVED,
+			RESOLVING,
+			RESOLVED,
+		};
+
+		IdentifierNode *identifier = nullptr;
+		Vector<VariableNode *> fields;
+		HashMap<StringName, int> field_indices;
+		ClassNode *outer = nullptr;
+		String fqsn; // Fully-qualified stable struct name.
+		Ref<StructLayout> layout;
+		ResolutionStatus resolution_status = UNRESOLVED;
+#ifdef TOOLS_ENABLED
+		MemberDocData doc_data;
+#endif // TOOLS_ENABLED
+
+		bool has_field(const StringName &p_name) const { return field_indices.has(p_name); }
+		VariableNode *get_field(const StringName &p_name) const { return fields[field_indices[p_name]]; }
+
+		StructNode() {
+			type = STRUCT;
+		}
+	};
+
 	struct ClassNode : public Node {
 		struct Member {
 			enum Type {
 				UNDEFINED,
 				CLASS,
+				STRUCT,
 				CONSTANT,
 				FUNCTION,
 				SIGNAL,
@@ -580,6 +616,7 @@ public:
 
 			union {
 				ClassNode *m_class = nullptr;
+				StructNode *m_struct;
 				ConstantNode *constant;
 				FunctionNode *function;
 				SignalNode *signal;
@@ -596,6 +633,8 @@ public:
 					case CLASS:
 						// All class-type members have an id.
 						return m_class->identifier->name;
+					case STRUCT:
+						return m_struct->identifier->name;
 					case CONSTANT:
 						return constant->identifier->name;
 					case FUNCTION:
@@ -621,6 +660,8 @@ public:
 						return "???";
 					case CLASS:
 						return "class";
+					case STRUCT:
+						return "struct";
 					case CONSTANT:
 						return "constant";
 					case FUNCTION:
@@ -643,6 +684,8 @@ public:
 				switch (type) {
 					case CLASS:
 						return m_class->start_line;
+					case STRUCT:
+						return m_struct->start_line;
 					case CONSTANT:
 						return constant->start_line;
 					case FUNCTION:
@@ -667,6 +710,8 @@ public:
 				switch (type) {
 					case CLASS:
 						return m_class->get_datatype();
+					case STRUCT:
+						return m_struct->get_datatype();
 					case CONSTANT:
 						return constant->get_datatype();
 					case FUNCTION:
@@ -691,6 +736,8 @@ public:
 				switch (type) {
 					case CLASS:
 						return m_class;
+					case STRUCT:
+						return m_struct;
 					case CONSTANT:
 						return constant;
 					case FUNCTION:
@@ -716,6 +763,10 @@ public:
 			Member(ClassNode *p_class) {
 				type = CLASS;
 				m_class = p_class;
+			}
+			Member(StructNode *p_struct) {
+				type = STRUCT;
+				m_struct = p_struct;
 			}
 			Member(ConstantNode *p_constant) {
 				type = CONSTANT;
@@ -920,6 +971,7 @@ public:
 			MEMBER_FUNCTION,
 			MEMBER_SIGNAL,
 			MEMBER_CLASS,
+			MEMBER_STRUCT,
 			INHERITED_VARIABLE,
 			STATIC_VARIABLE,
 			NATIVE_CLASS,
@@ -1099,6 +1151,8 @@ public:
 		};
 
 		bool is_attribute = false;
+		int struct_field_index = -1;
+		uint32_t struct_field_offset = 0;
 
 		SubscriptNode() {
 			type = SUBSCRIPT;
@@ -1284,6 +1338,8 @@ public:
 		PropertyInfo export_info;
 		int assignments = 0;
 		bool is_static = false;
+		int struct_field_index = -1;
+		uint32_t struct_field_offset = 0;
 #ifdef TOOLS_ENABLED
 		MemberDocData doc_data;
 #endif // TOOLS_ENABLED
@@ -1561,6 +1617,8 @@ private:
 	// Main blocks.
 	void parse_program();
 	ClassNode *parse_class(bool p_is_static);
+	StructNode *parse_struct(bool p_is_static);
+	void parse_struct_body(StructNode *p_struct, bool p_is_multiline);
 	void parse_class_name();
 	void parse_extends();
 	void parse_class_body(bool p_is_multiline);
@@ -1705,6 +1763,7 @@ public:
 		void print_call(CallNode *p_call);
 		void print_cast(CastNode *p_cast);
 		void print_class(ClassNode *p_class);
+		void print_struct(StructNode *p_struct);
 		void print_constant(ConstantNode *p_constant);
 		void print_dictionary(DictionaryNode *p_dictionary);
 		void print_expression(ExpressionNode *p_expression);

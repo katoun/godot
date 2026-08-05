@@ -1,0 +1,3 @@
+GDTEST_ANALYZER_ERROR
+>> ERROR at line 6: Cannot pass a value of type "String" as "int".
+>> ERROR at line 6: Invalid argument for "Pair()" function: argument 1 should be "int" but is "String".

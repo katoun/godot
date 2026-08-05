@@ -241,6 +241,7 @@ bool GDScriptAnalyzer::has_member_name_conflict_in_script_class(const StringName
 				member->type == GDScriptParser::ClassNode::Member::ENUM ||
 				member->type == GDScriptParser::ClassNode::Member::ENUM_VALUE ||
 				member->type == GDScriptParser::ClassNode::Member::CLASS ||
+				member->type == GDScriptParser::ClassNode::Member::STRUCT ||
 				member->type == GDScriptParser::ClassNode::Member::SIGNAL) {
 			return true;
 		}
@@ -866,6 +867,10 @@ GDScriptParser::DataType GDScriptAnalyzer::resolve_datatype(GDScriptParser::Type
 							result = member.get_datatype();
 							found = true;
 							break;
+						case GDScriptParser::ClassNode::Member::STRUCT:
+							result = member.get_datatype();
+							found = true;
+							break;
 						case GDScriptParser::ClassNode::Member::ENUM:
 							result = member.get_datatype();
 							found = true;
@@ -1253,6 +1258,10 @@ void GDScriptAnalyzer::resolve_class_member(GDScriptParser::ClassNode *p_class, 
 					resolve_class_inheritance(member.m_class, p_source);
 				}
 				break;
+			case GDScriptParser::ClassNode::Member::STRUCT:
+				check_class_member_name_conflict(p_class, member.m_struct->identifier->name, member.m_struct);
+				resolve_struct(member.m_struct, p_source);
+				break;
 			case GDScriptParser::ClassNode::Member::GROUP:
 				// No-op, but needed to silence warnings.
 				break;
@@ -1263,6 +1272,102 @@ void GDScriptAnalyzer::resolve_class_member(GDScriptParser::ClassNode *p_class, 
 	}
 
 	parser->current_class = previous_class;
+}
+
+void GDScriptAnalyzer::resolve_struct(GDScriptParser::StructNode *p_struct, const GDScriptParser::Node *p_source) {
+	ERR_FAIL_NULL(p_struct);
+	if (p_struct->resolution_status == GDScriptParser::StructNode::RESOLVED) {
+		return;
+	}
+	if (p_struct->resolution_status == GDScriptParser::StructNode::RESOLVING) {
+		const StringName struct_name = p_struct->identifier != nullptr ? p_struct->identifier->name : StringName("<unnamed>");
+		push_error(vformat(R"(Struct "%s" has a recursive by-value layout.)", struct_name), p_source != nullptr ? p_source : p_struct);
+		return;
+	}
+
+	p_struct->resolution_status = GDScriptParser::StructNode::RESOLVING;
+	GDScriptParser::DataType struct_meta_type;
+	struct_meta_type.kind = GDScriptParser::DataType::STRUCT;
+	struct_meta_type.type_source = GDScriptParser::DataType::ANNOTATED_EXPLICIT;
+	struct_meta_type.builtin_type = Variant::STRUCT;
+	struct_meta_type.struct_type = p_struct;
+	struct_meta_type.is_meta_type = true;
+	struct_meta_type.is_constant = true;
+	struct_meta_type.is_pseudo_type = true;
+	p_struct->set_datatype(struct_meta_type);
+	if (p_struct->identifier != nullptr) {
+		p_struct->identifier->set_datatype(struct_meta_type);
+	}
+
+	Ref<StructLayout> layout;
+	layout.instantiate(StringName(p_struct->fqsn), 1);
+	bool valid_layout = true;
+	for (int i = 0; i < p_struct->fields.size(); i++) {
+		GDScriptParser::VariableNode *field = p_struct->fields[i];
+		if (field->datatype_specifier == nullptr || field->infer_datatype) {
+			valid_layout = false;
+			continue;
+		}
+
+		resolve_variable(field, false);
+		const GDScriptParser::DataType field_type = field->get_datatype();
+		Variant::Type variant_type = Variant::NIL;
+		Ref<StructLayout> nested_layout;
+		switch (field_type.kind) {
+			case GDScriptParser::DataType::STRUCT:
+				resolve_struct(field_type.struct_type, field);
+				nested_layout = field_type.struct_type != nullptr ? field_type.struct_type->layout : Ref<StructLayout>();
+				if (nested_layout.is_null()) {
+					valid_layout = false;
+					continue;
+				}
+				variant_type = Variant::STRUCT;
+				break;
+			case GDScriptParser::DataType::BUILTIN:
+				variant_type = field_type.builtin_type;
+				break;
+			case GDScriptParser::DataType::ENUM:
+				variant_type = Variant::INT;
+				break;
+			case GDScriptParser::DataType::NATIVE:
+			case GDScriptParser::DataType::SCRIPT:
+			case GDScriptParser::DataType::CLASS:
+				variant_type = Variant::OBJECT;
+				break;
+			case GDScriptParser::DataType::VARIANT:
+				variant_type = Variant::NIL;
+				break;
+			case GDScriptParser::DataType::RESOLVING:
+			case GDScriptParser::DataType::UNRESOLVED:
+				valid_layout = false;
+				continue;
+		}
+
+		if (field->initializer != nullptr && !field->initializer->is_constant) {
+			push_error(vformat(R"(Default value for struct field "%s" must be constant.)", field->identifier->name), field->initializer);
+			valid_layout = false;
+			continue;
+		}
+		Variant default_value = field->initializer != nullptr ? field->initializer->reduced_value : make_variable_default_value(field);
+		if (field_type.kind == GDScriptParser::DataType::STRUCT && field->initializer == nullptr) {
+			default_value = StructValue(nested_layout);
+		}
+		if (layout->add_field(field->identifier->name, variant_type, default_value, nested_layout) != OK) {
+			push_error(vformat(R"(Could not create layout for struct field "%s".)", field->identifier->name), field);
+			valid_layout = false;
+		}
+	}
+
+	if (valid_layout && layout->finalize() == OK) {
+		p_struct->layout = layout;
+		for (int i = 0; i < p_struct->fields.size(); i++) {
+			p_struct->fields[i]->struct_field_index = i;
+			p_struct->fields[i]->struct_field_offset = layout->get_field(i).native_offset;
+		}
+	} else {
+		p_struct->layout.unref();
+	}
+	p_struct->resolution_status = GDScriptParser::StructNode::RESOLVED;
 }
 
 void GDScriptAnalyzer::resolve_class_interface(GDScriptParser::ClassNode *p_class, const GDScriptParser::Node *p_source) {
@@ -1595,6 +1700,9 @@ void GDScriptAnalyzer::resolve_node(GDScriptParser::Node *p_node, bool p_is_root
 				resolve_class_interface(static_cast<GDScriptParser::ClassNode *>(p_node), true);
 				resolve_class_body(static_cast<GDScriptParser::ClassNode *>(p_node), true);
 			}
+			break;
+		case GDScriptParser::Node::STRUCT:
+			resolve_struct(static_cast<GDScriptParser::StructNode *>(p_node), p_node);
 			break;
 		case GDScriptParser::Node::CONSTANT:
 			resolve_constant(static_cast<GDScriptParser::ConstantNode *>(p_node), true);
@@ -2682,6 +2790,7 @@ void GDScriptAnalyzer::reduce_expression(GDScriptParser::ExpressionNode *p_expre
 		case GDScriptParser::Node::BREAK:
 		case GDScriptParser::Node::BREAKPOINT:
 		case GDScriptParser::Node::CLASS:
+		case GDScriptParser::Node::STRUCT:
 		case GDScriptParser::Node::CONSTANT:
 		case GDScriptParser::Node::CONTINUE:
 		case GDScriptParser::Node::ENUM:
@@ -3563,6 +3672,72 @@ void GDScriptAnalyzer::reduce_call(GDScriptParser::CallNode *p_call, bool p_is_a
 		}
 	}
 
+	if (!p_call->is_super && callee_type == GDScriptParser::Node::IDENTIFIER) {
+		GDScriptParser::StructNode *struct_type = nullptr;
+		List<GDScriptParser::ClassNode *> script_classes;
+		get_class_node_current_scope_classes(parser->current_class, &script_classes, p_call);
+		for (GDScriptParser::ClassNode *script_class : script_classes) {
+			if (!script_class->has_member(p_call->function_name)) {
+				continue;
+			}
+			GDScriptParser::ClassNode::Member member = script_class->get_member(p_call->function_name);
+			if (member.type == GDScriptParser::ClassNode::Member::STRUCT) {
+				resolve_class_member(script_class, p_call->function_name, p_call);
+				struct_type = member.m_struct;
+			}
+			break; // A nearer declaration shadows outer scopes, regardless of its kind.
+		}
+
+		if (struct_type != nullptr) {
+			GDScriptParser::DataType constructor_type = struct_type->get_datatype();
+			resolve_struct(struct_type, p_call);
+			p_call->struct_constructor = struct_type;
+			GDScriptParser::DataType value_type = type_from_metatype(constructor_type);
+			p_call->set_datatype(value_type);
+
+			if (struct_type == nullptr || struct_type->layout.is_null()) {
+				return;
+			}
+			const int field_count = struct_type->fields.size();
+			if (!p_call->arguments.is_empty() && p_call->arguments.size() != field_count) {
+				push_error(vformat("Struct constructor \"%s()\" expects either 0 or %d arguments, but received %d.", struct_type->identifier->name, field_count, p_call->arguments.size()), p_call);
+				return;
+			}
+
+			if (p_call->arguments.size() == field_count) {
+				List<GDScriptParser::DataType> field_types;
+				for (GDScriptParser::VariableNode *field : struct_type->fields) {
+					field_types.push_back(field->get_datatype());
+				}
+				const int error_count = parser->errors.size();
+				validate_call_arg(field_types, 0, false, p_call);
+				if (parser->errors.size() != error_count) {
+					return;
+				}
+			}
+
+			bool constant_constructor = p_call->arguments.is_empty();
+			if (p_call->arguments.size() == field_count) {
+				constant_constructor = true;
+				for (GDScriptParser::ExpressionNode *argument : p_call->arguments) {
+					constant_constructor = constant_constructor && argument->is_constant;
+				}
+			}
+			if (constant_constructor) {
+				StructValue value(struct_type->layout);
+				for (int i = 0; i < p_call->arguments.size(); i++) {
+					if (value.set(i, p_call->arguments[i]->reduced_value) != OK) {
+						push_error(vformat(R"(Cannot use value of type "%s" for field "%s" in struct "%s".)", p_call->arguments[i]->get_datatype().to_string(), struct_type->fields[i]->identifier->name, struct_type->identifier->name), p_call->arguments[i]);
+						return;
+					}
+				}
+				p_call->is_constant = true;
+				p_call->reduced_value = value;
+			}
+			return;
+		}
+	}
+
 	GDScriptParser::DataType base_type;
 	call_type.kind = GDScriptParser::DataType::VARIANT;
 	bool is_self = false;
@@ -4271,6 +4446,12 @@ void GDScriptAnalyzer::reduce_identifier_from_base(GDScriptParser::IdentifierNod
 					return;
 				}
 
+				case GDScriptParser::ClassNode::Member::STRUCT: {
+					p_identifier->set_datatype(member.get_datatype());
+					p_identifier->source = GDScriptParser::IdentifierNode::MEMBER_STRUCT;
+					return;
+				}
+
 				default: {
 					// Do nothing
 				}
@@ -4470,6 +4651,7 @@ void GDScriptAnalyzer::reduce_identifier(GDScriptParser::IdentifierNode *p_ident
 		case GDScriptParser::IdentifierNode::UNDEFINED_SOURCE:
 		case GDScriptParser::IdentifierNode::MEMBER_FUNCTION:
 		case GDScriptParser::IdentifierNode::MEMBER_CLASS:
+		case GDScriptParser::IdentifierNode::MEMBER_STRUCT:
 		case GDScriptParser::IdentifierNode::NATIVE_CLASS:
 			break;
 	}
@@ -4539,6 +4721,7 @@ void GDScriptAnalyzer::reduce_identifier(GDScriptParser::IdentifierNode *p_ident
 				case GDScriptParser::IdentifierNode::MEMBER_FUNCTION:
 				case GDScriptParser::IdentifierNode::MEMBER_SIGNAL:
 				case GDScriptParser::IdentifierNode::MEMBER_CLASS:
+				case GDScriptParser::IdentifierNode::MEMBER_STRUCT:
 				case GDScriptParser::IdentifierNode::INHERITED_VARIABLE:
 				case GDScriptParser::IdentifierNode::STATIC_VARIABLE:
 				case GDScriptParser::IdentifierNode::NATIVE_CLASS:
@@ -4817,6 +5000,32 @@ void GDScriptAnalyzer::reduce_subscript(GDScriptParser::SubscriptNode *p_subscri
 		}
 
 		GDScriptParser::DataType base_type = p_subscript->base->get_datatype();
+		if (base_type.kind == GDScriptParser::DataType::STRUCT) {
+			GDScriptParser::StructNode *struct_type = base_type.struct_type;
+			resolve_struct(struct_type, p_subscript);
+			if (base_type.is_meta_type) {
+				push_error(vformat(R"(Cannot access field "%s" on struct type "%s" without a value.)", p_subscript->attribute->name, base_type.to_string()), p_subscript->attribute);
+			} else if (struct_type == nullptr || !struct_type->has_field(p_subscript->attribute->name) || struct_type->layout.is_null()) {
+				push_error(vformat(R"(Cannot find field "%s" in struct "%s".)", p_subscript->attribute->name, base_type.to_string()), p_subscript->attribute);
+			} else {
+				const int field_index = struct_type->field_indices[p_subscript->attribute->name];
+				GDScriptParser::VariableNode *field = struct_type->fields[field_index];
+				p_subscript->struct_field_index = field_index;
+				p_subscript->struct_field_offset = struct_type->layout->get_field(field_index).native_offset;
+				p_subscript->attribute->set_datatype(field->get_datatype());
+				p_subscript->set_datatype(field->get_datatype());
+				if (p_subscript->base->is_constant) {
+					bool valid = false;
+					p_subscript->reduced_value = p_subscript->base->reduced_value.get_named(p_subscript->attribute->name, valid);
+					p_subscript->is_constant = valid;
+				}
+				return;
+			}
+			GDScriptParser::DataType bad_type;
+			bad_type.kind = GDScriptParser::DataType::VARIANT;
+			p_subscript->set_datatype(bad_type);
+			return;
+		}
 		bool valid = false;
 
 		// If the base is a metatype, use the analyzer instead.
@@ -5681,6 +5890,8 @@ Variant GDScriptAnalyzer::make_variable_default_value(GDScriptParser::VariableNo
 				}
 			} else if (datatype.kind == GDScriptParser::DataType::ENUM) {
 				result = 0;
+			} else if (datatype.kind == GDScriptParser::DataType::STRUCT && datatype.struct_type != nullptr && datatype.struct_type->layout.is_valid()) {
+				result = StructValue(datatype.struct_type->layout);
 			}
 		}
 	}
@@ -6375,6 +6586,12 @@ bool GDScriptAnalyzer::check_type_compatibility(const GDScriptParser::DataType &
 		return true;
 	}
 
+	if (p_target.kind == GDScriptParser::DataType::STRUCT || p_source.kind == GDScriptParser::DataType::STRUCT) {
+		return p_target.kind == GDScriptParser::DataType::STRUCT && p_source.kind == GDScriptParser::DataType::STRUCT &&
+				p_target.is_meta_type == p_source.is_meta_type && p_target.struct_type != nullptr && p_source.struct_type != nullptr &&
+				(p_target.struct_type == p_source.struct_type || p_target.struct_type->fqsn == p_source.struct_type->fqsn);
+	}
+
 	if (p_target.kind == GDScriptParser::DataType::BUILTIN) {
 		bool valid = p_source.kind == GDScriptParser::DataType::BUILTIN && p_target.builtin_type == p_source.builtin_type;
 		if (!valid && p_allow_implicit_conversion) {
@@ -6465,6 +6682,8 @@ bool GDScriptAnalyzer::check_type_compatibility(const GDScriptParser::DataType &
 				src_script = base->base_type.script_type;
 			}
 			break;
+		case GDScriptParser::DataType::STRUCT:
+			break; // Value structs were handled above.
 		case GDScriptParser::DataType::VARIANT:
 		case GDScriptParser::DataType::BUILTIN:
 		case GDScriptParser::DataType::ENUM:
@@ -6502,6 +6721,8 @@ bool GDScriptAnalyzer::check_type_compatibility(const GDScriptParser::DataType &
 				src_class = src_class->base_type.class_type;
 			}
 			return false;
+		case GDScriptParser::DataType::STRUCT:
+			return false; // Value structs were handled above.
 		case GDScriptParser::DataType::VARIANT:
 		case GDScriptParser::DataType::BUILTIN:
 		case GDScriptParser::DataType::ENUM:

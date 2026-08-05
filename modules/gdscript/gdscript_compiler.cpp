@@ -102,6 +102,16 @@ GDScriptDataType GDScriptCompiler::_gdtype_from_datatype(const GDScriptParser::D
 			result.kind = GDScriptDataType::BUILTIN;
 			result.builtin_type = p_datatype.builtin_type;
 		} break;
+		case GDScriptParser::DataType::STRUCT: {
+			result.kind = GDScriptDataType::BUILTIN;
+			result.builtin_type = Variant::STRUCT;
+			if (!p_handle_metatype && p_datatype.is_meta_type) {
+				return GDScriptDataType();
+			}
+			if (!p_datatype.is_meta_type && p_datatype.struct_type != nullptr) {
+				result.struct_layout = p_datatype.struct_type->layout;
+			}
+		} break;
 		case GDScriptParser::DataType::NATIVE: {
 			if (p_handle_metatype && p_datatype.is_meta_type) {
 				result.kind = GDScriptDataType::NATIVE;
@@ -252,7 +262,7 @@ static bool _can_use_validate_call(const MethodBind *p_method, const Vector<GDSc
 }
 
 GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &codegen, Error &r_error, const GDScriptParser::ExpressionNode *p_expression, bool p_root, bool p_initializer) {
-	if (p_expression->is_constant && !(p_expression->get_datatype().is_meta_type && p_expression->get_datatype().kind == GDScriptParser::DataType::CLASS)) {
+	if (p_expression->is_constant && !(p_expression->get_datatype().is_meta_type && (p_expression->get_datatype().kind == GDScriptParser::DataType::CLASS || p_expression->get_datatype().kind == GDScriptParser::DataType::STRUCT))) {
 		return codegen.add_constant(p_expression->reduced_value);
 	}
 
@@ -386,6 +396,11 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 
 						owner = owner->_owner;
 					}
+				} break;
+				case GDScriptParser::IdentifierNode::MEMBER_STRUCT: {
+					_set_error("A struct type can only be used as a type annotation or constructor.", in);
+					r_error = ERR_COMPILATION_FAILED;
+					return GDScriptCodeGenerator::Address();
 				} break;
 				case GDScriptParser::IdentifierNode::STATIC_VARIABLE: {
 					// Try static variables.
@@ -623,7 +638,23 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 				arguments.push_back(arg);
 			}
 
-			if (!call->is_super && call->callee->type == GDScriptParser::Node::IDENTIFIER && GDScriptParser::get_builtin_type(call->function_name) < Variant::VARIANT_MAX) {
+			if (call->struct_constructor != nullptr) {
+				gen->write_construct_struct(result, call->struct_constructor->layout);
+				for (int i = 0; i < arguments.size(); i++) {
+					const GDScriptDataType field_type = _gdtype_from_datatype(call->struct_constructor->fields[i]->get_datatype(), codegen.script);
+					GDScriptCodeGenerator::Address field_value = arguments[i];
+					bool uses_conversion_temporary = false;
+					if (field_type.has_type() && field_value.type != field_type) {
+						field_value = codegen.add_temporary(field_type);
+						gen->write_assign_with_conversion(field_value, arguments[i]);
+						uses_conversion_temporary = true;
+					}
+					gen->write_set_struct_field(result, i, field_value);
+					if (uses_conversion_temporary) {
+						gen->pop_temporary();
+					}
+				}
+			} else if (!call->is_super && call->callee->type == GDScriptParser::Node::IDENTIFIER && GDScriptParser::get_builtin_type(call->function_name) < Variant::VARIANT_MAX) {
 				gen->write_construct(result, GDScriptParser::get_builtin_type(call->function_name), arguments);
 			} else if (!call->is_super && call->callee->type == GDScriptParser::Node::IDENTIFIER && Variant::has_utility_function(call->function_name)) {
 				// Variant utility function.
@@ -834,7 +865,9 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 				}
 			}
 
-			if (named) {
+			if (subscript->struct_field_index >= 0) {
+				gen->write_get_struct_field(result, subscript->struct_field_index, base);
+			} else if (named) {
 				gen->write_get_named(result, name, base);
 			} else {
 				gen->write_get(result, index, base);
@@ -1090,6 +1123,7 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 
 				struct ChainInfo {
 					bool is_named = false;
+					int struct_field_index = -1;
 					GDScriptCodeGenerator::Address base;
 					GDScriptCodeGenerator::Address key;
 					StringName name;
@@ -1107,7 +1141,9 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 					GDScriptCodeGenerator::Address key;
 					StringName name;
 
-					if (subscript_elem->is_attribute) {
+					if (subscript_elem->struct_field_index >= 0) {
+						gen->write_get_struct_field(value, subscript_elem->struct_field_index, prev_base);
+					} else if (subscript_elem->is_attribute) {
 						name = subscript_elem->attribute->name;
 						gen->write_get_named(value, name, prev_base);
 					} else {
@@ -1119,7 +1155,7 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 					}
 
 					// Store base and key for setting it back later.
-					set_chain.push_front({ subscript_elem->is_attribute, prev_base, key, name }); // Push to front to invert the list.
+					set_chain.push_front({ subscript_elem->is_attribute, subscript_elem->struct_field_index, prev_base, key, name }); // Push to front to invert the list.
 					prev_base = value;
 				}
 
@@ -1144,7 +1180,9 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 				if (assignment->operation != GDScriptParser::AssignmentNode::OP_NONE) {
 					GDScriptCodeGenerator::Address op_result = codegen.add_temporary(_gdtype_from_datatype(assignment->get_datatype(), codegen.script));
 					GDScriptCodeGenerator::Address value = codegen.add_temporary(_gdtype_from_datatype(subscript->get_datatype(), codegen.script));
-					if (subscript->is_attribute) {
+					if (subscript->struct_field_index >= 0) {
+						gen->write_get_struct_field(value, subscript->struct_field_index, prev_base);
+					} else if (subscript->is_attribute) {
 						gen->write_get_named(value, name, prev_base);
 					} else {
 						gen->write_get(value, key, prev_base);
@@ -1157,8 +1195,24 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 					assigned = op_result;
 				}
 
+				// Struct storage is strict about field types. Materialize the same
+				// conversion a typed local assignment would perform before the
+				// numeric field setter runs.
+				GDScriptCodeGenerator::Address assigned_before_struct_conversion = assigned;
+				bool uses_struct_conversion_temporary = false;
+				if (subscript->struct_field_index >= 0) {
+					const GDScriptDataType field_type = _gdtype_from_datatype(subscript->get_datatype(), codegen.script);
+					if (field_type.has_type() && assigned.type != field_type) {
+						assigned = codegen.add_temporary(field_type);
+						gen->write_assign_with_conversion(assigned, assigned_before_struct_conversion);
+						uses_struct_conversion_temporary = true;
+					}
+				}
+
 				// Perform assignment.
-				if (subscript->is_attribute) {
+				if (subscript->struct_field_index >= 0) {
+					gen->write_set_struct_field(prev_base, subscript->struct_field_index, assigned);
+				} else if (subscript->is_attribute) {
 					gen->write_set_named(prev_base, name, assigned);
 				} else {
 					gen->write_set(prev_base, key, assigned);
@@ -1167,6 +1221,9 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 					gen->pop_temporary();
 				}
 				if (assigned.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+					gen->pop_temporary();
+				}
+				if (uses_struct_conversion_temporary && assigned_before_struct_conversion.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
 					gen->pop_temporary();
 				}
 
@@ -1182,7 +1239,9 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
 							// Jump shared values since they are already updated in-place.
 							gen->write_jump_if_shared(assigned);
 						}
-						if (!info.is_named) {
+						if (info.struct_field_index >= 0) {
+							gen->write_set_struct_field(info.base, info.struct_field_index, assigned);
+						} else if (!info.is_named) {
 							gen->write_set(info.base, info.key, assigned);
 						} else {
 							gen->write_set_named(info.base, info.name, assigned);
@@ -2385,7 +2444,9 @@ GDScriptFunction *GDScriptCompiler::_parse_function(Error &r_error, GDScript *p_
 
 				GDScriptCodeGenerator::Address dst_address(GDScriptCodeGenerator::Address::MEMBER, codegen.script->member_indices[field->identifier->name].index, field_type);
 
-				if (field_type.builtin_type == Variant::ARRAY && field_type.has_container_element_type(0)) {
+				if (field_type.builtin_type == Variant::STRUCT && field_type.struct_layout.is_valid()) {
+					codegen.generator->write_construct_struct(dst_address, field_type.struct_layout);
+				} else if (field_type.builtin_type == Variant::ARRAY && field_type.has_container_element_type(0)) {
 					codegen.generator->write_construct_typed_array(dst_address, field_type.get_container_element_type(0), Vector<GDScriptCodeGenerator::Address>());
 				} else if (field_type.builtin_type == Variant::DICTIONARY && field_type.has_container_element_types()) {
 					codegen.generator->write_construct_typed_dictionary(dst_address, field_type.get_container_element_type_or_variant(0),
@@ -2572,7 +2633,12 @@ GDScriptFunction *GDScriptCompiler::_make_static_initializer(Error &r_error, GDS
 		if (field_type.has_type()) {
 			codegen.generator->write_newline(field->start_line);
 
-			if (field_type.builtin_type == Variant::ARRAY && field_type.has_container_element_type(0)) {
+			if (field_type.builtin_type == Variant::STRUCT && field_type.struct_layout.is_valid()) {
+				GDScriptCodeGenerator::Address temp = codegen.add_temporary(field_type);
+				codegen.generator->write_construct_struct(temp, field_type.struct_layout);
+				codegen.generator->write_set_static_variable(temp, class_addr, p_script->static_variables_indices[field->identifier->name].index);
+				codegen.generator->pop_temporary();
+			} else if (field_type.builtin_type == Variant::ARRAY && field_type.has_container_element_type(0)) {
 				GDScriptCodeGenerator::Address temp = codegen.add_temporary(field_type);
 				codegen.generator->write_construct_typed_array(temp, field_type.get_container_element_type(0), Vector<GDScriptCodeGenerator::Address>());
 				codegen.generator->write_set_static_variable(temp, class_addr, p_script->static_variables_indices[field->identifier->name].index);

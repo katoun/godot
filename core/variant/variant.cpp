@@ -3503,7 +3503,6 @@ bool Variant::is_type_shared(Variant::Type p_type) {
 		case PACKED_VECTOR3_ARRAY:
 		case PACKED_COLOR_ARRAY:
 		case PACKED_VECTOR4_ARRAY:
-		case STRUCT:
 			return true;
 		default:
 			return false;

@@ -1,0 +1,2 @@
+GDTEST_ANALYZER_ERROR
+>> ERROR at line 2: Struct "Recursive" has a recursive by-value layout.

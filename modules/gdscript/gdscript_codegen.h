@@ -108,6 +108,9 @@ public:
 	virtual void write_get(const Address &p_target, const Address &p_index, const Address &p_source) = 0;
 	virtual void write_set_named(const Address &p_target, const StringName &p_name, const Address &p_source) = 0;
 	virtual void write_get_named(const Address &p_target, const StringName &p_name, const Address &p_source) = 0;
+	virtual void write_set_struct_field(const Address &p_target, int p_field_index, const Address &p_source) = 0;
+	virtual void write_get_struct_field(const Address &p_target, int p_field_index, const Address &p_source) = 0;
+	virtual void write_construct_struct(const Address &p_target, const Ref<StructLayout> &p_layout) = 0;
 	virtual void write_set_member(const Address &p_value, const StringName &p_name) = 0;
 	virtual void write_get_member(const Address &p_target, const StringName &p_name) = 0;
 	virtual void write_set_static_variable(const Address &p_value, const Address &p_class, int p_index) = 0;

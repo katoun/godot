@@ -1251,6 +1251,12 @@ static void _find_identifiers_in_class(const GDScriptParser::ClassNode *p_class,
 						}
 						option = ScriptLanguage::CodeCompletionOption(member.m_class->identifier->name, ScriptLanguage::CODE_COMPLETION_KIND_CLASS, location);
 						break;
+					case GDScriptParser::ClassNode::Member::STRUCT:
+						if (p_only_functions) {
+							continue;
+						}
+						option = ScriptLanguage::CodeCompletionOption(member.m_struct->identifier->name, ScriptLanguage::CODE_COMPLETION_KIND_CLASS, location);
+						break;
 					case GDScriptParser::ClassNode::Member::ENUM_VALUE:
 						if (p_types_only || p_only_functions) {
 							continue;
@@ -1314,7 +1320,7 @@ static void _find_identifiers_in_base(const GDScriptCompletionIdentifier &p_base
 
 	GDScriptParser::DataType base_type = p_base.type;
 
-	if (!p_types_only && base_type.is_meta_type && base_type.kind != GDScriptParser::DataType::BUILTIN && base_type.kind != GDScriptParser::DataType::ENUM) {
+	if (!p_types_only && base_type.is_meta_type && base_type.kind != GDScriptParser::DataType::BUILTIN && base_type.kind != GDScriptParser::DataType::ENUM && base_type.kind != GDScriptParser::DataType::STRUCT) {
 		ScriptLanguage::CodeCompletionOption option("new", ScriptLanguage::CODE_COMPLETION_KIND_FUNCTION, ScriptLanguage::LOCATION_LOCAL);
 		if (p_add_braces) {
 			option.insert_text += "(";
@@ -1325,6 +1331,15 @@ static void _find_identifiers_in_base(const GDScriptCompletionIdentifier &p_base
 
 	while (!base_type.has_no_type()) {
 		switch (base_type.kind) {
+			case GDScriptParser::DataType::STRUCT: {
+				if (!p_types_only && !p_only_functions && !base_type.is_meta_type && base_type.struct_type != nullptr) {
+					for (const GDScriptParser::VariableNode *field : base_type.struct_type->fields) {
+						ScriptLanguage::CodeCompletionOption option(field->identifier->name, ScriptLanguage::CODE_COMPLETION_KIND_MEMBER, ScriptLanguage::LOCATION_LOCAL);
+						r_result.insert(option.display, option);
+					}
+				}
+				return;
+			} break;
 			case GDScriptParser::DataType::CLASS: {
 				_find_identifiers_in_class(base_type.class_type, p_only_functions, p_types_only, base_type.is_meta_type, false, p_add_braces, r_result, p_recursion_depth);
 				// This already finds all parent identifiers, so we are done.
@@ -2669,6 +2684,9 @@ static bool _guess_identifier_type_from_base(GDScriptParser::CompletionContext &
 							r_type.type.class_type = member.m_class;
 							r_type.type.is_meta_type = true;
 							return true;
+						case GDScriptParser::ClassNode::Member::STRUCT:
+							r_type.type = member.m_struct->get_datatype();
+							return true;
 						case GDScriptParser::ClassNode::Member::GROUP:
 							return false; // No-op, but silences warnings.
 						case GDScriptParser::ClassNode::Member::UNDEFINED:
@@ -2678,6 +2696,13 @@ static bool _guess_identifier_type_from_base(GDScriptParser::CompletionContext &
 				}
 				base_type = base_type.class_type->base_type;
 				break;
+			case GDScriptParser::DataType::STRUCT: {
+				if (!base_type.is_meta_type && base_type.struct_type != nullptr && base_type.struct_type->has_field(p_identifier)) {
+					r_type.type = base_type.struct_type->get_field(p_identifier)->get_datatype();
+					return true;
+				}
+				return false;
+			} break;
 			case GDScriptParser::DataType::SCRIPT: {
 				Ref<Script> scr = base_type.script_type;
 				if (scr.is_valid()) {
@@ -3974,6 +3999,10 @@ static Error _lookup_symbol_from_base(const GDScriptParser::DataType &p_base, co
 						r_result.type = ScriptLanguage::LOOKUP_RESULT_CLASS;
 						r_result.class_name = doc_type_name;
 					} break;
+					case GDScriptParser::ClassNode::Member::STRUCT:
+						r_result.type = ScriptLanguage::LOOKUP_RESULT_CLASS;
+						r_result.class_name = member.m_struct->identifier->name;
+						break;
 					case GDScriptParser::ClassNode::Member::CONSTANT:
 						r_result.type = ScriptLanguage::LOOKUP_RESULT_CLASS_CONSTANT;
 						break;
@@ -3994,7 +4023,7 @@ static Error _lookup_symbol_from_base(const GDScriptParser::DataType &p_base, co
 						break;
 				}
 
-				if (member.type != GDScriptParser::ClassNode::Member::CLASS) {
+				if (member.type != GDScriptParser::ClassNode::Member::CLASS && member.type != GDScriptParser::ClassNode::Member::STRUCT) {
 					String doc_type_name;
 					String doc_enum_name;
 					GDScriptDocGen::doctype_from_gdtype(GDScriptAnalyzer::type_from_metatype(base_type), doc_type_name, doc_enum_name);
@@ -4008,6 +4037,17 @@ static Error _lookup_symbol_from_base(const GDScriptParser::DataType &p_base, co
 				r_result.script_path = base_type.script_path;
 				r_result.location = member.get_line();
 				return err;
+			} break;
+			case GDScriptParser::DataType::STRUCT: {
+				if (base_type.struct_type == nullptr || base_type.is_meta_type || !base_type.struct_type->has_field(p_symbol)) {
+					return ERR_CANT_RESOLVE;
+				}
+				const GDScriptParser::VariableNode *field = base_type.struct_type->get_field(p_symbol);
+				r_result.type = ScriptLanguage::LOOKUP_RESULT_CLASS_PROPERTY;
+				r_result.class_name = base_type.struct_type->identifier->name;
+				r_result.class_member = p_symbol;
+				r_result.location = field->start_line;
+				return OK;
 			} break;
 			case GDScriptParser::DataType::SCRIPT: {
 				const Ref<Script> scr = base_type.script_type;

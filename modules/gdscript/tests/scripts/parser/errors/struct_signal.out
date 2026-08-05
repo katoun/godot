@@ -1,0 +1,2 @@
+GDTEST_PARSER_ERROR
+Struct bodies can only contain typed field declarations.

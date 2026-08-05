@@ -386,6 +386,30 @@ void ExtendGDScriptParser::parse_class_symbol(const GDScriptParser::ClassNode *p
 				parse_class_symbol(m.m_class, symbol);
 				r_symbol.children.push_back(symbol);
 			} break;
+			case ClassNode::Member::STRUCT: {
+				LSP::DocumentSymbol symbol;
+				symbol.name = m.m_struct->identifier->name;
+				symbol.kind = LSP::SymbolKind::Struct;
+				symbol.deprecated = false;
+				symbol.range = range_of_node(m.m_struct);
+				symbol.selectionRange = range_of_node(m.m_struct->identifier);
+				symbol.documentation = m.m_struct->doc_data.description;
+				symbol.uri = uri;
+				symbol.script_path = path;
+				symbol.detail = "struct " + symbol.name;
+				for (const VariableNode *field : m.m_struct->fields) {
+					LSP::DocumentSymbol child;
+					child.name = field->identifier->name;
+					child.kind = LSP::SymbolKind::Field;
+					child.range = range_of_node(field);
+					child.selectionRange = range_of_node(field->identifier);
+					child.detail = "var " + child.name + ": " + field->get_datatype().to_string();
+					child.uri = uri;
+					child.script_path = path;
+					symbol.children.push_back(child);
+				}
+				r_symbol.children.push_back(symbol);
+			} break;
 			case ClassNode::Member::GROUP:
 				break; // No-op, but silences warnings.
 			case ClassNode::Member::UNDEFINED:
@@ -854,6 +878,7 @@ Dictionary ExtendGDScriptParser::dump_class_api(const GDScriptParser::ClassNode 
 	}
 
 	Array nested_classes;
+	Array structs;
 	Array constants;
 	Array class_members;
 	Array signals;
@@ -866,6 +891,21 @@ Dictionary ExtendGDScriptParser::dump_class_api(const GDScriptParser::ClassNode 
 			case ClassNode::Member::CLASS:
 				nested_classes.push_back(dump_class_api(m.m_class));
 				break;
+			case ClassNode::Member::STRUCT: {
+				Dictionary api;
+				api["name"] = m.m_struct->identifier->name;
+				api["data_type"] = m.m_struct->get_datatype().to_string();
+				Array fields;
+				for (const VariableNode *field : m.m_struct->fields) {
+					Dictionary field_api;
+					field_api["name"] = field->identifier->name;
+					field_api["data_type"] = field->get_datatype().to_string();
+					field_api["offset"] = field->struct_field_offset;
+					fields.push_back(field_api);
+				}
+				api["fields"] = fields;
+				structs.push_back(api);
+			} break;
 			case ClassNode::Member::CONSTANT: {
 				Dictionary api;
 				api["name"] = m.constant->identifier->name;
@@ -947,6 +987,7 @@ Dictionary ExtendGDScriptParser::dump_class_api(const GDScriptParser::ClassNode 
 	}
 
 	class_api["sub_classes"] = nested_classes;
+	class_api["structs"] = structs;
 	class_api["constants"] = constants;
 	class_api["members"] = class_members;
 	class_api["signals"] = signals;

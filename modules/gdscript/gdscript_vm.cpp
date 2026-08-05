@@ -290,6 +290,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_JUMP_IF_BOOL, \
 		&&OPCODE_JUMP_IF_NOT_BOOL, \
 		&&OPCODE_TYPE_TEST_BUILTIN, \
+		&&OPCODE_TYPE_TEST_STRUCT, \
 		&&OPCODE_TYPE_TEST_ARRAY, \
 		&&OPCODE_TYPE_TEST_DICTIONARY, \
 		&&OPCODE_TYPE_TEST_NATIVE, \
@@ -302,8 +303,10 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_GET_INDEXED_VALIDATED, \
 		&&OPCODE_SET_NAMED, \
 		&&OPCODE_SET_NAMED_VALIDATED, \
+		&&OPCODE_SET_STRUCT_FIELD, \
 		&&OPCODE_GET_NAMED, \
 		&&OPCODE_GET_NAMED_VALIDATED, \
+		&&OPCODE_GET_STRUCT_FIELD, \
 		&&OPCODE_SET_MEMBER, \
 		&&OPCODE_GET_MEMBER, \
 		&&OPCODE_SET_STATIC_VARIABLE, \
@@ -317,6 +320,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_ASSIGN_TRUE, \
 		&&OPCODE_ASSIGN_FALSE, \
 		&&OPCODE_ASSIGN_TYPED_BUILTIN, \
+		&&OPCODE_ASSIGN_TYPED_STRUCT, \
 		&&OPCODE_ASSIGN_TYPED_ARRAY, \
 		&&OPCODE_ASSIGN_TYPED_DICTIONARY, \
 		&&OPCODE_ASSIGN_TYPED_NATIVE, \
@@ -357,6 +361,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_JUMP_IF_SHARED, \
 		&&OPCODE_RETURN, \
 		&&OPCODE_RETURN_TYPED_BUILTIN, \
+		&&OPCODE_RETURN_TYPED_STRUCT, \
 		&&OPCODE_RETURN_TYPED_ARRAY, \
 		&&OPCODE_RETURN_TYPED_DICTIONARY, \
 		&&OPCODE_RETURN_TYPED_NATIVE, \
@@ -1224,6 +1229,23 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			}
 			DISPATCH_OPCODE;
 
+			OPCODE(OPCODE_TYPE_TEST_STRUCT) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(value, 1);
+				GET_VARIANT_PTR(expected, 2);
+
+				bool result = false;
+				if (value->get_type() == Variant::STRUCT && expected->get_type() == Variant::STRUCT) {
+					const StructValue &actual_value = VariantInternalAccessor<StructValue>::get(value);
+					const StructValue &expected_value = VariantInternalAccessor<StructValue>::get(expected);
+					result = actual_value.is_valid() && expected_value.is_valid() && expected_value.get_layout()->is_compatible(actual_value.get_layout());
+				}
+				*dst = result;
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
 			OPCODE(OPCODE_TYPE_TEST_ARRAY) {
 				CHECK_SPACE(6);
 
@@ -1605,6 +1627,29 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			}
 			DISPATCH_OPCODE;
 
+			OPCODE(OPCODE_SET_STRUCT_FIELD) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(value, 1);
+				const int field_index = _code_ptr[ip + 3];
+
+				if (unlikely(dst->get_type() != Variant::STRUCT)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Cannot set a struct field on a value of type '" + _get_var_type(dst) + "'.";
+#endif
+					OPCODE_BREAK;
+				}
+				StructValue &struct_value = VariantInternalAccessor<StructValue>::get(dst);
+				if (unlikely(struct_value.set(field_index, *value) != OK)) {
+#ifdef DEBUG_ENABLED
+					err_text = vformat("Cannot assign value of type '%s' to struct field %d.", _get_var_type(value), field_index);
+#endif
+					OPCODE_BREAK;
+				}
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
 			OPCODE(OPCODE_GET_NAMED) {
 				CHECK_SPACE(4);
 
@@ -1646,6 +1691,31 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				const Variant::ValidatedGetter getter = _getters_ptr[index_getter];
 
 				getter(src, dst);
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_GET_STRUCT_FIELD) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(src, 0);
+				GET_VARIANT_PTR(dst, 1);
+				const int field_index = _code_ptr[ip + 3];
+
+				if (unlikely(src->get_type() != Variant::STRUCT)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Cannot get a struct field from a value of type '" + _get_var_type(src) + "'.";
+#endif
+					OPCODE_BREAK;
+				}
+				const StructValue &struct_value = VariantInternalAccessor<StructValue>::get(src);
+				const Variant *field_value = struct_value.getptr(field_index);
+				if (unlikely(field_value == nullptr)) {
+#ifdef DEBUG_ENABLED
+					err_text = vformat("Struct field index %d is out of bounds.", field_index);
+#endif
+					OPCODE_BREAK;
+				}
+				*dst = *field_value;
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -1845,6 +1915,29 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 					*dst = *src;
 				}
 
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_ASSIGN_TYPED_STRUCT) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(src, 1);
+				GET_VARIANT_PTR(expected, 2);
+
+				bool valid_type = src->get_type() == Variant::STRUCT && expected->get_type() == Variant::STRUCT;
+				if (valid_type) {
+					const StructValue &source_value = VariantInternalAccessor<StructValue>::get(src);
+					const StructValue &expected_value = VariantInternalAccessor<StructValue>::get(expected);
+					valid_type = source_value.is_valid() && expected_value.is_valid() && expected_value.get_layout()->is_compatible(source_value.get_layout());
+				}
+				if (unlikely(!valid_type)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Trying to assign an incompatible value to a typed struct variable.";
+#endif
+					OPCODE_BREAK;
+				}
+				*dst = *src;
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -3329,6 +3422,31 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 #ifdef DEBUG_ENABLED
 				exit_ok = true;
 #endif // DEBUG_ENABLED
+				OPCODE_BREAK;
+			}
+
+			OPCODE(OPCODE_RETURN_TYPED_STRUCT) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(r, 0);
+				GET_VARIANT_PTR(expected, 1);
+
+				bool valid_type = r->get_type() == Variant::STRUCT && expected->get_type() == Variant::STRUCT;
+				if (valid_type) {
+					const StructValue &return_value = VariantInternalAccessor<StructValue>::get(r);
+					const StructValue &expected_value = VariantInternalAccessor<StructValue>::get(expected);
+					valid_type = return_value.is_valid() && expected_value.is_valid() && expected_value.get_layout()->is_compatible(return_value.get_layout());
+				}
+				if (unlikely(!valid_type)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Trying to return an incompatible value from a function with a typed struct return.";
+#endif
+					retvalue = *expected;
+					OPCODE_BREAK;
+				}
+				retvalue = *r;
+#ifdef DEBUG_ENABLED
+				exit_ok = true;
+#endif
 				OPCODE_BREAK;
 			}
 

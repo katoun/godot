@@ -38,6 +38,7 @@
 #include "core/string/string_name.h"
 #include "core/templates/pair.h"
 #include "core/templates/self_list.h"
+#include "core/variant/struct_value.h"
 #include "core/variant/variant.h"
 
 class GDScriptInstance;
@@ -64,6 +65,7 @@ public:
 	StringName native_type;
 	Script *script_type = nullptr;
 	Ref<Script> script_type_ref;
+	Ref<StructLayout> struct_layout;
 
 	_FORCE_INLINE_ bool has_type() const { return kind != VARIANT; }
 
@@ -84,6 +86,7 @@ public:
 					return true;
 				case Variant::NIL:
 				case Variant::OBJECT:
+				case Variant::STRUCT:
 					return true;
 				default:
 					return false;
@@ -127,6 +130,7 @@ public:
 				builtin_type == p_other.builtin_type &&
 				native_type == p_other.native_type &&
 				(script_type == p_other.script_type || script_type_ref == p_other.script_type_ref) &&
+				struct_layout == p_other.struct_layout &&
 				container_element_types == p_other.container_element_types;
 	}
 
@@ -140,6 +144,7 @@ public:
 		native_type = p_other.native_type;
 		script_type = p_other.script_type;
 		script_type_ref = p_other.script_type_ref;
+		struct_layout = p_other.struct_layout;
 		container_element_types = p_other.container_element_types;
 	}
 
@@ -166,6 +171,7 @@ public:
 		OPCODE_JUMP_IF_BOOL,
 		OPCODE_JUMP_IF_NOT_BOOL,
 		OPCODE_TYPE_TEST_BUILTIN,
+		OPCODE_TYPE_TEST_STRUCT,
 		OPCODE_TYPE_TEST_ARRAY,
 		OPCODE_TYPE_TEST_DICTIONARY,
 		OPCODE_TYPE_TEST_NATIVE,
@@ -178,8 +184,10 @@ public:
 		OPCODE_GET_INDEXED_VALIDATED,
 		OPCODE_SET_NAMED,
 		OPCODE_SET_NAMED_VALIDATED,
+		OPCODE_SET_STRUCT_FIELD,
 		OPCODE_GET_NAMED,
 		OPCODE_GET_NAMED_VALIDATED,
+		OPCODE_GET_STRUCT_FIELD,
 		OPCODE_SET_MEMBER,
 		OPCODE_GET_MEMBER,
 		OPCODE_SET_STATIC_VARIABLE, // Only for GDScript.
@@ -193,6 +201,7 @@ public:
 		OPCODE_ASSIGN_TRUE,
 		OPCODE_ASSIGN_FALSE,
 		OPCODE_ASSIGN_TYPED_BUILTIN,
+		OPCODE_ASSIGN_TYPED_STRUCT,
 		OPCODE_ASSIGN_TYPED_ARRAY,
 		OPCODE_ASSIGN_TYPED_DICTIONARY,
 		OPCODE_ASSIGN_TYPED_NATIVE,
@@ -233,6 +242,7 @@ public:
 		OPCODE_JUMP_IF_SHARED,
 		OPCODE_RETURN,
 		OPCODE_RETURN_TYPED_BUILTIN,
+		OPCODE_RETURN_TYPED_STRUCT,
 		OPCODE_RETURN_TYPED_ARRAY,
 		OPCODE_RETURN_TYPED_DICTIONARY,
 		OPCODE_RETURN_TYPED_NATIVE,

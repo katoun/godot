@@ -859,7 +859,12 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 void GDScriptByteCodeGenerator::write_type_test(const Address &p_target, const Address &p_source, const GDScriptDataType &p_type) {
 	switch (p_type.kind) {
 		case GDScriptDataType::BUILTIN: {
-			if (p_type.builtin_type == Variant::ARRAY && p_type.has_container_element_type(0)) {
+			if (p_type.builtin_type == Variant::STRUCT && p_type.struct_layout.is_valid()) {
+				append_opcode(GDScriptFunction::OPCODE_TYPE_TEST_STRUCT);
+				append(p_target);
+				append(p_source);
+				append(get_constant_pos(StructValue(p_type.struct_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
+			} else if (p_type.builtin_type == Variant::ARRAY && p_type.has_container_element_type(0)) {
 				const GDScriptDataType &element_type = p_type.get_container_element_type(0);
 				append_opcode(GDScriptFunction::OPCODE_TYPE_TEST_ARRAY);
 				append(p_target);
@@ -1147,6 +1152,26 @@ void GDScriptByteCodeGenerator::write_get_named(const Address &p_target, const S
 	append(p_name);
 }
 
+void GDScriptByteCodeGenerator::write_set_struct_field(const Address &p_target, int p_field_index, const Address &p_source) {
+	append_opcode(GDScriptFunction::OPCODE_SET_STRUCT_FIELD);
+	append(p_target);
+	append(p_source);
+	append(p_field_index);
+}
+
+void GDScriptByteCodeGenerator::write_get_struct_field(const Address &p_target, int p_field_index, const Address &p_source) {
+	append_opcode(GDScriptFunction::OPCODE_GET_STRUCT_FIELD);
+	append(p_source);
+	append(p_target);
+	append(p_field_index);
+}
+
+void GDScriptByteCodeGenerator::write_construct_struct(const Address &p_target, const Ref<StructLayout> &p_layout) {
+	ERR_FAIL_COND(p_layout.is_null());
+	const Address default_value(Address::CONSTANT, get_constant_pos(StructValue(p_layout)), p_target.type);
+	write_assign(p_target, default_value);
+}
+
 void GDScriptByteCodeGenerator::write_set_member(const Address &p_value, const StringName &p_name) {
 	append_opcode(GDScriptFunction::OPCODE_SET_MEMBER);
 	append(p_value);
@@ -1176,7 +1201,12 @@ void GDScriptByteCodeGenerator::write_get_static_variable(const Address &p_targe
 void GDScriptByteCodeGenerator::write_assign_with_conversion(const Address &p_target, const Address &p_source) {
 	switch (p_target.type.kind) {
 		case GDScriptDataType::BUILTIN: {
-			if (p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
+			if (p_target.type.builtin_type == Variant::STRUCT && p_target.type.struct_layout.is_valid()) {
+				append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_STRUCT);
+				append(p_target);
+				append(p_source);
+				append(get_constant_pos(StructValue(p_target.type.struct_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
+			} else if (p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
 				const GDScriptDataType &element_type = p_target.type.get_container_element_type(0);
 				append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY);
 				append(p_target);
@@ -1253,6 +1283,11 @@ void GDScriptByteCodeGenerator::write_assign(const Address &p_target, const Addr
 		append(p_target);
 		append(p_source);
 		append(p_target.type.builtin_type);
+	} else if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::STRUCT && p_target.type.struct_layout.is_valid()) {
+		append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_STRUCT);
+		append(p_target);
+		append(p_source);
+		append(get_constant_pos(StructValue(p_target.type.struct_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
 	} else if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
 		const GDScriptDataType &element_type = p_target.type.get_container_element_type(0);
 		append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY);
@@ -2146,7 +2181,11 @@ void GDScriptByteCodeGenerator::write_return(const Address &p_return_value, bool
 			append(p_return_value);
 		} break;
 		case GDScriptDataType::BUILTIN: {
-			if (function->return_type.builtin_type == Variant::ARRAY && function->return_type.has_container_element_type(0)) {
+			if (function->return_type.builtin_type == Variant::STRUCT && function->return_type.struct_layout.is_valid()) {
+				append_opcode(GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT);
+				append(p_return_value);
+				append(get_constant_pos(StructValue(function->return_type.struct_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
+			} else if (function->return_type.builtin_type == Variant::ARRAY && function->return_type.has_container_element_type(0)) {
 				const GDScriptDataType &element_type = function->return_type.get_container_element_type(0);
 				append_opcode(GDScriptFunction::OPCODE_RETURN_TYPED_ARRAY);
 				append(p_return_value);
@@ -2241,6 +2280,9 @@ void GDScriptByteCodeGenerator::clear_address(const Address &p_address) {
 			case Variant::NIL:
 			case Variant::OBJECT:
 				write_assign_null(p_address);
+				break;
+			case Variant::STRUCT:
+				write_construct_struct(p_address, p_address.type.struct_layout);
 				break;
 			default:
 				write_construct(p_address, p_address.type.builtin_type, Vector<GDScriptCodeGenerator::Address>());

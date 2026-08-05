@@ -1,0 +1,2 @@
+GDTEST_ANALYZER_ERROR
+>> ERROR at line 10: Value of type "Second" cannot be assigned to a variable of type "First".
