@@ -457,6 +457,14 @@ void GDScriptByteCodeGenerator::set_initial_line(int p_line) {
 #define IS_BUILTIN_TYPE(m_var, m_type) \
 	(m_var.type.kind == GDScriptDataType::BUILTIN && m_var.type.builtin_type == m_type && m_type != Variant::NIL)
 
+static bool is_typed_struct_address(const GDScriptCodeGenerator::Address &p_address) {
+	return IS_BUILTIN_TYPE(p_address, Variant::STRUCT) && p_address.type.struct_layout.is_valid();
+}
+
+static bool have_compatible_struct_types(const GDScriptCodeGenerator::Address &p_left, const GDScriptCodeGenerator::Address &p_right) {
+	return is_typed_struct_address(p_left) && is_typed_struct_address(p_right) && p_left.type.struct_layout->is_compatible(p_right.type.struct_layout);
+}
+
 static bool is_direct_int_operator(Variant::Operator p_operator) {
 	switch (p_operator) {
 		case Variant::OP_ADD:
@@ -776,6 +784,13 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 }
 
 void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, Variant::Operator p_operator, const Address &p_left_operand, const Address &p_right_operand) {
+	if (p_operator == Variant::OP_EQUAL && is_typed_struct_address(p_left_operand) && is_typed_struct_address(p_right_operand)) {
+		append_opcode(GDScriptFunction::OPCODE_EQUAL_STRUCT);
+		append(p_left_operand);
+		append(p_right_operand);
+		append(p_target);
+		return;
+	}
 	if (IS_BUILTIN_TYPE(p_left_operand, Variant::INT) && IS_BUILTIN_TYPE(p_right_operand, Variant::INT) && is_direct_int_operator(p_operator)) {
 		append_opcode(GDScriptFunction::OPCODE_OPERATOR_INT);
 		append(p_left_operand);
@@ -1166,10 +1181,39 @@ void GDScriptByteCodeGenerator::write_get_struct_field(const Address &p_target, 
 	append(p_field_index);
 }
 
-void GDScriptByteCodeGenerator::write_construct_struct(const Address &p_target, const Ref<StructLayout> &p_layout) {
+void GDScriptByteCodeGenerator::write_construct_struct(const Address &p_target, const Ref<StructLayout> &p_layout, const Vector<Address> &p_arguments) {
 	ERR_FAIL_COND(p_layout.is_null());
-	const Address default_value(Address::CONSTANT, get_constant_pos(StructValue(p_layout)), p_target.type);
-	write_assign(p_target, default_value);
+	ERR_FAIL_COND(!p_arguments.is_empty() && p_arguments.size() != p_layout->get_field_count());
+
+	append_opcode_and_argcount(GDScriptFunction::OPCODE_CONSTRUCT_STRUCT, 2 + p_arguments.size());
+	for (const Address &argument : p_arguments) {
+		append(argument);
+	}
+	CallTarget ct = get_call_target(p_target);
+	append(ct.target);
+	append(get_constant_pos(StructValue(p_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
+	append(p_arguments.size());
+	ct.cleanup();
+}
+
+void GDScriptByteCodeGenerator::write_assign_struct(const Address &p_target, const Address &p_source) {
+	append_opcode(GDScriptFunction::OPCODE_ASSIGN_STRUCT);
+	append(p_target);
+	append(p_source);
+}
+
+void GDScriptByteCodeGenerator::write_box_struct(const Address &p_target, const Address &p_source) {
+	append_opcode(GDScriptFunction::OPCODE_BOX_STRUCT);
+	append(p_target);
+	append(p_source);
+}
+
+void GDScriptByteCodeGenerator::write_unbox_struct(const Address &p_target, const Address &p_source, const Ref<StructLayout> &p_layout) {
+	ERR_FAIL_COND(p_layout.is_null());
+	append_opcode(GDScriptFunction::OPCODE_UNBOX_STRUCT);
+	append(p_target);
+	append(p_source);
+	append(get_constant_pos(StructValue(p_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
 }
 
 void GDScriptByteCodeGenerator::write_set_member(const Address &p_value, const StringName &p_name) {
@@ -1202,10 +1246,11 @@ void GDScriptByteCodeGenerator::write_assign_with_conversion(const Address &p_ta
 	switch (p_target.type.kind) {
 		case GDScriptDataType::BUILTIN: {
 			if (p_target.type.builtin_type == Variant::STRUCT && p_target.type.struct_layout.is_valid()) {
-				append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_STRUCT);
-				append(p_target);
-				append(p_source);
-				append(get_constant_pos(StructValue(p_target.type.struct_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
+				if (have_compatible_struct_types(p_target, p_source)) {
+					write_assign_struct(p_target, p_source);
+				} else {
+					write_unbox_struct(p_target, p_source, p_target.type.struct_layout);
+				}
 			} else if (p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
 				const GDScriptDataType &element_type = p_target.type.get_container_element_type(0);
 				append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY);
@@ -1283,11 +1328,14 @@ void GDScriptByteCodeGenerator::write_assign(const Address &p_target, const Addr
 		append(p_target);
 		append(p_source);
 		append(p_target.type.builtin_type);
-	} else if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::STRUCT && p_target.type.struct_layout.is_valid()) {
-		append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_STRUCT);
-		append(p_target);
-		append(p_source);
-		append(get_constant_pos(StructValue(p_target.type.struct_layout)) | (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS));
+	} else if (is_typed_struct_address(p_target)) {
+		if (have_compatible_struct_types(p_target, p_source)) {
+			write_assign_struct(p_target, p_source);
+		} else {
+			write_unbox_struct(p_target, p_source, p_target.type.struct_layout);
+		}
+	} else if (p_target.type.kind == GDScriptDataType::VARIANT && is_typed_struct_address(p_source)) {
+		write_box_struct(p_target, p_source);
 	} else if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
 		const GDScriptDataType &element_type = p_target.type.get_container_element_type(0);
 		append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY);
@@ -2282,7 +2330,7 @@ void GDScriptByteCodeGenerator::clear_address(const Address &p_address) {
 				write_assign_null(p_address);
 				break;
 			case Variant::STRUCT:
-				write_construct_struct(p_address, p_address.type.struct_layout);
+				write_construct_struct(p_address, p_address.type.struct_layout, Vector<GDScriptCodeGenerator::Address>());
 				break;
 			default:
 				write_construct(p_address, p_address.type.builtin_type, Vector<GDScriptCodeGenerator::Address>());

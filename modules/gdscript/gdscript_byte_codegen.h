@@ -460,6 +460,9 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	int write_typed_comparison_jump(const Address &p_condition, bool p_jump_if_true);
 	int write_condition_jump(const Address &p_condition, bool p_jump_if_true);
 	void write_direct_math_operator(const Address &p_target, Variant::Operator p_operator, const Address &p_left_operand, const Address &p_right_operand, Variant::Type p_right_type);
+	void write_assign_struct(const Address &p_target, const Address &p_source);
+	void write_box_struct(const Address &p_target, const Address &p_source);
+	void write_unbox_struct(const Address &p_target, const Address &p_source, const Ref<StructLayout> &p_layout);
 
 public:
 	virtual uint32_t add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) override;
@@ -508,7 +511,7 @@ public:
 	virtual void write_get_named(const Address &p_target, const StringName &p_name, const Address &p_source) override;
 	virtual void write_set_struct_field(const Address &p_target, int p_field_index, const Address &p_source) override;
 	virtual void write_get_struct_field(const Address &p_target, int p_field_index, const Address &p_source) override;
-	virtual void write_construct_struct(const Address &p_target, const Ref<StructLayout> &p_layout) override;
+	virtual void write_construct_struct(const Address &p_target, const Ref<StructLayout> &p_layout, const Vector<Address> &p_arguments) override;
 	virtual void write_set_member(const Address &p_value, const StringName &p_name) override;
 	virtual void write_get_member(const Address &p_target, const StringName &p_name) override;
 	virtual void write_set_static_variable(const Address &p_value, const Address &p_class, int p_index) override;

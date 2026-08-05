@@ -282,6 +282,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_OPERATOR_INT, \
 		&&OPCODE_OPERATOR_FLOAT, \
 		&&OPCODE_OPERATOR_MATH, \
+		&&OPCODE_EQUAL_STRUCT, \
 		&&OPCODE_GET_MATH_COMPONENT, \
 		&&OPCODE_SET_MATH_COMPONENT, \
 		&&OPCODE_MATH_LENGTH, \
@@ -320,7 +321,9 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_ASSIGN_TRUE, \
 		&&OPCODE_ASSIGN_FALSE, \
 		&&OPCODE_ASSIGN_TYPED_BUILTIN, \
-		&&OPCODE_ASSIGN_TYPED_STRUCT, \
+		&&OPCODE_ASSIGN_STRUCT, \
+		&&OPCODE_BOX_STRUCT, \
+		&&OPCODE_UNBOX_STRUCT, \
 		&&OPCODE_ASSIGN_TYPED_ARRAY, \
 		&&OPCODE_ASSIGN_TYPED_DICTIONARY, \
 		&&OPCODE_ASSIGN_TYPED_NATIVE, \
@@ -330,6 +333,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_CAST_TO_SCRIPT, \
 		&&OPCODE_CONSTRUCT, \
 		&&OPCODE_CONSTRUCT_VALIDATED, \
+		&&OPCODE_CONSTRUCT_STRUCT, \
 		&&OPCODE_CONSTRUCT_ARRAY, \
 		&&OPCODE_CONSTRUCT_TYPED_ARRAY, \
 		&&OPCODE_CONSTRUCT_DICTIONARY, \
@@ -1088,6 +1092,25 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				operator_func(a, b, dst);
 
 				ip += 6;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_EQUAL_STRUCT) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(left, 0);
+				GET_VARIANT_PTR(right, 1);
+				GET_VARIANT_PTR(dst, 2);
+
+				if (unlikely(left->get_type() != Variant::STRUCT || right->get_type() != Variant::STRUCT)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Struct equality requires two struct values.";
+#endif
+					OPCODE_BREAK;
+				}
+				const StructValue &left_value = VariantInternalAccessor<StructValue>::get(left);
+				const StructValue &right_value = VariantInternalAccessor<StructValue>::get(right);
+				*dst = left_value.recursive_equal(right_value, 0);
+				ip += 4;
 			}
 			DISPATCH_OPCODE;
 
@@ -1919,7 +1942,41 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 			}
 			DISPATCH_OPCODE;
 
-			OPCODE(OPCODE_ASSIGN_TYPED_STRUCT) {
+			OPCODE(OPCODE_ASSIGN_STRUCT) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(src, 1);
+
+				if (unlikely(src->get_type() != Variant::STRUCT)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Struct assignment requires a struct source value.";
+#endif
+					OPCODE_BREAK;
+				}
+				*dst = *src;
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_BOX_STRUCT) {
+				CHECK_SPACE(3);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(src, 1);
+
+				if (unlikely(src->get_type() != Variant::STRUCT)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Cannot box a non-struct value as a struct.";
+#endif
+					OPCODE_BREAK;
+				}
+				// Variant-frame execution already stores StructValue in boxed form. This
+				// explicit boundary lets native tiers materialize a box only when needed.
+				*dst = *src;
+				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_UNBOX_STRUCT) {
 				CHECK_SPACE(4);
 				GET_VARIANT_PTR(dst, 0);
 				GET_VARIANT_PTR(src, 1);
@@ -1933,10 +1990,12 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 				}
 				if (unlikely(!valid_type)) {
 #ifdef DEBUG_ENABLED
-					err_text = "Trying to assign an incompatible value to a typed struct variable.";
+					err_text = "Cannot unbox a dynamic value into an incompatible typed struct variable.";
 #endif
 					OPCODE_BREAK;
 				}
+				// The interpreter keeps the value boxed; native tiers can lower this
+				// boundary through StructLayout::unbox_native().
 				*dst = *src;
 				ip += 4;
 			}
@@ -2270,6 +2329,49 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 				constructor(dst, (const Variant **)argptrs);
 
 				ip += 3;
+			}
+			DISPATCH_OPCODE;
+
+			OPCODE(OPCODE_CONSTRUCT_STRUCT) {
+				LOAD_INSTRUCTION_ARGS
+				CHECK_SPACE(1 + instr_arg_count);
+				ip += instr_arg_count;
+
+				const int argc = _code_ptr[ip + 1];
+				GET_INSTRUCTION_ARG(dst, argc);
+				GET_INSTRUCTION_ARG(layout_value, argc + 1);
+				if (unlikely(layout_value->get_type() != Variant::STRUCT)) {
+#ifdef DEBUG_ENABLED
+					err_text = "Struct construction requires valid layout metadata.";
+#endif
+					OPCODE_BREAK;
+				}
+
+				const StructValue &layout_holder = VariantInternalAccessor<StructValue>::get(layout_value);
+				const Ref<StructLayout> layout = layout_holder.get_layout();
+				if (unlikely(layout.is_null() || (argc != 0 && argc != layout->get_field_count()))) {
+#ifdef DEBUG_ENABLED
+					err_text = "Struct construction received invalid layout metadata or field count.";
+#endif
+					OPCODE_BREAK;
+				}
+
+				StructValue value(layout);
+				bool valid_fields = true;
+				for (int i = 0; i < argc; i++) {
+					if (unlikely(value.set(i, *instruction_args[i]) != OK)) {
+#ifdef DEBUG_ENABLED
+						err_text = vformat("Cannot construct struct field %d from value of type '%s'.", i, _get_var_type(instruction_args[i]));
+#endif
+						valid_fields = false;
+						break;
+					}
+				}
+				if (unlikely(!valid_fields)) {
+					OPCODE_BREAK;
+				}
+				*dst = value;
+				ip += 2;
 			}
 			DISPATCH_OPCODE;
 

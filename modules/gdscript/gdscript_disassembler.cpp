@@ -167,6 +167,16 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 6;
 			} break;
+			case OPCODE_EQUAL_STRUCT: {
+				text += "struct equality ";
+				text += DADDR(3);
+				text += " = ";
+				text += DADDR(1);
+				text += " == ";
+				text += DADDR(2);
+
+				incr += 4;
+			} break;
 			case OPCODE_GET_MATH_COMPONENT: {
 				const int metadata = _code_ptr[ip + 3];
 				text += "get math component ";
@@ -574,11 +584,27 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 4;
 			} break;
-			case OPCODE_ASSIGN_TYPED_STRUCT: {
-				text += "assign typed struct ";
+			case OPCODE_ASSIGN_STRUCT: {
+				text += "assign struct ";
 				text += DADDR(1);
 				text += " = ";
 				text += DADDR(2);
+				incr += 3;
+			} break;
+			case OPCODE_BOX_STRUCT: {
+				text += "box struct ";
+				text += DADDR(1);
+				text += " = ";
+				text += DADDR(2);
+				incr += 3;
+			} break;
+			case OPCODE_UNBOX_STRUCT: {
+				text += "unbox struct ";
+				text += DADDR(1);
+				text += " = ";
+				text += DADDR(2);
+				text += " as ";
+				text += DADDR(3);
 				incr += 4;
 			} break;
 			case OPCODE_ASSIGN_TYPED_ARRAY: {
@@ -688,6 +714,25 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 				text += ")";
 
 				incr = 3 + instr_var_args;
+			} break;
+			case OPCODE_CONSTRUCT_STRUCT: {
+				int instr_var_args = _code_ptr[++ip];
+				int argc = _code_ptr[ip + 1 + instr_var_args];
+
+				text += "construct struct ";
+				text += DADDR(1 + argc);
+				text += " = ";
+				text += DADDR(2 + argc);
+				text += "(";
+				for (int i = 0; i < argc; i++) {
+					if (i > 0) {
+						text += ", ";
+					}
+					text += DADDR(1 + i);
+				}
+				text += ")";
+
+				incr = 2 + instr_var_args;
 			} break;
 			case OPCODE_CONSTRUCT_ARRAY: {
 				int instr_var_args = _code_ptr[++ip];

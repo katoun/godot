@@ -97,6 +97,62 @@ func _init():
 	CHECK_MESSAGE(int(ref_counted->get_meta("result")) == 42, "The script should assign object metadata successfully.");
 }
 
+TEST_CASE("[Modules][GDScript] Struct expressions use specialized VM instructions") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends RefCounted
+
+struct Pair:
+	var first: int
+	var second: int
+
+func construct_pair(first: int, second: int) -> Pair:
+	return Pair(first, second)
+
+func assign_pair(value: Pair) -> Pair:
+	var copy: Pair = value
+	return copy
+
+func mutate_pair(value: Pair) -> int:
+	value.first = value.second
+	return value.first
+
+func equal_pair(left: Pair, right: Pair) -> bool:
+	return left == right
+
+func box_pair(value: Pair) -> Variant:
+	var boxed: Variant = value
+	return boxed
+
+func unbox_pair(value: Variant) -> Pair:
+	var typed: Pair = value
+	return typed
+)");
+
+	ERR_PRINT_OFF;
+	const Error error = gdscript->reload();
+	ERR_PRINT_ON;
+	REQUIRE_MESSAGE(error == OK, "The struct bytecode test script should parse successfully.");
+
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(gdscript);
+	const Variant first = instance->call(SNAME("construct_pair"), 3, 7);
+	const Variant same = instance->call(SNAME("assign_pair"), first);
+	const Variant different = instance->call(SNAME("construct_pair"), 3, 8);
+	REQUIRE(first.get_type() == Variant::STRUCT);
+	REQUIRE(same.get_type() == Variant::STRUCT);
+	CHECK(bool(instance->call(SNAME("equal_pair"), first, same)));
+	CHECK_FALSE(bool(instance->call(SNAME("equal_pair"), first, different)));
+	CHECK(int64_t(instance->call(SNAME("mutate_pair"), first)) == 7);
+
+	const Variant boxed = instance->call(SNAME("box_pair"), first);
+	const Variant unboxed = instance->call(SNAME("unbox_pair"), boxed);
+	REQUIRE(boxed.get_type() == Variant::STRUCT);
+	REQUIRE(unboxed.get_type() == Variant::STRUCT);
+	CHECK(bool(instance->call(SNAME("equal_pair"), first, unboxed)));
+}
+
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 TEST_CASE("[Modules][GDScript] Baseline JIT unboxes primitive frames and calls") {
 	GDScriptLanguage::get_singleton()->init();

@@ -21,6 +21,14 @@ func set_lifetime(state: ProjectileState, value: Variant) -> ProjectileState:
 	state.lifetime = value
 	return state
 
+func box_state(state: ProjectileState) -> Variant:
+	var boxed: Variant = state
+	return boxed
+
+func unbox_state(value: Variant) -> ProjectileState:
+	var state: ProjectileState = value
+	return state
+
 func test():
 	var original := make_state(1.0)
 	var copy: ProjectileState = original
@@ -47,3 +55,6 @@ func test():
 	print(original.velocity)
 	print(typeof(original) == TYPE_STRUCT)
 	print(original is ProjectileState)
+	var boxed: Variant = box_state(original)
+	print(typeof(boxed) == TYPE_STRUCT)
+	print(unbox_state(boxed) == original)
