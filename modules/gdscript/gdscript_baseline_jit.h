@@ -32,6 +32,7 @@
 
 #include "core/typedefs.h"
 #include "core/templates/vector.h"
+#include "core/variant/struct_value.h"
 #include "core/variant/variant.h"
 
 class GDScriptFunction;
@@ -42,7 +43,9 @@ class GDScriptBaselineJIT {
 	void *typed_entry_point = nullptr;
 	uint64_t code_size = 0;
 	Vector<Variant::Type> typed_argument_types;
+	Vector<Ref<StructLayout>> typed_argument_struct_layouts;
 	Variant::Type typed_return_type = Variant::NIL;
+	Ref<StructLayout> typed_return_struct_layout;
 	int ptrcall_count = 0;
 	int ssa_node_count = 0;
 	int eliminated_node_count = 0;
@@ -50,7 +53,7 @@ class GDScriptBaselineJIT {
 	bool requires_self = false;
 	bool optimizing = false;
 
-	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count, int p_scalar_replaced_math_value_count);
+	GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, const Vector<Ref<StructLayout>> &p_typed_argument_struct_layouts, Variant::Type p_typed_return_type, const Ref<StructLayout> &p_typed_return_struct_layout, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count, int p_scalar_replaced_math_value_count);
 	static GDScriptBaselineJIT *_compile(const GDScriptFunction *p_function, bool p_optimizing);
 
 public:

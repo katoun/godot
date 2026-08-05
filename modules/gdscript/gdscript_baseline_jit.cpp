@@ -69,6 +69,27 @@ static bool is_unboxed_value_type(Variant::Type p_type) {
 	return p_type == Variant::BOOL || p_type == Variant::INT || p_type == Variant::FLOAT || is_unboxed_struct_type(p_type);
 }
 
+static bool is_unboxed_user_struct_layout(const Ref<StructLayout> &p_layout) {
+	if (p_layout.is_null() || !p_layout->is_finalized() || !p_layout->is_trivial()) {
+		return false;
+	}
+	for (int i = 0; i < p_layout->get_field_count(); i++) {
+		const StructLayout::Field &field = p_layout->get_field(i);
+		if (field.type == Variant::STRUCT) {
+			if (!is_unboxed_user_struct_layout(field.struct_layout)) {
+				return false;
+			}
+		} else if (!is_unboxed_value_type(field.type)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool is_unboxed_native_type(Variant::Type p_type, const Ref<StructLayout> &p_layout = Ref<StructLayout>()) {
+	return p_type == Variant::STRUCT ? is_unboxed_user_struct_layout(p_layout) : is_unboxed_value_type(p_type);
+}
+
 static int get_unboxed_value_size(Variant::Type p_type) {
 	switch (p_type) {
 		case Variant::BOOL:
@@ -119,6 +140,14 @@ static int get_unboxed_value_alignment(Variant::Type p_type) {
 		default:
 			return alignof(uint64_t);
 	}
+}
+
+static int get_unboxed_native_size(Variant::Type p_type, const Ref<StructLayout> &p_layout = Ref<StructLayout>()) {
+	return p_type == Variant::STRUCT && p_layout.is_valid() ? p_layout->get_native_size() : get_unboxed_value_size(p_type);
+}
+
+static int get_unboxed_native_alignment(Variant::Type p_type, const Ref<StructLayout> &p_layout = Ref<StructLayout>()) {
+	return p_type == Variant::STRUCT && p_layout.is_valid() ? p_layout->get_native_alignment() : get_unboxed_value_alignment(p_type);
 }
 
 static int align_native_offset(int p_offset, int p_alignment) {
@@ -181,6 +210,37 @@ static const void *get_unboxed_variant_data(const Variant *p_value, Variant::Typ
 		default:
 			return nullptr;
 	}
+}
+
+static bool get_struct_value(const Variant *p_value, StructValue &r_value) {
+	if (p_value == nullptr || p_value->get_type() != Variant::STRUCT) {
+		return false;
+	}
+	r_value = VariantInternalAccessor<StructValue>::get(p_value);
+	return r_value.is_valid();
+}
+
+static void SLJIT_FUNC invoke_construct_struct(const StructLayout *p_layout, void *r_native_data) {
+	DEV_ASSERT(p_layout != nullptr);
+	p_layout->construct_native(r_native_data);
+}
+
+static void SLJIT_FUNC invoke_unbox_struct_variant(const Variant *p_value, const StructLayout *p_layout, void *r_native_data) {
+	DEV_ASSERT(p_layout != nullptr);
+	StructValue value;
+	if (get_struct_value(p_value, value) && p_layout->is_compatible(value.get_layout())) {
+		p_layout->unbox_native(value, r_native_data);
+	}
+}
+
+static void SLJIT_FUNC invoke_store_struct_variant(Variant *p_destination, const void *p_native_data, const StructLayout *p_layout) {
+	DEV_ASSERT(p_layout != nullptr);
+	*p_destination = p_layout->box_native(p_native_data);
+}
+
+static sljit_sw SLJIT_FUNC invoke_equal_struct(const StructLayout *p_layout, const void *p_left, const void *p_right) {
+	DEV_ASSERT(p_layout != nullptr);
+	return p_layout->native_equal(p_left, p_right);
 }
 
 static void SLJIT_FUNC invoke_ptrcall(MethodBind *p_method, Object *p_instance, const void **p_arguments, void *r_return) {
@@ -1232,11 +1292,14 @@ class BaselineCompiler {
 	int method_count = 0;
 	MethodBind *const *methods = nullptr;
 	Vector<Variant::Type> argument_types;
+	Vector<Ref<StructLayout>> argument_struct_layouts;
 	Variant::Type return_type = Variant::NIL;
+	Ref<StructLayout> return_struct_layout;
 	struct sljit_compiler *compiler = nullptr;
 	Vector<struct sljit_label *> labels;
 	Vector<PendingJump> pending_jumps;
 	Vector<Variant::Type> stack_slot_types;
+	Vector<Ref<StructLayout>> stack_slot_struct_layouts;
 	Vector<sljit_sw> stack_slot_offsets;
 	bool typed_entry = false;
 	sljit_sw variant_type_offset = 0;
@@ -1252,8 +1315,8 @@ class BaselineCompiler {
 	int eliminated_node_count = 0;
 	int scalar_replaced_math_value_count = 0;
 
-	static bool is_unboxed_type(Variant::Type p_type) {
-		return is_unboxed_value_type(p_type);
+	static bool are_compatible_struct_layouts(const Ref<StructLayout> &p_left, const Ref<StructLayout> &p_right) {
+		return p_left.is_valid() && p_right.is_valid() && p_left->is_compatible(p_right);
 	}
 
 	static bool is_comparison(Variant::Operator p_operator) {
@@ -1359,20 +1422,53 @@ class BaselineCompiler {
 		return false;
 	}
 
-	bool mark_address_type(int p_address, Variant::Type p_type) {
-		if (!is_unboxed_type(p_type) || !is_valid_address(p_address)) {
+	Ref<StructLayout> get_constant_struct_layout(int p_address) const {
+		const int address_type = (p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+		const int address_index = p_address & GDScriptFunction::ADDR_MASK;
+		if (address_type != GDScriptFunction::ADDR_TYPE_CONSTANT || address_index < 0 || address_index >= constant_count || constants == nullptr || constants[address_index].get_type() != Variant::STRUCT) {
+			return Ref<StructLayout>();
+		}
+		const StructValue &value = VariantInternalAccessor<StructValue>::get(&constants[address_index]);
+		return value.is_valid() ? value.get_layout() : Ref<StructLayout>();
+	}
+
+	Ref<StructLayout> get_address_struct_layout(int p_address) const {
+		const int address_type = (p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
+		const int address_index = p_address & GDScriptFunction::ADDR_MASK;
+		if (address_type == GDScriptFunction::ADDR_TYPE_CONSTANT) {
+			return get_constant_struct_layout(p_address);
+		}
+		if (address_type == GDScriptFunction::ADDR_TYPE_STACK && address_index >= 0 && address_index < stack_slot_struct_layouts.size()) {
+			return stack_slot_struct_layouts[address_index];
+		}
+		return Ref<StructLayout>();
+	}
+
+	bool mark_address_type(int p_address, Variant::Type p_type, const Ref<StructLayout> &p_struct_layout = Ref<StructLayout>()) {
+		if (!is_unboxed_native_type(p_type, p_struct_layout) || !is_valid_address(p_address)) {
 			return false;
 		}
 
 		int address_type = (p_address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS;
 		int address_index = p_address & GDScriptFunction::ADDR_MASK;
 		if (address_type == GDScriptFunction::ADDR_TYPE_CONSTANT) {
-			return constants != nullptr && constants[address_index].get_type() == p_type;
+			if (constants == nullptr || constants[address_index].get_type() != p_type) {
+				return false;
+			}
+			// Boxed struct constants do not expose the layout's native byte representation.
+			return p_type != Variant::STRUCT;
 		}
 
 		Variant::Type &slot_type = stack_slot_types.write[address_index];
 		if (slot_type != Variant::NIL && slot_type != p_type) {
 			return false;
+		}
+		if (p_type == Variant::STRUCT) {
+			Ref<StructLayout> &slot_layout = stack_slot_struct_layouts.write[address_index];
+			if (slot_layout.is_valid() && !are_compatible_struct_layouts(slot_layout, p_struct_layout)) {
+				return false;
+			}
+			slot_layout = p_struct_layout;
 		}
 		slot_type = p_type;
 		return true;
@@ -1441,6 +1537,17 @@ class BaselineCompiler {
 		}
 		stack_slot_types.resize(stack_size);
 		stack_slot_types.fill(Variant::NIL);
+		stack_slot_struct_layouts.resize(stack_size);
+		for (int i = 0; i < argument_types.size(); i++) {
+			if (argument_types[i] == Variant::NIL) {
+				continue;
+			}
+			const int stack_index = GDScriptFunction::FIXED_ADDRESSES_MAX + i;
+			const Ref<StructLayout> layout = i < argument_struct_layouts.size() ? argument_struct_layouts[i] : Ref<StructLayout>();
+			if (stack_index >= stack_size || !mark_address_type(stack_index, argument_types[i], layout)) {
+				return false;
+			}
+		}
 
 		Vector<uint8_t> boundaries;
 		boundaries.resize(code_size + 1);
@@ -1483,6 +1590,90 @@ class BaselineCompiler {
 					}
 					has_native_work = has_native_work || is_unboxed_large_value_type(type);
 					ip += 4;
+				} break;
+				case GDScriptFunction::OPCODE_CONSTRUCT_STRUCT: {
+					if (ip + 2 > code_size) {
+						return false;
+					}
+					const int instruction_argument_count = code[ip + 1];
+					if (instruction_argument_count < 2 || ip + instruction_argument_count + 3 > code_size) {
+						return false;
+					}
+					const int argument_count = code[ip + instruction_argument_count + 2];
+					if (argument_count < 0 || instruction_argument_count != argument_count + 2) {
+						return false;
+					}
+					const int destination = code[ip + argument_count + 2];
+					const int layout_address = code[ip + argument_count + 3];
+					const Ref<StructLayout> layout = get_constant_struct_layout(layout_address);
+					if (!is_valid_address(destination, true) || !is_unboxed_user_struct_layout(layout) || (argument_count != 0 && argument_count != layout->get_field_count()) || !mark_address_type(destination, Variant::STRUCT, layout)) {
+						return false;
+					}
+					for (int i = 0; i < argument_count; i++) {
+						const StructLayout::Field &field = layout->get_field(i);
+						if (!mark_address_type(code[ip + i + 2], field.type, field.struct_layout)) {
+							return false;
+						}
+					}
+					has_native_work = true;
+					ip += instruction_argument_count + 3;
+				} break;
+				case GDScriptFunction::OPCODE_ASSIGN_STRUCT: {
+					if (ip + 3 > code_size || !is_valid_address(code[ip + 1], true) || !is_valid_address(code[ip + 2])) {
+						return false;
+					}
+					Ref<StructLayout> layout = get_address_struct_layout(code[ip + 1]);
+					if (layout.is_null()) {
+						layout = get_address_struct_layout(code[ip + 2]);
+					}
+					if (!mark_address_type(code[ip + 1], Variant::STRUCT, layout) || !mark_address_type(code[ip + 2], Variant::STRUCT, layout)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 3;
+				} break;
+				case GDScriptFunction::OPCODE_GET_STRUCT_FIELD:
+				case GDScriptFunction::OPCODE_SET_STRUCT_FIELD: {
+					const bool is_set = opcode == GDScriptFunction::OPCODE_SET_STRUCT_FIELD;
+					if (ip + 4 > code_size || !is_valid_address(code[ip + 1], is_set) || !is_valid_address(code[ip + 2], !is_set)) {
+						return false;
+					}
+					const Ref<StructLayout> layout = get_address_struct_layout(code[ip + 1]);
+					const int field_index = code[ip + 3];
+					if (!is_unboxed_user_struct_layout(layout) || field_index < 0 || field_index >= layout->get_field_count() || !mark_address_type(code[ip + 1], Variant::STRUCT, layout)) {
+						return false;
+					}
+					const StructLayout::Field &field = layout->get_field(field_index);
+					if (!mark_address_type(code[ip + 2], field.type, field.struct_layout)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 4;
+				} break;
+				case GDScriptFunction::OPCODE_EQUAL_STRUCT: {
+					if (ip + 4 > code_size || !is_valid_address(code[ip + 1]) || !is_valid_address(code[ip + 2]) || !is_valid_address(code[ip + 3], true)) {
+						return false;
+					}
+					Ref<StructLayout> layout = get_address_struct_layout(code[ip + 1]);
+					if (layout.is_null()) {
+						layout = get_address_struct_layout(code[ip + 2]);
+					}
+					if (!mark_address_type(code[ip + 1], Variant::STRUCT, layout) || !mark_address_type(code[ip + 2], Variant::STRUCT, layout) || !mark_address_type(code[ip + 3], Variant::BOOL)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 4;
+				} break;
+				case GDScriptFunction::OPCODE_BOX_STRUCT: {
+					if (typed_entry || ip + 3 > code_size || !is_valid_address(code[ip + 1], true) || !is_valid_address(code[ip + 2])) {
+						return false;
+					}
+					const Ref<StructLayout> layout = get_address_struct_layout(code[ip + 2]);
+					if (!mark_address_type(code[ip + 2], Variant::STRUCT, layout)) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 3;
 				} break;
 				case GDScriptFunction::OPCODE_OPERATOR_INT: {
 					if (ip + 5 > code_size || !is_valid_address(code[ip + 1]) || !is_valid_address(code[ip + 3], true)) {
@@ -1611,11 +1802,22 @@ class BaselineCompiler {
 					if (ip + 2 > code_size || !is_valid_address(code[ip + 1])) {
 						return false;
 					}
-					if (typed_entry && !mark_address_type(code[ip + 1], return_type)) {
+					if (typed_entry && !mark_address_type(code[ip + 1], return_type, return_struct_layout)) {
 						return false;
 					}
 					ip += 2;
 					break;
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT: {
+					if (ip + 3 > code_size || !is_valid_address(code[ip + 1])) {
+						return false;
+					}
+					const Ref<StructLayout> expected_layout = get_constant_struct_layout(code[ip + 2]);
+					if (!mark_address_type(code[ip + 1], Variant::STRUCT, expected_layout) || (typed_entry && !are_compatible_struct_layouts(expected_layout, return_struct_layout))) {
+						return false;
+					}
+					has_native_work = true;
+					ip += 3;
+				} break;
 				case GDScriptFunction::OPCODE_LINE:
 					if (ip + 2 > code_size) {
 						return false;
@@ -1637,23 +1839,15 @@ class BaselineCompiler {
 			}
 		}
 
-		if (typed_entry) {
-			for (int i = 0; i < argument_types.size(); i++) {
-				int stack_index = GDScriptFunction::FIXED_ADDRESSES_MAX + i;
-				if (stack_index >= stack_size || !mark_address_type(stack_index, argument_types[i])) {
-					return false;
-				}
-			}
-		}
-
 		stack_slot_offsets.resize(stack_size);
 		stack_slot_offsets.fill(-1);
 		int native_offset = 0;
 		for (int i = 0; i < stack_slot_types.size(); i++) {
 			if (stack_slot_types[i] != Variant::NIL) {
-				native_offset = align_native_offset(native_offset, MAX(NATIVE_VALUE_ALIGNMENT, get_unboxed_value_alignment(stack_slot_types[i])));
+				const Ref<StructLayout> layout = stack_slot_struct_layouts[i];
+				native_offset = align_native_offset(native_offset, MAX(NATIVE_VALUE_ALIGNMENT, get_unboxed_native_alignment(stack_slot_types[i], layout)));
 				stack_slot_offsets.write[i] = native_offset;
-				native_offset += get_unboxed_value_size(stack_slot_types[i]);
+				native_offset += get_unboxed_native_size(stack_slot_types[i], layout);
 			}
 		}
 		if (native_offset > SLJIT_MAX_LOCAL_SIZE) {
@@ -1782,10 +1976,56 @@ class BaselineCompiler {
 		}
 	}
 
-	void emit_copy_unboxed_value(int p_destination, int p_source, Variant::Type p_type) {
+	void emit_copy_unboxed_value(int p_destination, int p_source, Variant::Type p_type, const Ref<StructLayout> &p_layout = Ref<StructLayout>()) {
 		emit_unboxed_pointer(p_source, SLJIT_R0);
 		emit_unboxed_pointer(p_destination, SLJIT_R1);
-		emit_copy_memory(SLJIT_R1, 0, SLJIT_R0, 0, get_unboxed_value_size(p_type));
+		emit_copy_memory(SLJIT_R1, 0, SLJIT_R0, 0, get_unboxed_native_size(p_type, p_layout));
+	}
+
+	void emit_construct_struct(int p_ip) {
+		const int argument_count = code[p_ip + 1] - 2;
+		const int destination = code[p_ip + argument_count + 2];
+		const Ref<StructLayout> layout = get_constant_struct_layout(code[p_ip + argument_count + 3]);
+
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(layout.ptr()));
+		emit_unboxed_pointer(destination, SLJIT_R1);
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_construct_struct));
+
+		for (int i = 0; i < argument_count; i++) {
+			const StructLayout::Field &field = layout->get_field(i);
+			emit_unboxed_pointer(code[p_ip + i + 2], SLJIT_R0);
+			emit_unboxed_pointer(destination, SLJIT_R1);
+			emit_copy_memory(SLJIT_R1, field.native_offset, SLJIT_R0, 0, field.native_size);
+		}
+	}
+
+	void emit_struct_field(int p_ip, bool p_set) {
+		const Ref<StructLayout> layout = get_address_struct_layout(code[p_ip + 1]);
+		const StructLayout::Field &field = layout->get_field(code[p_ip + 3]);
+		emit_unboxed_pointer(code[p_ip + 1], SLJIT_R0);
+		emit_unboxed_pointer(code[p_ip + 2], SLJIT_R1);
+		if (p_set) {
+			emit_copy_memory(SLJIT_R0, field.native_offset, SLJIT_R1, 0, field.native_size);
+		} else {
+			emit_copy_memory(SLJIT_R1, 0, SLJIT_R0, field.native_offset, field.native_size);
+		}
+	}
+
+	void emit_equal_struct(int p_ip) {
+		const Ref<StructLayout> layout = get_address_struct_layout(code[p_ip + 1]);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(layout.ptr()));
+		emit_unboxed_pointer(code[p_ip + 1], SLJIT_R1);
+		emit_unboxed_pointer(code[p_ip + 2], SLJIT_R2);
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_equal_struct));
+		emit_store_bool(code[p_ip + 3], SLJIT_R0);
+	}
+
+	void emit_box_struct(int p_ip) {
+		const Ref<StructLayout> layout = get_address_struct_layout(code[p_ip + 2]);
+		emit_variant_pointer(code[p_ip + 1], SLJIT_R0);
+		emit_unboxed_pointer(code[p_ip + 2], SLJIT_R1);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(layout.ptr()));
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_store_struct_variant));
 	}
 
 	void emit_ptrcall(int p_ip, GDScriptFunction::Opcode p_opcode) {
@@ -1827,26 +2067,34 @@ class BaselineCompiler {
 			if (type == Variant::NIL) {
 				continue;
 			}
+			const Ref<StructLayout> layout = stack_slot_struct_layouts[i];
+			const int native_size = get_unboxed_native_size(type, layout);
 
 			sljit_sw native_offset = stack_slot_offsets[i];
 			int argument_index = i - GDScriptFunction::FIXED_ADDRESSES_MAX;
 			if (argument_index >= 0 && argument_index < argument_types.size()) {
 				if (typed_entry) {
 					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), argument_index * sizeof(void *));
-					emit_copy_memory(SLJIT_SP, native_offset, SLJIT_R0, 0, get_unboxed_value_size(type));
+					emit_copy_memory(SLJIT_SP, native_offset, SLJIT_R0, 0, native_size);
 				} else {
-					emit_load_base(i, SLJIT_R0);
-					if (is_unboxed_large_value_type(type)) {
+					if (type == Variant::STRUCT) {
+						emit_variant_pointer(i, SLJIT_R0);
+						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(layout.ptr()));
+						sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_SP, 0, SLJIT_IMM, native_offset);
+						sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_unbox_struct_variant));
+					} else if (is_unboxed_large_value_type(type)) {
+						emit_load_base(i, SLJIT_R0);
 						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), get_address_offset(i, variant_data_offset));
-						emit_copy_memory(SLJIT_SP, native_offset, SLJIT_R0, 0, get_unboxed_value_size(type));
+						emit_copy_memory(SLJIT_SP, native_offset, SLJIT_R0, 0, native_size);
 					} else {
-						emit_copy_memory(SLJIT_SP, native_offset, SLJIT_R0, get_address_offset(i, variant_data_offset), get_unboxed_value_size(type));
+						emit_load_base(i, SLJIT_R0);
+						emit_copy_memory(SLJIT_SP, native_offset, SLJIT_R0, get_address_offset(i, variant_data_offset), native_size);
 					}
 				}
 				continue;
 			}
 
-			emit_zero_memory(SLJIT_SP, native_offset, get_unboxed_value_size(type));
+			emit_zero_memory(SLJIT_SP, native_offset, native_size);
 		}
 	}
 
@@ -1857,6 +2105,17 @@ class BaselineCompiler {
 		for (int i = 0; i < stack_slot_types.size(); i++) {
 			Variant::Type type = stack_slot_types[i];
 			if (type == Variant::NIL) {
+				continue;
+			}
+
+			if (type == Variant::STRUCT) {
+				if (!return_is_stack || i != return_slot) {
+					continue;
+				}
+				emit_variant_pointer(i, SLJIT_R0);
+				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_SP, 0, SLJIT_IMM, stack_slot_offsets[i]);
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(stack_slot_struct_layouts[i].ptr()));
+				sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_store_struct_variant));
 				continue;
 			}
 
@@ -1880,7 +2139,7 @@ class BaselineCompiler {
 	void emit_return_value(int p_address) {
 		if (typed_entry) {
 			emit_unboxed_pointer(p_address, SLJIT_R0);
-			emit_copy_memory(SLJIT_S2, 0, SLJIT_R0, 0, get_unboxed_value_size(return_type));
+			emit_copy_memory(SLJIT_S2, 0, SLJIT_R0, 0, get_unboxed_native_size(return_type, return_struct_layout));
 			sljit_emit_return_void(compiler);
 			return;
 		}
@@ -2827,8 +3086,8 @@ class BaselineCompiler {
 	}
 
 public:
-	BaselineCompiler(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, MethodBind *const *p_methods, int p_method_count, const Vector<Variant::Type> &p_argument_types, Variant::Type p_return_type, bool p_typed_entry, bool p_optimizing = false) :
-			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constant_count(p_constant_count), constants(p_constants), method_count(p_method_count), methods(p_methods), argument_types(p_argument_types), return_type(p_return_type), typed_entry(p_typed_entry), optimizing(p_optimizing) {
+	BaselineCompiler(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, MethodBind *const *p_methods, int p_method_count, const Vector<Variant::Type> &p_argument_types, const Vector<Ref<StructLayout>> &p_argument_struct_layouts, Variant::Type p_return_type, const Ref<StructLayout> &p_return_struct_layout, bool p_typed_entry, bool p_optimizing = false) :
+			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constant_count(p_constant_count), constants(p_constants), method_count(p_method_count), methods(p_methods), argument_types(p_argument_types), argument_struct_layouts(p_argument_struct_layouts), return_type(p_return_type), return_struct_layout(p_return_struct_layout), typed_entry(p_typed_entry), optimizing(p_optimizing) {
 		Variant probe;
 		variant_type_offset = reinterpret_cast<uint8_t *>(VariantInternal::get_type_ptr(&probe)) - reinterpret_cast<uint8_t *>(&probe);
 		variant_data_offset = reinterpret_cast<uint8_t *>(VariantInternal::get_int(&probe)) - reinterpret_cast<uint8_t *>(&probe);
@@ -2902,6 +3161,31 @@ public:
 					emit_copy_unboxed_value(code[ip + 1], code[ip + 2], Variant::Type(code[ip + 3]));
 					ip += 4;
 					break;
+				case GDScriptFunction::OPCODE_CONSTRUCT_STRUCT:
+					emit_construct_struct(ip);
+					ip += code[ip + 1] + 3;
+					break;
+				case GDScriptFunction::OPCODE_ASSIGN_STRUCT: {
+					const Ref<StructLayout> layout = get_address_struct_layout(code[ip + 1]);
+					emit_copy_unboxed_value(code[ip + 1], code[ip + 2], Variant::STRUCT, layout);
+					ip += 3;
+				} break;
+				case GDScriptFunction::OPCODE_GET_STRUCT_FIELD:
+					emit_struct_field(ip, false);
+					ip += 4;
+					break;
+				case GDScriptFunction::OPCODE_SET_STRUCT_FIELD:
+					emit_struct_field(ip, true);
+					ip += 4;
+					break;
+				case GDScriptFunction::OPCODE_EQUAL_STRUCT:
+					emit_equal_struct(ip);
+					ip += 4;
+					break;
+				case GDScriptFunction::OPCODE_BOX_STRUCT:
+					emit_box_struct(ip);
+					ip += 3;
+					break;
 				case GDScriptFunction::OPCODE_OPERATOR_INT:
 					emit_int_operator(ip);
 					ip += 5;
@@ -2968,6 +3252,10 @@ public:
 					emit_return_value(code[ip + 1]);
 					ip += 2;
 					break;
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
+					emit_return_value(code[ip + 1]);
+					ip += 3;
+					break;
 				case GDScriptFunction::OPCODE_LINE:
 					ip += 2;
 					break;
@@ -3007,25 +3295,28 @@ public:
 
 } // namespace
 
-GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, Variant::Type p_typed_return_type, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count, int p_scalar_replaced_math_value_count) :
-		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_return_type(p_typed_return_type), ptrcall_count(p_ptrcall_count), ssa_node_count(p_ssa_node_count), eliminated_node_count(p_eliminated_node_count), scalar_replaced_math_value_count(p_scalar_replaced_math_value_count), requires_self(p_requires_self), optimizing(p_optimizing) {
+GDScriptBaselineJIT::GDScriptBaselineJIT(void *p_entry_point, void *p_typed_entry_point, uint64_t p_code_size, const Vector<Variant::Type> &p_typed_argument_types, const Vector<Ref<StructLayout>> &p_typed_argument_struct_layouts, Variant::Type p_typed_return_type, const Ref<StructLayout> &p_typed_return_struct_layout, int p_ptrcall_count, bool p_requires_self, bool p_optimizing, int p_ssa_node_count, int p_eliminated_node_count, int p_scalar_replaced_math_value_count) :
+		entry_point(p_entry_point), typed_entry_point(p_typed_entry_point), code_size(p_code_size), typed_argument_types(p_typed_argument_types), typed_argument_struct_layouts(p_typed_argument_struct_layouts), typed_return_type(p_typed_return_type), typed_return_struct_layout(p_typed_return_struct_layout), ptrcall_count(p_ptrcall_count), ssa_node_count(p_ssa_node_count), eliminated_node_count(p_eliminated_node_count), scalar_replaced_math_value_count(p_scalar_replaced_math_value_count), requires_self(p_requires_self), optimizing(p_optimizing) {
 }
 
 GDScriptBaselineJIT *GDScriptBaselineJIT::_compile(const GDScriptFunction *p_function, bool p_optimizing) {
 	ERR_FAIL_NULL_V(p_function, nullptr);
 
-	auto is_typed_abi_type = [](Variant::Type p_type) {
-		return is_unboxed_value_type(p_type);
+	auto is_typed_abi_type = [](const GDScriptDataType &p_type) {
+		return p_type.kind == GDScriptDataType::BUILTIN && is_unboxed_native_type(p_type.builtin_type, p_type.struct_layout);
 	};
 	Vector<Variant::Type> typed_argument_types;
-	bool has_typed_signature = !p_function->is_vararg() && p_function->return_type.kind == GDScriptDataType::BUILTIN && is_typed_abi_type(p_function->return_type.builtin_type);
+	Vector<Ref<StructLayout>> typed_argument_struct_layouts;
+	bool has_typed_signature = !p_function->is_vararg() && is_typed_abi_type(p_function->return_type);
 	for (const GDScriptDataType &argument_type : p_function->argument_types) {
-		Variant::Type builtin_type = argument_type.kind == GDScriptDataType::BUILTIN && is_typed_abi_type(argument_type.builtin_type) ? argument_type.builtin_type : Variant::NIL;
+		Variant::Type builtin_type = is_typed_abi_type(argument_type) ? argument_type.builtin_type : Variant::NIL;
 		typed_argument_types.push_back(builtin_type);
+		typed_argument_struct_layouts.push_back(builtin_type == Variant::STRUCT ? argument_type.struct_layout : Ref<StructLayout>());
 		has_typed_signature = has_typed_signature && builtin_type != Variant::NIL;
 	}
+	const Ref<StructLayout> typed_return_struct_layout = has_typed_signature && p_function->return_type.builtin_type == Variant::STRUCT ? p_function->return_type.struct_layout : Ref<StructLayout>();
 
-	BaselineCompiler compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, p_function->_methods_ptr, p_function->_methods_count, typed_argument_types, Variant::NIL, false, p_optimizing);
+	BaselineCompiler compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, p_function->_methods_ptr, p_function->_methods_count, typed_argument_types, typed_argument_struct_layouts, Variant::NIL, Ref<StructLayout>(), false, p_optimizing);
 	uint64_t generated_size = 0;
 	void *generated_code = compiler.compile(generated_size);
 	if (!generated_code) {
@@ -3034,13 +3325,13 @@ GDScriptBaselineJIT *GDScriptBaselineJIT::_compile(const GDScriptFunction *p_fun
 
 	void *typed_generated_code = nullptr;
 	if (has_typed_signature) {
-		BaselineCompiler typed_compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, p_function->_methods_ptr, p_function->_methods_count, typed_argument_types, p_function->return_type.builtin_type, true, p_optimizing);
+		BaselineCompiler typed_compiler(p_function->_code_ptr, p_function->_code_size, p_function->_stack_size, p_function->_constants_ptr, p_function->_constant_count, p_function->_methods_ptr, p_function->_methods_count, typed_argument_types, typed_argument_struct_layouts, p_function->return_type.builtin_type, typed_return_struct_layout, true, p_optimizing);
 		uint64_t typed_generated_size = 0;
 		typed_generated_code = typed_compiler.compile(typed_generated_size);
 		generated_size += typed_generated_size;
 	}
 
-	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL, compiler.get_ptrcall_count(), compiler.get_requires_self(), p_optimizing, compiler.get_ssa_node_count(), compiler.get_eliminated_node_count(), compiler.get_scalar_replaced_math_value_count()));
+	return memnew(GDScriptBaselineJIT(generated_code, typed_generated_code, generated_size, typed_argument_types, typed_argument_struct_layouts, has_typed_signature ? p_function->return_type.builtin_type : Variant::NIL, typed_return_struct_layout, compiler.get_ptrcall_count(), compiler.get_requires_self(), p_optimizing, compiler.get_ssa_node_count(), compiler.get_eliminated_node_count(), compiler.get_scalar_replaced_math_value_count()));
 }
 
 GDScriptBaselineJIT *GDScriptBaselineJIT::compile(const GDScriptFunction *p_function) {
@@ -3065,9 +3356,37 @@ bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argum
 	}
 
 	const void **raw_arguments = reinterpret_cast<const void **>(alloca(MAX(1, p_argument_count) * sizeof(void *)));
+	int native_argument_size = 0;
+	int native_argument_alignment = 1;
+	for (int i = 0; i < p_argument_count; i++) {
+		if (typed_argument_types[i] == Variant::STRUCT) {
+			const Ref<StructLayout> &layout = typed_argument_struct_layouts[i];
+			native_argument_alignment = MAX(native_argument_alignment, int(layout->get_native_alignment()));
+			native_argument_size = align_native_offset(native_argument_size, layout->get_native_alignment());
+			native_argument_size += layout->get_native_size();
+		}
+	}
+	uint8_t *native_argument_allocation = reinterpret_cast<uint8_t *>(alloca(MAX(1, native_argument_size + native_argument_alignment - 1)));
+	uint8_t *native_argument_data = reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(native_argument_allocation) + native_argument_alignment - 1) & ~(uintptr_t(native_argument_alignment) - 1));
+	int native_argument_offset = 0;
 	for (int i = 0; i < p_argument_count; i++) {
 		if (p_arguments[i]->get_type() != typed_argument_types[i]) {
 			return false;
+		}
+		if (typed_argument_types[i] == Variant::STRUCT) {
+			const Ref<StructLayout> &layout = typed_argument_struct_layouts[i];
+			StructValue value;
+			if (!get_struct_value(p_arguments[i], value) || !layout->is_compatible(value.get_layout())) {
+				return false;
+			}
+			native_argument_offset = align_native_offset(native_argument_offset, layout->get_native_alignment());
+			void *destination = native_argument_data + native_argument_offset;
+			if (layout->unbox_native(value, destination) != OK) {
+				return false;
+			}
+			raw_arguments[i] = destination;
+			native_argument_offset += layout->get_native_size();
+			continue;
 		}
 		const void *source = get_unboxed_variant_data(p_arguments[i], typed_argument_types[i]);
 		if (source == nullptr) {
@@ -3076,7 +3395,11 @@ bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argum
 		raw_arguments[i] = source;
 	}
 
-	alignas(NATIVE_VALUE_ALIGNMENT) uint8_t raw_return[NATIVE_VALUE_STRIDE] = {};
+	const int return_size = get_unboxed_native_size(typed_return_type, typed_return_struct_layout);
+	const int return_alignment = MAX(NATIVE_VALUE_ALIGNMENT, get_unboxed_native_alignment(typed_return_type, typed_return_struct_layout));
+	uint8_t *raw_return_allocation = reinterpret_cast<uint8_t *>(alloca(MAX(1, return_size + return_alignment - 1)));
+	uint8_t *raw_return = reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(raw_return_allocation) + return_alignment - 1) & ~(uintptr_t(return_alignment) - 1));
+	memset(raw_return, 0, return_size);
 	typedef void(SLJIT_FUNC * TypedEntryPoint)(const void *const *, Object *, void *);
 	reinterpret_cast<TypedEntryPoint>(typed_entry_point)(raw_arguments, p_self, raw_return);
 	switch (typed_return_type) {
@@ -3112,6 +3435,9 @@ bool GDScriptBaselineJIT::execute_typed(const Variant **p_arguments, int p_argum
 			break;
 		case Variant::PROJECTION:
 			r_return = *reinterpret_cast<const Projection *>(raw_return);
+			break;
+		case Variant::STRUCT:
+			r_return = typed_return_struct_layout->box_native(raw_return);
 			break;
 		default:
 			return false;

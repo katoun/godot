@@ -616,6 +616,100 @@ func native_transform3d(value: Transform3D) -> Transform3D:
 	memdelete(node_3d);
 }
 
+TEST_CASE("[Modules][GDScript] Baseline JIT keeps trivial user structs in native frames") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends RefCounted
+
+struct Motion:
+	var position: Vector3
+	var velocity: Vector3
+	var lifetime: float
+
+struct Batch:
+	var first: Motion
+	var second: Motion
+
+struct Named:
+	var label: String
+
+func make_motion(position: Vector3, velocity: Vector3, lifetime: float) -> Motion:
+	return Motion(position, velocity, lifetime)
+
+func update_motion(value: Motion, delta: Vector3) -> Motion:
+	var copy: Motion = value
+	copy.position = copy.position + delta
+	copy.lifetime = copy.lifetime - 1.0
+	return copy
+
+func motion_equal(left: Motion, right: Motion) -> bool:
+	return left == right
+
+func motion_position(value: Motion) -> Vector3:
+	return value.position
+
+func motion_lifetime(value: Motion) -> float:
+	return value.lifetime
+
+func make_batch(first: Motion, second: Motion) -> Batch:
+	return Batch(first, second)
+
+func first_motion(value: Batch) -> Motion:
+	return value.first
+
+func box_motion(value: Motion) -> Variant:
+	var boxed: Variant = value
+	return boxed
+
+func named_roundtrip(value: Named) -> Named:
+	return value
+)");
+	REQUIRE_MESSAGE(gdscript->reload() == OK, "The native user-struct test script should parse successfully.");
+
+	const HashMap<StringName, GDScriptFunction *> &functions = gdscript->get_member_functions();
+	for (const StringName &function_name : { SNAME("make_motion"), SNAME("update_motion"), SNAME("motion_equal"), SNAME("motion_position"), SNAME("motion_lifetime"), SNAME("make_batch"), SNAME("first_motion") }) {
+		const GDScriptFunction *const *function = functions.getptr(function_name);
+		REQUIRE(function != nullptr);
+		CHECK_MESSAGE((*function)->has_baseline_jit(), vformat("Function '%s' should keep its trivial struct values in a native frame.", function_name));
+		CHECK_MESSAGE((*function)->has_typed_baseline_jit(), vformat("Function '%s' should expose the pointer-based struct ABI.", function_name));
+	}
+	const GDScriptFunction *const *box_function = functions.getptr(SNAME("box_motion"));
+	const GDScriptFunction *const *fallback_function = functions.getptr(SNAME("named_roundtrip"));
+	REQUIRE(box_function != nullptr);
+	REQUIRE(fallback_function != nullptr);
+	CHECK_MESSAGE((*box_function)->has_baseline_jit(), "A dynamic return should box the native struct only at its Variant boundary.");
+	CHECK_FALSE((*box_function)->has_typed_baseline_jit());
+	CHECK_FALSE_MESSAGE((*fallback_function)->has_baseline_jit(), "A non-trivial struct should remain on the interpreter.");
+
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(gdscript);
+	const Vector3 position(2.0, -3.0, 4.0);
+	const Vector3 velocity(0.5, 1.5, -2.0);
+	const Vector3 delta(3.0, 2.0, -1.0);
+	const Variant motion = instance->call(SNAME("make_motion"), position, velocity, 8.0);
+	REQUIRE(motion.get_type() == Variant::STRUCT);
+	CHECK(Vector3(instance->call(SNAME("motion_position"), motion)).is_equal_approx(position));
+	CHECK(Math::is_equal_approx(double(instance->call(SNAME("motion_lifetime"), motion)), 8.0));
+
+	const Variant updated = instance->call(SNAME("update_motion"), motion, delta);
+	REQUIRE(updated.get_type() == Variant::STRUCT);
+	CHECK(Vector3(instance->call(SNAME("motion_position"), updated)).is_equal_approx(position + delta));
+	CHECK(Math::is_equal_approx(double(instance->call(SNAME("motion_lifetime"), updated)), 7.0));
+	CHECK(Vector3(instance->call(SNAME("motion_position"), motion)).is_equal_approx(position));
+	CHECK(bool(instance->call(SNAME("motion_equal"), motion, motion)));
+	CHECK_FALSE(bool(instance->call(SNAME("motion_equal"), motion, updated)));
+
+	const Variant batch = instance->call(SNAME("make_batch"), updated, motion);
+	REQUIRE(batch.get_type() == Variant::STRUCT);
+	const Variant first = instance->call(SNAME("first_motion"), batch);
+	REQUIRE(first.get_type() == Variant::STRUCT);
+	CHECK(bool(instance->call(SNAME("motion_equal"), first, updated)));
+	const Variant boxed = instance->call(SNAME("box_motion"), updated);
+	REQUIRE(boxed.get_type() == Variant::STRUCT);
+	CHECK(bool(instance->call(SNAME("motion_equal"), boxed, updated)));
+}
+
 TEST_CASE("[Modules][GDScript] Compact SSA JIT promotes hot functions and consumes export profiles") {
 	GDScriptLanguage::get_singleton()->init();
 	GDScriptOptimizationProfile::clear();
