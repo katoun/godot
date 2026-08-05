@@ -34,6 +34,7 @@
 #include "core/io/json.h"
 #include "core/io/resource.h"
 #include "core/math/math_funcs.h"
+#include "core/variant/struct_value.h"
 #include "core/variant/variant_parser.h"
 #include "core/variant/variant_pools.h"
 
@@ -163,6 +164,9 @@ String Variant::get_type_name(Variant::Type p_type) {
 		}
 		case PACKED_VECTOR4_ARRAY: {
 			return "PackedVector4Array";
+		}
+		case STRUCT: {
+			return "StructValue";
 		}
 		default: {
 		}
@@ -1002,6 +1006,9 @@ bool Variant::is_zero() const {
 		case PACKED_VECTOR4_ARRAY: {
 			return PackedArrayRef<Vector4>::get_array(_data.packed_array).is_empty();
 		}
+		case STRUCT: {
+			return !reinterpret_cast<const StructValue *>(_data._mem)->is_valid();
+		}
 		default: {
 		}
 	}
@@ -1236,6 +1243,9 @@ void Variant::reference(const Variant &p_variant) {
 		case ARRAY: {
 			memnew_placement(_data._mem, Array(*reinterpret_cast<const Array *>(p_variant._data._mem)));
 		} break;
+		case STRUCT: {
+			memnew_placement(_data._mem, StructValue(*reinterpret_cast<const StructValue *>(p_variant._data._mem)));
+		} break;
 
 		// Arrays.
 		case PACKED_BYTE_ARRAY: {
@@ -1434,6 +1444,9 @@ void Variant::_clear_internal() {
 		} break;
 		case ARRAY: {
 			reinterpret_cast<Array *>(_data._mem)->~Array();
+		} break;
+		case STRUCT: {
+			reinterpret_cast<StructValue *>(_data._mem)->~StructValue();
 		} break;
 
 		// Arrays.
@@ -1671,6 +1684,22 @@ String Variant::stringify(int recursion_count) const {
 			str += " }";
 
 			return str;
+		}
+		case STRUCT: {
+			ERR_FAIL_COND_V_MSG(recursion_count > MAX_RECURSION, "StructValue( ... )", "Maximum struct recursion reached!");
+			const StructValue &value = *reinterpret_cast<const StructValue *>(_data._mem);
+			if (!value.is_valid()) {
+				return "StructValue()";
+			}
+			const Ref<StructLayout> layout = value.get_layout();
+			String result = String(layout->get_type_identifier()) + " { ";
+			for (int i = 0; i < layout->get_field_count(); i++) {
+				if (i > 0) {
+					result += ", ";
+				}
+				result += String(layout->get_field(i).name) + ": " + stringify_variant_clean(value.get(i), recursion_count + 1);
+			}
+			return result + " }";
 		}
 		// Packed arrays cannot contain recursive structures, the recursion_count increment is not needed.
 		case PACKED_VECTOR2_ARRAY: {
@@ -2134,6 +2163,13 @@ Variant::operator Array() const {
 	}
 }
 
+Variant::operator StructValue() const {
+	if (type == STRUCT) {
+		return *reinterpret_cast<const StructValue *>(_data._mem);
+	}
+	return StructValue();
+}
+
 Variant::operator PackedByteArray() const {
 	if (type == PACKED_BYTE_ARRAY) {
 		return static_cast<PackedArrayRef<uint8_t> *>(_data.packed_array)->array;
@@ -2528,6 +2564,12 @@ Variant::Variant(const Dictionary &p_dictionary) :
 	static_assert(sizeof(Dictionary) <= sizeof(_data._mem));
 }
 
+Variant::Variant(const StructValue &p_struct) :
+		type(STRUCT) {
+	memnew_placement(_data._mem, StructValue(p_struct));
+	static_assert(sizeof(StructValue) <= sizeof(_data._mem));
+}
+
 Variant::Variant(std::initializer_list<Variant> p_init) :
 		type(ARRAY) {
 	memnew_placement(_data._mem, Array(p_init));
@@ -2755,6 +2797,9 @@ void Variant::operator=(const Variant &p_variant) {
 		} break;
 		case ARRAY: {
 			*reinterpret_cast<Array *>(_data._mem) = *reinterpret_cast<const Array *>(p_variant._data._mem);
+		} break;
+		case STRUCT: {
+			*reinterpret_cast<StructValue *>(_data._mem) = *reinterpret_cast<const StructValue *>(p_variant._data._mem);
 		} break;
 
 		// arrays
@@ -3055,6 +3100,9 @@ uint32_t Variant::recursive_hash(int recursion_count) const {
 
 			return hash;
 		} break;
+		case STRUCT: {
+			return reinterpret_cast<const StructValue *>(_data._mem)->recursive_hash(recursion_count);
+		} break;
 		case PACKED_VECTOR2_ARRAY: {
 			uint32_t hash = HASH_MURMUR3_SEED;
 			const PackedVector2Array &arr = PackedArrayRef<Vector2>::get_array(_data.packed_array);
@@ -3323,6 +3371,10 @@ bool Variant::hash_compare(const Variant &p_variant, int recursion_count, bool s
 			return true;
 		} break;
 
+		case STRUCT: {
+			return reinterpret_cast<const StructValue *>(_data._mem)->recursive_equal(*reinterpret_cast<const StructValue *>(p_variant._data._mem), recursion_count, semantic_comparison);
+		} break;
+
 		// This is for floating point comparisons only.
 		case PACKED_FLOAT32_ARRAY: {
 			hash_compare_packed_array(_data.packed_array, p_variant._data.packed_array, float, hash_compare_scalar);
@@ -3451,6 +3503,7 @@ bool Variant::is_type_shared(Variant::Type p_type) {
 		case PACKED_VECTOR3_ARRAY:
 		case PACKED_COLOR_ARRAY:
 		case PACKED_VECTOR4_ARRAY:
+		case STRUCT:
 			return true;
 		default:
 			return false;

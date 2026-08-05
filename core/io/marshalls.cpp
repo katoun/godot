@@ -35,6 +35,7 @@
 #include "core/object/ref_counted.h"
 #include "core/object/script_language.h"
 #include "core/variant/container_type_validate.h"
+#include "core/variant/struct_value.h"
 
 #include <climits>
 #include <cstdio>
@@ -1295,6 +1296,19 @@ Error decode_variant(Variant &r_variant, const uint8_t *p_buffer, int p_len, int
 			r_variant = varray;
 
 		} break;
+		case Variant::STRUCT: {
+			Variant serialized;
+			int used = 0;
+			const Error decode_error = decode_variant(serialized, buf, len, &used, p_allow_objects, p_depth + 1);
+			ERR_FAIL_COND_V(decode_error != OK || serialized.get_type() != Variant::DICTIONARY, ERR_INVALID_DATA);
+			Error struct_error = OK;
+			const StructValue value = StructValue::from_dictionary(serialized, &struct_error, p_depth + 1);
+			ERR_FAIL_COND_V(struct_error != OK, ERR_INVALID_DATA);
+			r_variant = value;
+			if (r_len) {
+				(*r_len) += used;
+			}
+		} break;
 		default: {
 			ERR_FAIL_V(ERR_BUG);
 		}
@@ -2124,6 +2138,17 @@ Error encode_variant(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bo
 
 			r_len += sizeof(real_t) * 4 * len;
 
+		} break;
+		case Variant::STRUCT: {
+			const StructValue value = p_variant;
+			const Dictionary serialized = value.to_dictionary();
+			int used = 0;
+			const Error encode_error = encode_variant(serialized, buf, used, p_full_objects, p_depth + 1);
+			ERR_FAIL_COND_V(encode_error != OK, encode_error);
+			if (buf) {
+				buf += used;
+			}
+			r_len += used;
 		} break;
 		default: {
 			ERR_FAIL_V(ERR_BUG);

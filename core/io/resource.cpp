@@ -36,6 +36,7 @@
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/variant/container_type_validate.h" // IWYU pragma: keep.
+#include "core/variant/struct_value.h"
 #include "scene/main/node.h" //only so casting works
 
 void Resource::register_custom_data_to_otdb() {
@@ -352,6 +353,17 @@ Variant Resource::_duplicate_recursive(const Variant &p_variant, const Duplicate
 				dst.set(
 						_duplicate_recursive(k, p_params),
 						_duplicate_recursive(v, p_params));
+			}
+			return dst;
+		} break;
+		case Variant::STRUCT: {
+			const StructValue src = p_variant;
+			if (!src.is_valid()) {
+				return p_variant;
+			}
+			StructValue dst(src.get_layout());
+			for (int i = 0; i < src.get_field_count(); i++) {
+				dst.set(i, _duplicate_recursive(src.get(i), p_params));
 			}
 			return dst;
 		} break;

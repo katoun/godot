@@ -36,6 +36,7 @@
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
 #include "core/string/string_buffer.h"
+#include "core/variant/struct_value.h"
 
 char32_t VariantParser::Stream::get_char() {
 	// is within buffer?
@@ -1598,6 +1599,41 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			}
 
 			value = arr;
+		} else if (id == "StructValue") {
+			get_token(p_stream, token, line, r_err_str);
+			if (token.type != TK_PARENTHESIS_OPEN) {
+				r_err_str = "Expected '(' in StructValue constructor";
+				return ERR_PARSE_ERROR;
+			}
+
+			get_token(p_stream, token, line, r_err_str);
+			if (token.type == TK_PARENTHESIS_CLOSE) {
+				value = StructValue();
+			} else {
+				Variant serialized;
+				Error err = parse_value(token, serialized, p_stream, line, r_err_str, p_res_parser);
+				if (err != OK) {
+					return err;
+				}
+				if (serialized.get_type() != Variant::DICTIONARY) {
+					r_err_str = "Expected a Dictionary in StructValue constructor";
+					return ERR_PARSE_ERROR;
+				}
+
+				get_token(p_stream, token, line, r_err_str);
+				if (token.type != TK_PARENTHESIS_CLOSE) {
+					r_err_str = "Expected ')' after StructValue constructor";
+					return ERR_PARSE_ERROR;
+				}
+
+				Error struct_error = OK;
+				const StructValue struct_value = StructValue::from_dictionary(serialized, &struct_error);
+				if (struct_error != OK) {
+					r_err_str = "Invalid StructValue schema";
+					return ERR_PARSE_ERROR;
+				}
+				value = struct_value;
+			}
 		} else if (id == "PackedColorArray" || id == "PoolColorArray" || id == "ColorArray") {
 			Vector<float> args;
 			Error err = _parse_construct<float>(p_stream, args, line, r_err_str);
@@ -2550,6 +2586,14 @@ Error VariantWriter::write(const Variant &p_variant, StoreStringFunc p_store_str
 				p_store_string_func(p_store_string_ud, rtos_fix(ptr[i].x, p_compat) + ", " + rtos_fix(ptr[i].y, p_compat) + ", " + rtos_fix(ptr[i].z, p_compat) + ", " + rtos_fix(ptr[i].w, p_compat));
 			}
 
+			p_store_string_func(p_store_string_ud, ")");
+		} break;
+		case Variant::STRUCT: {
+			const StructValue value = p_variant;
+			p_store_string_func(p_store_string_ud, "StructValue(");
+			if (value.is_valid()) {
+				write(value.to_dictionary(), p_store_string_func, p_store_string_ud, p_encode_res_func, p_encode_res_ud, p_recursion_count + 1, p_compat);
+			}
 			p_store_string_func(p_store_string_ud, ")");
 		} break;
 

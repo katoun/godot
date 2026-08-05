@@ -30,6 +30,8 @@
 
 #include "variant_destruct.h"
 
+#include "core/variant/struct_value.h"
+
 static Variant::PTRDestructor destruct_pointers[Variant::VARIANT_MAX] = { nullptr };
 
 template <typename T>
@@ -55,6 +57,7 @@ void Variant::_register_variant_destructors() {
 	add_destructor<VariantDestruct<PackedVector3Array>>();
 	add_destructor<VariantDestruct<PackedColorArray>>();
 	add_destructor<VariantDestruct<PackedVector4Array>>();
+	add_destructor<VariantDestruct<StructValue>>();
 }
 
 void Variant::_unregister_variant_destructors() {

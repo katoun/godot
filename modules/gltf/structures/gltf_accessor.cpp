@@ -465,6 +465,7 @@ int64_t GLTFAccessor::_get_numbers_per_variant_for_gltf(Variant::Type p_variant_
 		case Variant::PACKED_VECTOR3_ARRAY:
 		case Variant::PACKED_COLOR_ARRAY:
 		case Variant::PACKED_VECTOR4_ARRAY:
+		case Variant::STRUCT:
 		case Variant::VARIANT_MAX:
 			return 0; // Not supported.
 		case Variant::BOOL:

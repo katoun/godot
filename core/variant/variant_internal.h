@@ -34,6 +34,7 @@
 #include "core/variant/type_info.h"
 #include "core/variant/variant.h"
 #include "core/variant/variant_pools.h"
+#include "core/variant/struct_value.h"
 
 // For use when you want to access the internal pointer of a Variant directly.
 // Use with caution. You need to be sure that the type is correct.
@@ -134,6 +135,9 @@ public:
 				break;
 			case Variant::PACKED_VECTOR4_ARRAY:
 				init_vector4_array(v);
+				break;
+			case Variant::STRUCT:
+				init_struct(v);
 				break;
 			case Variant::OBJECT:
 				init_object(v);
@@ -340,6 +344,10 @@ public:
 		v->_data.packed_array = Variant::PackedArrayRef<Vector4>::create(Vector<Vector4>());
 		v->type = Variant::PACKED_VECTOR4_ARRAY;
 	}
+	_FORCE_INLINE_ static void init_struct(Variant *v) {
+		memnew_placement(v->_data._mem, StructValue);
+		v->type = Variant::STRUCT;
+	}
 	_FORCE_INLINE_ static void init_object(Variant *v) {
 		object_reset_data(v);
 		v->type = Variant::OBJECT;
@@ -465,6 +473,8 @@ public:
 				return get_color_array(v);
 			case Variant::PACKED_VECTOR4_ARRAY:
 				return get_vector4_array(v);
+			case Variant::STRUCT:
+				return reinterpret_cast<StructValue *>(v->_data._mem);
 			case Variant::OBJECT:
 				return get_object(v);
 			case Variant::VARIANT_MAX:
@@ -551,6 +561,8 @@ public:
 				return get_color_array(v);
 			case Variant::PACKED_VECTOR4_ARRAY:
 				return get_vector4_array(v);
+			case Variant::STRUCT:
+				return reinterpret_cast<const StructValue *>(v->_data._mem);
 			case Variant::OBJECT:
 				return get_object(v);
 			case Variant::VARIANT_MAX:
@@ -791,6 +803,9 @@ struct VariantInternalAccessor<Dictionary> : _VariantInternalAccessorLocal<Dicti
 
 template <>
 struct VariantInternalAccessor<Array> : _VariantInternalAccessorLocal<Array> {};
+
+template <>
+struct VariantInternalAccessor<StructValue> : _VariantInternalAccessorLocal<StructValue> {};
 
 template <>
 struct VariantInternalAccessor<PackedByteArray> : _VariantInternalAccessorPackedArrayRef<uint8_t> {};

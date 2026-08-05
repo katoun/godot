@@ -192,8 +192,12 @@
                     "value": 38
                 },
                 {
-                    "name": "GDEXTENSION_VARIANT_TYPE_VARIANT_MAX",
+                    "name": "GDEXTENSION_VARIANT_TYPE_STRUCT",
                     "value": 39
+                },
+                {
+                    "name": "GDEXTENSION_VARIANT_TYPE_VARIANT_MAX",
+                    "value": 40
                 }
             ]
         },

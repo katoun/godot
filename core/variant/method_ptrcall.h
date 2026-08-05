@@ -34,6 +34,7 @@
 #include "core/object/object_id.h"
 #include "core/templates/simple_type.h"
 #include "core/typedefs.h"
+#include "core/variant/struct_value.h"
 #include "core/variant/variant.h"
 
 namespace Internal {
@@ -238,6 +239,8 @@ template <>
 struct PtrToArg<PackedColorArray> : Internal::PtrToArgDirect<PackedColorArray> {};
 template <>
 struct PtrToArg<PackedVector4Array> : Internal::PtrToArgDirect<PackedVector4Array> {};
+template <>
+struct PtrToArg<StructValue> : Internal::PtrToArgDirect<StructValue> {};
 template <>
 struct PtrToArg<Variant> : Internal::PtrToArgByReference<Variant> {};
 

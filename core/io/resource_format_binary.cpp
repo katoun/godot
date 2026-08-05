@@ -36,6 +36,7 @@
 #include "core/io/missing_resource.h"
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
+#include "core/variant/struct_value.h"
 #include "core/version.h"
 #include "scene/property_utils.h"
 #include "scene/resources/packed_scene.h"
@@ -87,6 +88,7 @@ enum {
 	VARIANT_VECTOR4I = 51,
 	VARIANT_PROJECTION = 52,
 	VARIANT_PACKED_VECTOR4_ARRAY = 53,
+	VARIANT_STRUCT = 54,
 	OBJECT_EMPTY = 0,
 	OBJECT_EXTERNAL_RESOURCE = 1,
 	OBJECT_INTERNAL_RESOURCE = 2,
@@ -96,7 +98,8 @@ enum {
 	// Version 4: New string ID for ext/subresources, breaks forward compat.
 	// Version 5: Ability to store script class in the header.
 	// Version 6: Added PackedVector4Array Variant type.
-	FORMAT_VERSION = 6,
+	// Version 7: Added StructValue Variant type.
+	FORMAT_VERSION = 7,
 	FORMAT_VERSION_CAN_RENAME_DEPS = 1,
 	FORMAT_VERSION_NO_NODEPATH_PROPERTY = 3,
 };
@@ -605,6 +608,15 @@ Error ResourceLoaderBinary::parse_variant(Variant &r_v) {
 
 			r_v = array;
 
+		} break;
+		case VARIANT_STRUCT: {
+			Variant serialized;
+			const Error err = parse_variant(serialized);
+			ERR_FAIL_COND_V_MSG(err != OK || serialized.get_type() != Variant::DICTIONARY, ERR_FILE_CORRUPT, "Invalid serialized StructValue.");
+			Error struct_error = OK;
+			const StructValue value = StructValue::from_dictionary(serialized, &struct_error);
+			ERR_FAIL_COND_V_MSG(struct_error != OK, ERR_FILE_CORRUPT, "Invalid StructValue schema.");
+			r_v = value;
 		} break;
 		default: {
 			ERR_FAIL_V(ERR_FILE_CORRUPT);
@@ -1974,6 +1986,11 @@ void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const V
 			}
 
 		} break;
+		case Variant::STRUCT: {
+			f->store_32(VARIANT_STRUCT);
+			const StructValue value = p_property;
+			write_variant(f, value.to_dictionary(), resource_map, external_resources, string_map);
+		} break;
 		default: {
 			ERR_FAIL_MSG("Invalid variant.");
 		}
@@ -2052,6 +2069,10 @@ void ResourceFormatSaverBinaryInstance::_find_resources(const Variant &p_variant
 				_find_resources(kv.key);
 				_find_resources(kv.value);
 			}
+		} break;
+		case Variant::STRUCT: {
+			const StructValue value = p_variant;
+			_find_resources(value.to_dictionary());
 		} break;
 		case Variant::NODE_PATH: {
 			//take the chance and save node path strings

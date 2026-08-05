@@ -91,6 +91,7 @@ MAKE_PTRCONSTRUCT(PackedVector2Array);
 MAKE_PTRCONSTRUCT(PackedVector3Array);
 MAKE_PTRCONSTRUCT(PackedColorArray);
 MAKE_PTRCONSTRUCT(PackedVector4Array);
+MAKE_PTRCONSTRUCT(StructValue);
 MAKE_PTRCONSTRUCT(Variant);
 
 template <typename T, typename... P>

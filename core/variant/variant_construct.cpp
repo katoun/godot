@@ -30,6 +30,8 @@
 
 #include "variant_construct.h"
 
+#include "core/variant/struct_value.h"
+
 struct VariantConstructData {
 	void (*construct)(Variant &r_base, const Variant **p_args, Callable::CallError &r_error) = nullptr;
 	Variant::ValidatedConstructor validated_construct = nullptr;
@@ -253,6 +255,10 @@ void Variant::_register_variant_constructors() {
 	add_constructor<VariantConstructNoArgs<PackedVector4Array>>(sarray());
 	add_constructor<VariantConstructor<PackedVector4Array, PackedVector4Array>>(sarray("from"));
 	add_constructor<VariantConstructorFromArray<PackedVector4Array>>(sarray("from"));
+
+	add_constructor<VariantConstructNoArgs<StructValue>>(sarray());
+	add_constructor<VariantConstructor<StructValue, StructValue>>(sarray("from"));
+	add_constructor<VariantConstructor<StructValue, Dictionary>>(sarray("serialized"));
 }
 
 void Variant::_unregister_variant_constructors() {

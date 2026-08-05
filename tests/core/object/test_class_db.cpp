@@ -264,6 +264,7 @@ bool arg_default_value_is_assignable_to_type(const Context &p_context, const Var
 		case Variant::PACKED_VECTOR4_ARRAY:
 		case Variant::CALLABLE:
 		case Variant::SIGNAL:
+		case Variant::STRUCT:
 			return p_arg_type.name == Variant::get_type_name(p_val.get_type());
 		case Variant::OBJECT:
 			return p_context.find_exposed_class(p_arg_type);
@@ -305,6 +306,7 @@ bool arg_default_value_is_valid_data(const Variant &p_val, String *r_err_msg = n
 		case Variant::PACKED_VECTOR4_ARRAY:
 		case Variant::CALLABLE:
 		case Variant::SIGNAL:
+		case Variant::STRUCT:
 		case Variant::OBJECT:
 			if (p_val.is_zero()) {
 				return true;

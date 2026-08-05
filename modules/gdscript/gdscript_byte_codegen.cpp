@@ -113,6 +113,7 @@ uint32_t GDScriptByteCodeGenerator::add_temporary(const GDScriptDataType &p_type
 			case Variant::PACKED_VECTOR3_ARRAY:
 			case Variant::PACKED_COLOR_ARRAY:
 			case Variant::PACKED_VECTOR4_ARRAY:
+			case Variant::STRUCT:
 			case Variant::VARIANT_MAX:
 				// Arrays, dictionaries, and objects are reference counted, so we don't use the pool for them.
 				temp_type = Variant::NIL;
@@ -714,6 +715,9 @@ void GDScriptByteCodeGenerator::write_type_adjust(const Address &p_target, Varia
 			break;
 		case Variant::PACKED_VECTOR4_ARRAY:
 			append_opcode(GDScriptFunction::OPCODE_TYPE_ADJUST_PACKED_VECTOR4_ARRAY);
+			break;
+		case Variant::STRUCT:
+			append_opcode(GDScriptFunction::OPCODE_TYPE_ADJUST_STRUCT);
 			break;
 		case Variant::NIL:
 		case Variant::VARIANT_MAX:

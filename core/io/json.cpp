@@ -32,6 +32,7 @@
 
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
+#include "core/variant/struct_value.h"
 #include "core/object/script_language.h"
 #include "core/variant/container_type_validate.h"
 
@@ -1012,6 +1013,11 @@ Variant JSON::_from_native(const Variant &p_variant, bool p_full_objects, int p_
 
 			RETURN_ARGS;
 		} break;
+		case Variant::STRUCT: {
+			const StructValue value = p_variant;
+			Array args = { _from_native(value.to_dictionary(), p_full_objects, p_depth + 1) };
+			RETURN_ARGS;
+		} break;
 
 		case Variant::VARIANT_MAX: {
 			// Nothing to do.
@@ -1462,6 +1468,15 @@ Variant JSON::_to_native(const Variant &p_json, bool p_allow_objects, int p_dept
 					}
 
 					return arr;
+				} break;
+				case Variant::STRUCT: {
+					LOAD_ARGS_CHECK_SIZE(1);
+					const Variant serialized = _to_native(args[0], p_allow_objects, p_depth + 1);
+					ERR_FAIL_COND_V(serialized.get_type() != Variant::DICTIONARY, Variant());
+					Error struct_error = OK;
+					const StructValue value = StructValue::from_dictionary(serialized, &struct_error, p_depth + 1);
+					ERR_FAIL_COND_V(struct_error != OK, Variant());
+					return value;
 				} break;
 
 				case Variant::VARIANT_MAX: {

@@ -30,6 +30,8 @@
 
 #include "variant_setget.h"
 
+#include "core/variant/struct_value.h"
+
 #include "core/debugger/engine_debugger.h"
 #include "core/io/resource.h"
 #include "core/variant/variant_callable.h"
@@ -259,6 +261,8 @@ void Variant::set_named(const StringName &p_member, const Variant &p_value, bool
 	} else if (type == Variant::DICTIONARY) {
 		Dictionary &dict = VariantInternalAccessor<Dictionary>::get(this);
 		r_valid = dict.set(p_member, p_value);
+	} else if (type == Variant::STRUCT) {
+		r_valid = VariantInternalAccessor<StructValue>::get(this).set(p_member, p_value) == OK;
 	} else {
 		r_valid = false;
 	}
@@ -293,6 +297,11 @@ Variant Variant::get_named(const StringName &p_member, bool &r_valid) const {
 				r_valid = true;
 				return *v;
 			}
+		} break;
+		case Variant::STRUCT: {
+			const Variant *value = VariantInternalAccessor<StructValue>::get(this).getptr(p_member);
+			r_valid = value != nullptr;
+			return value == nullptr ? Variant() : *value;
 		} break;
 		default: {
 			if (Variant::has_builtin_method(type, p_member)) {
@@ -1293,6 +1302,15 @@ void Variant::get_property_list(List<PropertyInfo> *p_list) const {
 				p_list->push_back(PropertyInfo(dic->get_valid(kv.key).get_type(), kv.key));
 			}
 		}
+	} else if (type == STRUCT) {
+		const StructValue &value = VariantInternalAccessor<StructValue>::get(this);
+		const Ref<StructLayout> layout = value.get_layout();
+		if (layout.is_valid()) {
+			for (int i = 0; i < layout->get_field_count(); i++) {
+				const StructLayout::Field &field = layout->get_field(i);
+				p_list->push_back(PropertyInfo(field.type, field.name));
+			}
+		}
 	} else if (type == OBJECT) {
 		Object *obj = get_validated_object();
 		ERR_FAIL_NULL(obj);
@@ -2018,6 +2036,17 @@ Variant Variant::recursive_duplicate(bool p_deep, ResourceDeepDuplicateMode p_de
 			return operator Vector<Color>().duplicate();
 		case PACKED_VECTOR4_ARRAY:
 			return operator Vector<Vector4>().duplicate();
+		case STRUCT: {
+			const StructValue source = operator StructValue();
+			if (!source.is_valid()) {
+				return *this;
+			}
+			StructValue result(source.get_layout());
+			for (int i = 0; i < source.get_field_count(); i++) {
+				result.set(i, source.get(i).recursive_duplicate(p_deep, p_deep_subresources_mode, recursion_count + 1));
+			}
+			return result;
+		}
 		default:
 			return *this;
 	}

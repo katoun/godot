@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/variant/struct_value.h"
 #include "core/variant/type_info.h"
 #include "core/variant/variant.h"
 
@@ -64,5 +65,6 @@ MAKE_PTRDESTRUCT(PackedVector2Array);
 MAKE_PTRDESTRUCT(PackedVector3Array);
 MAKE_PTRDESTRUCT(PackedColorArray);
 MAKE_PTRDESTRUCT(PackedVector4Array);
+MAKE_PTRDESTRUCT(StructValue);
 
 #undef MAKE_PTRDESTRUCT

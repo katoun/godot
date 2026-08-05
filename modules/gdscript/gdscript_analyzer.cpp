@@ -4971,6 +4971,7 @@ void GDScriptAnalyzer::reduce_subscript(GDScriptParser::SubscriptNode *p_subscri
 							case Variant::QUATERNION:
 							case Variant::AABB:
 							case Variant::OBJECT:
+							case Variant::STRUCT:
 								error = index_type.builtin_type != Variant::STRING && index_type.builtin_type != Variant::STRING_NAME;
 								break;
 							// Expect String or number.
@@ -5125,6 +5126,7 @@ void GDScriptAnalyzer::reduce_subscript(GDScriptParser::SubscriptNode *p_subscri
 					case Variant::PLANE:
 					case Variant::COLOR:
 					case Variant::OBJECT:
+					case Variant::STRUCT:
 						result_type.kind = GDScriptParser::DataType::VARIANT;
 						result_type.type_source = GDScriptParser::DataType::UNDETECTED;
 						break;

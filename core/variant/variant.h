@@ -65,6 +65,7 @@
 
 class Object;
 class RefCounted;
+class StructValue;
 
 template <typename T>
 class Ref;
@@ -141,6 +142,10 @@ public:
 		PACKED_VECTOR3_ARRAY,
 		PACKED_COLOR_ARRAY,
 		PACKED_VECTOR4_ARRAY,
+
+		// Generic boxed value type. Appended to preserve the numeric values of
+		// every existing Variant type.
+		STRUCT,
 
 		VARIANT_MAX
 	};
@@ -309,6 +314,7 @@ private:
 		true, //PACKED_VECTOR3_ARRAY,
 		true, //PACKED_COLOR_ARRAY,
 		true, //PACKED_VECTOR4_ARRAY,
+		true, //STRUCT,
 	};
 
 	_FORCE_INLINE_ void clear() {
@@ -395,7 +401,7 @@ public:
 		return type == STRING || type == STRING_NAME;
 	}
 	_FORCE_INLINE_ bool is_array() const {
-		return type >= ARRAY;
+		return type >= ARRAY && type <= PACKED_VECTOR4_ARRAY;
 	}
 	bool is_shared() const;
 	bool is_zero() const;
@@ -453,6 +459,7 @@ public:
 
 	operator Dictionary() const;
 	operator Array() const;
+	operator StructValue() const;
 
 	operator PackedByteArray() const;
 	operator PackedInt32Array() const;
@@ -525,6 +532,7 @@ public:
 	Variant(const Callable &p_callable);
 	Variant(const Signal &p_signal);
 	Variant(const Dictionary &p_dictionary);
+	Variant(const StructValue &p_struct);
 
 	Variant(std::initializer_list<Variant> p_init);
 	Variant(const Array &p_array);

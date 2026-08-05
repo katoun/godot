@@ -30,6 +30,8 @@
 
 #include "variant_op.h"
 
+#include "core/variant/struct_value.h"
+
 typedef void (*VariantEvaluatorFunction)(const Variant &p_left, const Variant &p_right, Variant *r_ret, bool &r_valid);
 
 static Variant::Type operator_return_type_table[Variant::OP_MAX][Variant::VARIANT_MAX][Variant::VARIANT_MAX];
@@ -44,6 +46,28 @@ void register_op(Variant::Operator p_op, Variant::Type p_type_a, Variant::Type p
 	validated_operator_evaluator_table[p_op][p_type_a][p_type_b] = T::validated_evaluate;
 	ptr_operator_evaluator_table[p_op][p_type_a][p_type_b] = T::ptr_evaluate;
 }
+
+class OperatorEvaluatorEqualStruct : public CommonEvaluate<OperatorEvaluatorEqualStruct> {
+public:
+	static inline void validated_evaluate(const Variant *left, const Variant *right, Variant *r_ret) {
+		VariantInternalAccessor<bool>::get(r_ret) = StructValue(*left) == StructValue(*right);
+	}
+	static void ptr_evaluate(const void *left, const void *right, void *r_ret) {
+		PtrToArg<bool>::encode(*static_cast<const StructValue *>(left) == *static_cast<const StructValue *>(right), r_ret);
+	}
+	using ReturnType = bool;
+};
+
+class OperatorEvaluatorNotEqualStruct : public CommonEvaluate<OperatorEvaluatorNotEqualStruct> {
+public:
+	static inline void validated_evaluate(const Variant *left, const Variant *right, Variant *r_ret) {
+		VariantInternalAccessor<bool>::get(r_ret) = StructValue(*left) != StructValue(*right);
+	}
+	static void ptr_evaluate(const void *left, const void *right, void *r_ret) {
+		PtrToArg<bool>::encode(*static_cast<const StructValue *>(left) != *static_cast<const StructValue *>(right), r_ret);
+	}
+	using ReturnType = bool;
+};
 
 // Special cases that can't be done otherwise because of the forced casting to float.
 
@@ -529,6 +553,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorEqual<PackedVector3Array, PackedVector3Array>>(Variant::OP_EQUAL, Variant::PACKED_VECTOR3_ARRAY, Variant::PACKED_VECTOR3_ARRAY);
 	register_op<OperatorEvaluatorEqual<PackedColorArray, PackedColorArray>>(Variant::OP_EQUAL, Variant::PACKED_COLOR_ARRAY, Variant::PACKED_COLOR_ARRAY);
 	register_op<OperatorEvaluatorEqual<PackedVector4Array, PackedVector4Array>>(Variant::OP_EQUAL, Variant::PACKED_VECTOR4_ARRAY, Variant::PACKED_VECTOR4_ARRAY);
+	register_op<OperatorEvaluatorEqualStruct>(Variant::OP_EQUAL, Variant::STRUCT, Variant::STRUCT);
 
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::BOOL, Variant::NIL);
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::INT, Variant::NIL);
@@ -567,6 +592,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::PACKED_VECTOR3_ARRAY, Variant::NIL);
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::PACKED_COLOR_ARRAY, Variant::NIL);
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::PACKED_VECTOR4_ARRAY, Variant::NIL);
+	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::STRUCT, Variant::NIL);
 
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::NIL, Variant::BOOL);
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::NIL, Variant::INT);
@@ -605,6 +631,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::NIL, Variant::PACKED_VECTOR3_ARRAY);
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::NIL, Variant::PACKED_COLOR_ARRAY);
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::NIL, Variant::PACKED_VECTOR4_ARRAY);
+	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_EQUAL, Variant::NIL, Variant::STRUCT);
 
 	register_op<OperatorEvaluatorAlwaysFalse>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::NIL);
 	register_op<OperatorEvaluatorNotEqual<bool, bool>>(Variant::OP_NOT_EQUAL, Variant::BOOL, Variant::BOOL);
@@ -651,6 +678,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorNotEqual<PackedVector3Array, PackedVector3Array>>(Variant::OP_NOT_EQUAL, Variant::PACKED_VECTOR3_ARRAY, Variant::PACKED_VECTOR3_ARRAY);
 	register_op<OperatorEvaluatorNotEqual<PackedColorArray, PackedColorArray>>(Variant::OP_NOT_EQUAL, Variant::PACKED_COLOR_ARRAY, Variant::PACKED_COLOR_ARRAY);
 	register_op<OperatorEvaluatorNotEqual<PackedVector4Array, PackedVector4Array>>(Variant::OP_NOT_EQUAL, Variant::PACKED_VECTOR4_ARRAY, Variant::PACKED_VECTOR4_ARRAY);
+	register_op<OperatorEvaluatorNotEqualStruct>(Variant::OP_NOT_EQUAL, Variant::STRUCT, Variant::STRUCT);
 
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::BOOL, Variant::NIL);
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::INT, Variant::NIL);
@@ -689,6 +717,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::PACKED_VECTOR3_ARRAY, Variant::NIL);
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::PACKED_COLOR_ARRAY, Variant::NIL);
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::PACKED_VECTOR4_ARRAY, Variant::NIL);
+	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::STRUCT, Variant::NIL);
 
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::BOOL);
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::INT);
@@ -727,6 +756,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::PACKED_VECTOR3_ARRAY);
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::PACKED_COLOR_ARRAY);
 	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::PACKED_VECTOR4_ARRAY);
+	register_op<OperatorEvaluatorAlwaysTrue>(Variant::OP_NOT_EQUAL, Variant::NIL, Variant::STRUCT);
 
 	register_op<OperatorEvaluatorLess<bool, bool>>(Variant::OP_LESS, Variant::BOOL, Variant::BOOL);
 	register_op<OperatorEvaluatorLess<int64_t, int64_t>>(Variant::OP_LESS, Variant::INT, Variant::INT);
@@ -920,6 +950,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorNot<PackedVector3Array>>(Variant::OP_NOT, Variant::PACKED_VECTOR3_ARRAY, Variant::NIL);
 	register_op<OperatorEvaluatorNot<PackedColorArray>>(Variant::OP_NOT, Variant::PACKED_COLOR_ARRAY, Variant::NIL);
 	register_op<OperatorEvaluatorNot<PackedVector4Array>>(Variant::OP_NOT, Variant::PACKED_VECTOR4_ARRAY, Variant::NIL);
+	register_op<OperatorEvaluatorNot<StructValue>>(Variant::OP_NOT, Variant::STRUCT, Variant::NIL);
 
 	register_string_op(OperatorEvaluatorInStringFind, Variant::OP_IN);
 
@@ -964,6 +995,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorInDictionaryHas<PackedVector3Array>>(Variant::OP_IN, Variant::PACKED_VECTOR3_ARRAY, Variant::DICTIONARY);
 	register_op<OperatorEvaluatorInDictionaryHas<PackedColorArray>>(Variant::OP_IN, Variant::PACKED_COLOR_ARRAY, Variant::DICTIONARY);
 	register_op<OperatorEvaluatorInDictionaryHas<PackedVector4Array>>(Variant::OP_IN, Variant::PACKED_VECTOR4_ARRAY, Variant::DICTIONARY);
+	register_op<OperatorEvaluatorInDictionaryHas<StructValue>>(Variant::OP_IN, Variant::STRUCT, Variant::DICTIONARY);
 
 	register_op<OperatorEvaluatorInArrayFindNil>(Variant::OP_IN, Variant::NIL, Variant::ARRAY);
 	register_op<OperatorEvaluatorInArrayFind<bool, Array>>(Variant::OP_IN, Variant::BOOL, Variant::ARRAY);
@@ -1006,6 +1038,7 @@ void Variant::_register_variant_operators() {
 	register_op<OperatorEvaluatorInArrayFind<PackedVector3Array, Array>>(Variant::OP_IN, Variant::PACKED_VECTOR3_ARRAY, Variant::ARRAY);
 	register_op<OperatorEvaluatorInArrayFind<PackedColorArray, Array>>(Variant::OP_IN, Variant::PACKED_COLOR_ARRAY, Variant::ARRAY);
 	register_op<OperatorEvaluatorInArrayFind<PackedVector4Array, Array>>(Variant::OP_IN, Variant::PACKED_VECTOR4_ARRAY, Variant::ARRAY);
+	register_op<OperatorEvaluatorInArrayFind<StructValue, Array>>(Variant::OP_IN, Variant::STRUCT, Variant::ARRAY);
 
 	register_op<OperatorEvaluatorInArrayFind<int64_t, PackedByteArray>>(Variant::OP_IN, Variant::INT, Variant::PACKED_BYTE_ARRAY);
 	register_op<OperatorEvaluatorInArrayFind<double, PackedByteArray>>(Variant::OP_IN, Variant::FLOAT, Variant::PACKED_BYTE_ARRAY);
