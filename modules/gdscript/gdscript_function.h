@@ -157,6 +157,7 @@ public:
 		OPCODE_OPERATOR_VALIDATED,
 		OPCODE_OPERATOR_INT,
 		OPCODE_OPERATOR_FLOAT,
+		OPCODE_OPERATOR_MATH,
 		OPCODE_JUMP_COMPARE_INT,
 		OPCODE_JUMP_COMPARE_FLOAT,
 		OPCODE_JUMP_IF_BOOL,
@@ -184,6 +185,7 @@ public:
 		OPCODE_ASSIGN_BOOL,
 		OPCODE_ASSIGN_INT,
 		OPCODE_ASSIGN_FLOAT,
+		OPCODE_ASSIGN_MATH,
 		OPCODE_ASSIGN_NULL,
 		OPCODE_ASSIGN_TRUE,
 		OPCODE_ASSIGN_FALSE,
@@ -321,6 +323,37 @@ public:
 		OPCODE_LINE,
 		OPCODE_END
 	};
+
+	enum MathOperatorMetadata {
+		MATH_OPERATOR_SHIFT = 0,
+		MATH_LEFT_TYPE_SHIFT = 8,
+		MATH_RIGHT_TYPE_SHIFT = 16,
+		MATH_RESULT_TYPE_SHIFT = 24,
+		MATH_METADATA_MASK = 0xff,
+	};
+
+	static int make_math_operator_metadata(Variant::Operator p_operator, Variant::Type p_left_type, Variant::Type p_right_type, Variant::Type p_result_type) {
+		return (int(p_operator) << MATH_OPERATOR_SHIFT) |
+				(int(p_left_type) << MATH_LEFT_TYPE_SHIFT) |
+				(int(p_right_type) << MATH_RIGHT_TYPE_SHIFT) |
+				(int(p_result_type) << MATH_RESULT_TYPE_SHIFT);
+	}
+
+	static Variant::Operator get_math_operator(int p_metadata) {
+		return Variant::Operator((p_metadata >> MATH_OPERATOR_SHIFT) & MATH_METADATA_MASK);
+	}
+
+	static Variant::Type get_math_left_type(int p_metadata) {
+		return Variant::Type((p_metadata >> MATH_LEFT_TYPE_SHIFT) & MATH_METADATA_MASK);
+	}
+
+	static Variant::Type get_math_right_type(int p_metadata) {
+		return Variant::Type((p_metadata >> MATH_RIGHT_TYPE_SHIFT) & MATH_METADATA_MASK);
+	}
+
+	static Variant::Type get_math_result_type(int p_metadata) {
+		return Variant::Type((p_metadata >> MATH_RESULT_TYPE_SHIFT) & MATH_METADATA_MASK);
+	}
 
 	enum Address {
 		ADDR_BITS = 24,

@@ -298,6 +298,90 @@ func native_float_roundtrip(value: float) -> float:
 	memdelete(float_instance);
 }
 
+TEST_CASE("[Modules][GDScript] Baseline JIT keeps engine math values unboxed") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends Node2D
+
+func vector2_math(left: Vector2, right: Vector2, scale: float) -> Vector2:
+	var value: Vector2 = left
+	value = value + right
+	return -value * scale
+
+func vector2_equal(left: Vector2, right: Vector2) -> bool:
+	return left == right
+
+func color_math(left: Color, right: Color, scale: float) -> Color:
+	var value: Color = left + right
+	return value / scale
+
+func native_vector2_color(position_value: Vector2, color_value: Color) -> Color:
+	set_position(position_value)
+	set_modulate(color_value)
+	return get_modulate()
+)");
+	REQUIRE_MESSAGE(gdscript->reload() == OK, "The unboxed math test script should parse successfully.");
+
+	const HashMap<StringName, GDScriptFunction *> &functions = gdscript->get_member_functions();
+	for (const StringName &function_name : { SNAME("vector2_math"), SNAME("vector2_equal"), SNAME("color_math"), SNAME("native_vector2_color") }) {
+		const GDScriptFunction *const *function = functions.getptr(function_name);
+		REQUIRE(function != nullptr);
+		CHECK_MESSAGE((*function)->has_typed_baseline_jit(), vformat("Function '%s' should expose the math-value typed entry.", function_name));
+	}
+	const GDScriptFunction *const *native_function = functions.getptr(SNAME("native_vector2_color"));
+	REQUIRE(native_function != nullptr);
+	CHECK((*native_function)->get_baseline_jit_ptrcall_count() == 3);
+
+	Object *node_2d = ClassDB::instantiate(SNAME("Node2D"));
+	REQUIRE(node_2d != nullptr);
+	node_2d->set_script(gdscript);
+	CHECK(Vector2(node_2d->call(SNAME("vector2_math"), Vector2(1.0, -2.0), Vector2(3.0, 5.0), 2.0)).is_equal_approx(Vector2(-8.0, -6.0)));
+	CHECK(bool(node_2d->call(SNAME("vector2_equal"), Vector2(2.0, 4.0), Vector2(2.0, 4.0))));
+	CHECK_FALSE(bool(node_2d->call(SNAME("vector2_equal"), Vector2(2.0, 4.0), Vector2(2.0, 5.0))));
+	CHECK(Color(node_2d->call(SNAME("color_math"), Color(0.2, 0.4, 0.6, 0.8), Color(0.4, 0.2, 0.0, 0.2), 2.0)).is_equal_approx(Color(0.3, 0.3, 0.3, 0.5)));
+	const Color roundtrip_color(0.15, 0.35, 0.55, 0.75);
+	CHECK(Color(node_2d->call(SNAME("native_vector2_color"), Vector2(7.0, -3.0), roundtrip_color)).is_equal_approx(roundtrip_color));
+	CHECK(Vector2(node_2d->get(SNAME("position"))).is_equal_approx(Vector2(7.0, -3.0)));
+	memdelete(node_2d);
+
+	Ref<GDScript> vector3_script = memnew(GDScript);
+	vector3_script->set_source_code(R"(
+extends Node3D
+
+func vector3_phi(left: Vector3, right: Vector3, choose_right: bool, scale: float) -> Vector3:
+	var selected: Vector3 = left
+	if choose_right:
+		selected = right
+	return selected * scale
+
+func native_vector3_roundtrip(value: Vector3) -> Vector3:
+	set_position(value)
+	return get_position()
+)");
+	REQUIRE(vector3_script->reload() == OK);
+	const HashMap<StringName, GDScriptFunction *> &vector3_functions = vector3_script->get_member_functions();
+	const GDScriptFunction *const *phi_function = vector3_functions.getptr(SNAME("vector3_phi"));
+	const GDScriptFunction *const *vector3_native_function = vector3_functions.getptr(SNAME("native_vector3_roundtrip"));
+	REQUIRE(phi_function != nullptr);
+	REQUIRE(vector3_native_function != nullptr);
+	CHECK((*phi_function)->has_typed_baseline_jit());
+	CHECK((*vector3_native_function)->has_typed_baseline_jit());
+	CHECK((*vector3_native_function)->get_baseline_jit_ptrcall_count() == 2);
+
+	Object *node_3d = ClassDB::instantiate(SNAME("Node3D"));
+	REQUIRE(node_3d != nullptr);
+	node_3d->set_script(vector3_script);
+	for (uint32_t i = 0; i <= GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		const Vector3 result = node_3d->call(SNAME("vector3_phi"), Vector3(1.0, 2.0, 3.0), Vector3(-2.0, 4.0, 6.0), true, 0.5);
+		CHECK(result.is_equal_approx(Vector3(-1.0, 2.0, 3.0)));
+	}
+	CHECK_MESSAGE((*phi_function)->has_optimizing_jit(), "The compact SSA tier should preserve unboxed Vector3 phis.");
+	const Vector3 roundtrip_vector(8.0, -4.0, 2.5);
+	CHECK(Vector3(node_3d->call(SNAME("native_vector3_roundtrip"), roundtrip_vector)).is_equal_approx(roundtrip_vector));
+	memdelete(node_3d);
+}
+
 TEST_CASE("[Modules][GDScript] Compact SSA JIT promotes hot functions and consumes export profiles") {
 	GDScriptLanguage::get_singleton()->init();
 	GDScriptOptimizationProfile::clear();

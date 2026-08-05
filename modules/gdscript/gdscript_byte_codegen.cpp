@@ -503,6 +503,47 @@ static bool is_direct_float_operator(Variant::Operator p_operator) {
 	}
 }
 
+static bool is_direct_math_type(Variant::Type p_type) {
+	return p_type == Variant::VECTOR2 || p_type == Variant::VECTOR3 || p_type == Variant::COLOR;
+}
+
+static bool is_direct_math_operator(Variant::Operator p_operator, Variant::Type p_left_type, Variant::Type p_right_type, Variant::Type p_result_type) {
+	const bool unary = p_operator == Variant::OP_NEGATE || p_operator == Variant::OP_POSITIVE;
+	if (unary) {
+		return is_direct_math_type(p_left_type) && p_right_type == Variant::NIL && p_result_type == p_left_type;
+	}
+	if (p_operator == Variant::OP_EQUAL || p_operator == Variant::OP_NOT_EQUAL) {
+		return is_direct_math_type(p_left_type) && p_right_type == p_left_type && p_result_type == Variant::BOOL;
+	}
+	if (p_operator == Variant::OP_ADD || p_operator == Variant::OP_SUBTRACT) {
+		return is_direct_math_type(p_left_type) && p_right_type == p_left_type && p_result_type == p_left_type;
+	}
+	if (p_operator != Variant::OP_MULTIPLY && p_operator != Variant::OP_DIVIDE) {
+		return false;
+	}
+
+	if (is_direct_math_type(p_left_type) && p_result_type == p_left_type) {
+		return p_right_type == p_left_type || p_right_type == Variant::INT || p_right_type == Variant::FLOAT;
+	}
+	// Scalar-on-the-left multiplication is registered for all three selected
+	// math types. Division is deliberately excluded because it has no such
+	// Variant operator.
+	return p_operator == Variant::OP_MULTIPLY && (p_left_type == Variant::INT || p_left_type == Variant::FLOAT) &&
+			is_direct_math_type(p_right_type) && p_result_type == p_right_type;
+}
+
+void GDScriptByteCodeGenerator::write_direct_math_operator(const Address &p_target, Variant::Operator p_operator, const Address &p_left_operand, const Address &p_right_operand, Variant::Type p_right_type) {
+	const Variant::Type left_type = p_left_operand.type.builtin_type;
+	const Variant::Type result_type = Variant::get_operator_return_type(p_operator, left_type, p_right_type);
+	Variant::ValidatedOperatorEvaluator op_func = Variant::get_validated_operator_evaluator(p_operator, left_type, p_right_type);
+	append_opcode(GDScriptFunction::OPCODE_OPERATOR_MATH);
+	append(p_left_operand);
+	append(p_right_operand);
+	append(p_target);
+	append(op_func);
+	append(GDScriptFunction::make_math_operator_metadata(p_operator, left_type, p_right_type, result_type));
+}
+
 static bool is_direct_comparison_operator(Variant::Operator p_operator) {
 	return p_operator == Variant::OP_EQUAL || p_operator == Variant::OP_NOT_EQUAL ||
 			p_operator == Variant::OP_LESS || p_operator == Variant::OP_LESS_EQUAL ||
@@ -649,6 +690,13 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 		append(p_operator);
 		return;
 	}
+	if (HAS_BUILTIN_TYPE(p_left_operand)) {
+		const Variant::Type result_type = Variant::get_operator_return_type(p_operator, p_left_operand.type.builtin_type, Variant::NIL);
+		if (is_direct_math_operator(p_operator, p_left_operand.type.builtin_type, Variant::NIL, result_type)) {
+			write_direct_math_operator(p_target, p_operator, p_left_operand, Address(), Variant::NIL);
+			return;
+		}
+	}
 
 	if (HAS_BUILTIN_TYPE(p_left_operand)) {
 		// Gather specific operator.
@@ -690,6 +738,18 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 		append(p_target);
 		append(p_operator);
 		return;
+	}
+	if (HAS_BUILTIN_TYPE(p_left_operand) && HAS_BUILTIN_TYPE(p_right_operand)) {
+		const Variant::Type left_type = p_left_operand.type.builtin_type;
+		const Variant::Type right_type = p_right_operand.type.builtin_type;
+		const Variant::Type result_type = Variant::get_operator_return_type(p_operator, left_type, right_type);
+		if (is_direct_math_operator(p_operator, left_type, right_type, result_type)) {
+			if (p_target.mode == Address::TEMPORARY && temporaries[p_target.address].type != result_type) {
+				write_type_adjust(p_target, result_type);
+			}
+			write_direct_math_operator(p_target, p_operator, p_left_operand, p_right_operand, right_type);
+			return;
+		}
 	}
 
 	bool valid = HAS_BUILTIN_TYPE(p_left_operand) && HAS_BUILTIN_TYPE(p_right_operand);
@@ -1114,6 +1174,12 @@ void GDScriptByteCodeGenerator::write_assign(const Address &p_target, const Addr
 		append_opcode(GDScriptFunction::OPCODE_ASSIGN_FLOAT);
 		append(p_target);
 		append(p_source);
+	} else if (!target_is_dirty && HAS_BUILTIN_TYPE(p_target) && HAS_BUILTIN_TYPE(p_source) &&
+			p_target.type.builtin_type == p_source.type.builtin_type && is_direct_math_type(p_target.type.builtin_type)) {
+		append_opcode(GDScriptFunction::OPCODE_ASSIGN_MATH);
+		append(p_target);
+		append(p_source);
+		append(p_target.type.builtin_type);
 	} else if (p_target.type.kind == GDScriptDataType::BUILTIN && p_target.type.builtin_type == Variant::ARRAY && p_target.type.has_container_element_type(0)) {
 		const GDScriptDataType &element_type = p_target.type.get_container_element_type(0);
 		append_opcode(GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY);

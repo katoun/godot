@@ -281,6 +281,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_OPERATOR_VALIDATED, \
 		&&OPCODE_OPERATOR_INT, \
 		&&OPCODE_OPERATOR_FLOAT, \
+		&&OPCODE_OPERATOR_MATH, \
 		&&OPCODE_JUMP_COMPARE_INT, \
 		&&OPCODE_JUMP_COMPARE_FLOAT, \
 		&&OPCODE_JUMP_IF_BOOL, \
@@ -308,6 +309,7 @@ _FORCE_INLINE_ bool _typed_compare(Variant::Operator p_operator, T p_left, T p_r
 		&&OPCODE_ASSIGN_BOOL, \
 		&&OPCODE_ASSIGN_INT, \
 		&&OPCODE_ASSIGN_FLOAT, \
+		&&OPCODE_ASSIGN_MATH, \
 		&&OPCODE_ASSIGN_NULL, \
 		&&OPCODE_ASSIGN_TRUE, \
 		&&OPCODE_ASSIGN_FALSE, \
@@ -1064,6 +1066,22 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			}
 			DISPATCH_OPCODE;
 
+			OPCODE(OPCODE_OPERATOR_MATH) {
+				CHECK_SPACE(6);
+
+				GET_VARIANT_PTR(a, 0);
+				GET_VARIANT_PTR(b, 1);
+				GET_VARIANT_PTR(dst, 2);
+
+				const int operator_idx = _code_ptr[ip + 4];
+				GD_ERR_BREAK(operator_idx < 0 || operator_idx >= _operator_funcs_count);
+				const Variant::ValidatedOperatorEvaluator operator_func = _operator_funcs_ptr[operator_idx];
+				operator_func(a, b, dst);
+
+				ip += 6;
+			}
+			DISPATCH_OPCODE;
+
 #define OPCODE_JUMP_COMPARE(m_type, m_getter) \
 	OPCODE(OPCODE_JUMP_COMPARE_##m_type) { \
 		CHECK_SPACE(6); \
@@ -1661,6 +1679,30 @@ OPCODE_ASSIGN_PRIMITIVE(INT, get_int);
 OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 
 #undef OPCODE_ASSIGN_PRIMITIVE
+
+			OPCODE(OPCODE_ASSIGN_MATH) {
+				CHECK_SPACE(4);
+				GET_VARIANT_PTR(dst, 0);
+				GET_VARIANT_PTR(src, 1);
+
+				const Variant::Type type = Variant::Type(_code_ptr[ip + 3]);
+				VariantInternal::set_type(*dst, type);
+				switch (type) {
+					case Variant::VECTOR2:
+						*VariantInternal::get_vector2(dst) = *VariantInternal::get_vector2(src);
+						break;
+					case Variant::VECTOR3:
+						*VariantInternal::get_vector3(dst) = *VariantInternal::get_vector3(src);
+						break;
+					case Variant::COLOR:
+						*VariantInternal::get_color(dst) = *VariantInternal::get_color(src);
+						break;
+					default:
+						GD_ERR_BREAK(true);
+				}
+				ip += 4;
+			}
+			DISPATCH_OPCODE;
 
 			OPCODE(OPCODE_ASSIGN_NULL) {
 				CHECK_SPACE(2);

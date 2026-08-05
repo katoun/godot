@@ -154,6 +154,19 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 5;
 			} break;
+			case OPCODE_OPERATOR_MATH: {
+				const int metadata = _code_ptr[ip + 5];
+				text += "math operator ";
+				text += DADDR(3);
+				text += " = ";
+				text += DADDR(1);
+				text += " ";
+				text += Variant::get_operator_name(get_math_operator(metadata));
+				text += " ";
+				text += DADDR(2);
+
+				incr += 6;
+			} break;
 			case OPCODE_JUMP_COMPARE_INT:
 			case OPCODE_JUMP_COMPARE_FLOAT: {
 				text += opcode == OPCODE_JUMP_COMPARE_INT ? "jump-int-compare " : "jump-float-compare ";
@@ -465,6 +478,16 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 				text += DADDR(2);
 
 				incr += 3;
+			} break;
+			case OPCODE_ASSIGN_MATH: {
+				text += "assign ";
+				text += Variant::get_type_name(Variant::Type(_code_ptr[ip + 3]));
+				text += " ";
+				text += DADDR(1);
+				text += " = ";
+				text += DADDR(2);
+
+				incr += 4;
 			} break;
 			case OPCODE_ASSIGN_NULL: {
 				text += "assign ";
