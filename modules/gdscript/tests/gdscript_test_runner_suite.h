@@ -429,6 +429,137 @@ func native_vector3_roundtrip(value: Vector3) -> Vector3:
 	memdelete(node_3d);
 }
 
+TEST_CASE("[Modules][GDScript] Baseline JIT keeps large engine values in native frames") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> transform_2d_script = memnew(GDScript);
+	transform_2d_script->set_source_code(R"(
+extends Node2D
+
+func transform2d_math(left: Transform2D, right: Transform2D, scale: float) -> Transform2D:
+	var value: Transform2D = left
+	value = value * right
+	return value / scale
+
+func transform2d_equal(left: Transform2D, right: Transform2D) -> bool:
+	return left == right
+
+func native_transform2d(value: Transform2D) -> Transform2D:
+	set_transform(value)
+	return get_transform()
+)");
+	REQUIRE_MESSAGE(transform_2d_script->reload() == OK, "The large Transform2D test script should parse successfully.");
+
+	const HashMap<StringName, GDScriptFunction *> &transform_2d_functions = transform_2d_script->get_member_functions();
+	for (const StringName &function_name : { SNAME("transform2d_math"), SNAME("transform2d_equal"), SNAME("native_transform2d") }) {
+		const GDScriptFunction *const *function = transform_2d_functions.getptr(function_name);
+		REQUIRE(function != nullptr);
+		CHECK_MESSAGE((*function)->has_typed_baseline_jit(), vformat("Function '%s' should expose the pointer-based large-value entry.", function_name));
+	}
+	const GDScriptFunction *const *transform_2d_math_function = transform_2d_functions.getptr(SNAME("transform2d_math"));
+	const GDScriptFunction *const *native_transform_2d_function = transform_2d_functions.getptr(SNAME("native_transform2d"));
+	REQUIRE(transform_2d_math_function != nullptr);
+	REQUIRE(native_transform_2d_function != nullptr);
+	CHECK((*native_transform_2d_function)->get_baseline_jit_ptrcall_count() == 2);
+
+	Object *node_2d = ClassDB::instantiate(SNAME("Node2D"));
+	REQUIRE(node_2d != nullptr);
+	node_2d->set_script(transform_2d_script);
+	const Transform2D transform_2d_left(Math::deg_to_rad(real_t(25.0)), Vector2(3.0, -2.0));
+	const Transform2D transform_2d_right(Math::deg_to_rad(real_t(-10.0)), Vector2(-1.0, 4.0));
+	const Transform2D expected_transform_2d = (transform_2d_left * transform_2d_right) / real_t(2.0);
+	// An implicitly convertible scalar rejects the raw typed entry and exercises
+	// the large-value pointers in the interpreter-compatible Variant frame.
+	CHECK(Transform2D(node_2d->call(SNAME("transform2d_math"), transform_2d_left, transform_2d_right, 2)).is_equal_approx(expected_transform_2d));
+	for (uint32_t i = 0; i <= GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		CHECK(Transform2D(node_2d->call(SNAME("transform2d_math"), transform_2d_left, transform_2d_right, 2.0)).is_equal_approx(expected_transform_2d));
+		CHECK(bool(node_2d->call(SNAME("transform2d_equal"), transform_2d_left, transform_2d_left)));
+		CHECK_FALSE(bool(node_2d->call(SNAME("transform2d_equal"), transform_2d_left, transform_2d_right)));
+		CHECK(Transform2D(node_2d->call(SNAME("native_transform2d"), transform_2d_left)).is_equal_approx(transform_2d_left));
+	}
+	CHECK_MESSAGE((*transform_2d_math_function)->has_optimizing_jit(), "Transform2D arithmetic should remain native in the compact SSA tier.");
+	CHECK_MESSAGE((*native_transform_2d_function)->has_optimizing_jit(), "A Transform2D ptrcall boundary should use native result storage in the compact SSA tier.");
+	CHECK(Transform2D(node_2d->call(SNAME("transform2d_math"), transform_2d_left, transform_2d_right, 2)).is_equal_approx(expected_transform_2d));
+	memdelete(node_2d);
+
+	Ref<GDScript> transform_3d_script = memnew(GDScript);
+	transform_3d_script->set_source_code(R"(
+extends Node3D
+
+func basis_math(left: Basis, right: Basis, scale: float) -> Basis:
+	var value: Basis = left
+	value = value * right
+	return value * scale
+
+func transform3d_math(left: Transform3D, right: Transform3D, scale: float) -> Transform3D:
+	var value: Transform3D = left * right
+	return value / scale
+
+func aabb_roundtrip(value: AABB) -> AABB:
+	var copy: AABB = value
+	return copy
+
+func aabb_equal(left: AABB, right: AABB) -> bool:
+	return left == right
+
+func projection_math(left: Projection, right: Projection) -> Projection:
+	var value: Projection = left
+	return value * right
+
+func native_transform3d(value: Transform3D) -> Transform3D:
+	set_transform(value)
+	return get_transform()
+)");
+	REQUIRE_MESSAGE(transform_3d_script->reload() == OK, "The large 3D value test script should parse successfully.");
+
+	const HashMap<StringName, GDScriptFunction *> &transform_3d_functions = transform_3d_script->get_member_functions();
+	for (const StringName &function_name : { SNAME("basis_math"), SNAME("transform3d_math"), SNAME("aabb_roundtrip"), SNAME("aabb_equal"), SNAME("projection_math"), SNAME("native_transform3d") }) {
+		const GDScriptFunction *const *function = transform_3d_functions.getptr(function_name);
+		REQUIRE(function != nullptr);
+		CHECK_MESSAGE((*function)->has_typed_baseline_jit(), vformat("Function '%s' should expose the pointer-based large-value entry.", function_name));
+	}
+	const GDScriptFunction *const *basis_function = transform_3d_functions.getptr(SNAME("basis_math"));
+	const GDScriptFunction *const *transform_3d_function = transform_3d_functions.getptr(SNAME("transform3d_math"));
+	const GDScriptFunction *const *aabb_function = transform_3d_functions.getptr(SNAME("aabb_roundtrip"));
+	const GDScriptFunction *const *projection_function = transform_3d_functions.getptr(SNAME("projection_math"));
+	const GDScriptFunction *const *native_transform_3d_function = transform_3d_functions.getptr(SNAME("native_transform3d"));
+	REQUIRE(basis_function != nullptr);
+	REQUIRE(transform_3d_function != nullptr);
+	REQUIRE(aabb_function != nullptr);
+	REQUIRE(projection_function != nullptr);
+	REQUIRE(native_transform_3d_function != nullptr);
+	CHECK((*native_transform_3d_function)->get_baseline_jit_ptrcall_count() == 2);
+
+	Object *node_3d = ClassDB::instantiate(SNAME("Node3D"));
+	REQUIRE(node_3d != nullptr);
+	node_3d->set_script(transform_3d_script);
+	const Basis basis_left(Vector3(0.0, 1.0, 0.0), Math::deg_to_rad(real_t(35.0)));
+	const Basis basis_right(Vector3(1.0, 0.0, 0.0), Math::deg_to_rad(real_t(-20.0)));
+	const Basis expected_basis = (basis_left * basis_right) * real_t(1.5);
+	const Transform3D transform_3d_left(basis_left, Vector3(2.0, -3.0, 4.0));
+	const Transform3D transform_3d_right(basis_right, Vector3(-1.0, 5.0, 2.0));
+	const Transform3D expected_transform_3d = (transform_3d_left * transform_3d_right) / real_t(2.0);
+	const AABB aabb(Vector3(-2.0, 3.0, 1.0), Vector3(8.0, 4.0, 6.0));
+	const AABB other_aabb(Vector3(-2.0, 3.0, 2.0), Vector3(8.0, 4.0, 6.0));
+	const Projection projection_left = Projection::create_perspective(65.0, 1.6, 0.1, 250.0);
+	const Projection projection_right(transform_3d_right);
+	const Projection expected_projection = projection_left * projection_right;
+	for (uint32_t i = 0; i <= GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		CHECK(Basis(node_3d->call(SNAME("basis_math"), basis_left, basis_right, 1.5)).is_equal_approx(expected_basis));
+		CHECK(Transform3D(node_3d->call(SNAME("transform3d_math"), transform_3d_left, transform_3d_right, 2.0)).is_equal_approx(expected_transform_3d));
+		CHECK(AABB(node_3d->call(SNAME("aabb_roundtrip"), aabb)).is_equal_approx(aabb));
+		CHECK(bool(node_3d->call(SNAME("aabb_equal"), aabb, aabb)));
+		CHECK_FALSE(bool(node_3d->call(SNAME("aabb_equal"), aabb, other_aabb)));
+		CHECK(Projection(node_3d->call(SNAME("projection_math"), projection_left, projection_right)).is_same(expected_projection));
+		CHECK(Transform3D(node_3d->call(SNAME("native_transform3d"), transform_3d_left)).is_equal_approx(transform_3d_left));
+	}
+	CHECK_MESSAGE((*basis_function)->has_optimizing_jit(), "Basis arithmetic should remain native in the compact SSA tier.");
+	CHECK_MESSAGE((*transform_3d_function)->has_optimizing_jit(), "Transform3D arithmetic should remain native in the compact SSA tier.");
+	CHECK_MESSAGE((*aabb_function)->has_optimizing_jit(), "AABB copies should remain native in the compact SSA tier.");
+	CHECK_MESSAGE((*projection_function)->has_optimizing_jit(), "Projection arithmetic should remain native in the compact SSA tier.");
+	CHECK_MESSAGE((*native_transform_3d_function)->has_optimizing_jit(), "A Transform3D ptrcall boundary should use native result storage in the compact SSA tier.");
+	memdelete(node_3d);
+}
+
 TEST_CASE("[Modules][GDScript] Compact SSA JIT promotes hot functions and consumes export profiles") {
 	GDScriptLanguage::get_singleton()->init();
 	GDScriptOptimizationProfile::clear();

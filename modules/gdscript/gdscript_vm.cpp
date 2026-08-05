@@ -1762,7 +1762,9 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 				GET_VARIANT_PTR(src, 1);
 
 				const Variant::Type type = Variant::Type(_code_ptr[ip + 3]);
-				VariantInternal::set_type(*dst, type);
+				if (type != Variant::TRANSFORM2D && type != Variant::AABB && type != Variant::BASIS && type != Variant::TRANSFORM3D && type != Variant::PROJECTION) {
+					VariantInternal::set_type(*dst, type);
+				}
 				switch (type) {
 					case Variant::VECTOR2:
 						*VariantInternal::get_vector2(dst) = *VariantInternal::get_vector2(src);
@@ -1772,6 +1774,13 @@ OPCODE_ASSIGN_PRIMITIVE(FLOAT, get_float);
 						break;
 					case Variant::COLOR:
 						*VariantInternal::get_color(dst) = *VariantInternal::get_color(src);
+						break;
+					case Variant::TRANSFORM2D:
+					case Variant::AABB:
+					case Variant::BASIS:
+					case Variant::TRANSFORM3D:
+					case Variant::PROJECTION:
+						*dst = *src;
 						break;
 					default:
 						GD_ERR_BREAK(true);

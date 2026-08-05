@@ -507,6 +507,14 @@ static bool is_direct_math_type(Variant::Type p_type) {
 	return p_type == Variant::VECTOR2 || p_type == Variant::VECTOR3 || p_type == Variant::COLOR;
 }
 
+static bool is_direct_large_value_type(Variant::Type p_type) {
+	return p_type == Variant::TRANSFORM2D || p_type == Variant::AABB || p_type == Variant::BASIS || p_type == Variant::TRANSFORM3D || p_type == Variant::PROJECTION;
+}
+
+static bool is_direct_native_value_type(Variant::Type p_type) {
+	return is_direct_math_type(p_type) || is_direct_large_value_type(p_type);
+}
+
 static int get_direct_math_component(Variant::Type p_type, const StringName &p_name) {
 	if (p_type == Variant::VECTOR2 || p_type == Variant::VECTOR3) {
 		if (p_name == SNAME("x")) {
@@ -536,6 +544,19 @@ static int get_direct_math_component(Variant::Type p_type, const StringName &p_n
 }
 
 static bool is_direct_math_operator(Variant::Operator p_operator, Variant::Type p_left_type, Variant::Type p_right_type, Variant::Type p_result_type) {
+	if (is_direct_large_value_type(p_left_type)) {
+		if (p_operator == Variant::OP_EQUAL || p_operator == Variant::OP_NOT_EQUAL) {
+			return p_right_type == p_left_type && p_result_type == Variant::BOOL;
+		}
+		if (p_operator == Variant::OP_MULTIPLY && p_result_type == p_left_type) {
+			if (p_left_type == Variant::PROJECTION) {
+				return p_right_type == Variant::PROJECTION;
+			}
+			return p_left_type != Variant::AABB && (p_right_type == p_left_type || p_right_type == Variant::INT || p_right_type == Variant::FLOAT);
+		}
+		return p_operator == Variant::OP_DIVIDE && p_left_type != Variant::AABB && p_left_type != Variant::PROJECTION && p_result_type == p_left_type && (p_right_type == Variant::INT || p_right_type == Variant::FLOAT);
+	}
+
 	const bool unary = p_operator == Variant::OP_NEGATE || p_operator == Variant::OP_POSITIVE;
 	if (unary) {
 		return is_direct_math_type(p_left_type) && p_right_type == Variant::NIL && p_result_type == p_left_type;
@@ -1223,7 +1244,7 @@ void GDScriptByteCodeGenerator::write_assign(const Address &p_target, const Addr
 		append(p_target);
 		append(p_source);
 	} else if (!target_is_dirty && HAS_BUILTIN_TYPE(p_target) && HAS_BUILTIN_TYPE(p_source) &&
-			p_target.type.builtin_type == p_source.type.builtin_type && is_direct_math_type(p_target.type.builtin_type)) {
+			p_target.type.builtin_type == p_source.type.builtin_type && is_direct_native_value_type(p_target.type.builtin_type)) {
 		append_opcode(GDScriptFunction::OPCODE_ASSIGN_MATH);
 		append(p_target);
 		append(p_source);
