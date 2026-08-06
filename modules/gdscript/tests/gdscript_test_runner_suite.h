@@ -634,6 +634,11 @@ struct Batch:
 struct Named:
 	var label: String
 
+struct GameplayState:
+	var screen_position: Vector2
+	var velocity: Vector3
+	var tint: Color
+
 func make_motion(position: Vector3, velocity: Vector3, lifetime: float) -> Motion:
 	return Motion(position, velocity, lifetime)
 
@@ -664,11 +669,27 @@ func box_motion(value: Motion) -> Variant:
 
 func named_roundtrip(value: Named) -> Named:
 	return value
+
+func make_gameplay_state(screen_position: Vector2, velocity: Vector3, tint: Color) -> GameplayState:
+	return GameplayState(screen_position, velocity, tint)
+
+func gameplay_metric(value: GameplayState, offset: Vector2, acceleration: Vector3, fade: float) -> float:
+	var copy: GameplayState = value
+	copy.screen_position = copy.screen_position + offset
+	copy.velocity = copy.velocity + acceleration
+	copy.tint = copy.tint * fade
+	return copy.screen_position.x + copy.velocity.y + copy.tint.a
+
+func choose_gameplay_state(left: GameplayState, right: GameplayState, choose_right: bool) -> GameplayState:
+	var selected: GameplayState = left
+	if choose_right:
+		selected = right
+	return selected
 )");
 	REQUIRE_MESSAGE(gdscript->reload() == OK, "The native user-struct test script should parse successfully.");
 
 	const HashMap<StringName, GDScriptFunction *> &functions = gdscript->get_member_functions();
-	for (const StringName &function_name : { SNAME("make_motion"), SNAME("update_motion"), SNAME("motion_equal"), SNAME("motion_position"), SNAME("motion_lifetime"), SNAME("make_batch"), SNAME("first_motion") }) {
+	for (const StringName &function_name : { SNAME("make_motion"), SNAME("update_motion"), SNAME("motion_equal"), SNAME("motion_position"), SNAME("motion_lifetime"), SNAME("make_batch"), SNAME("first_motion"), SNAME("make_gameplay_state"), SNAME("gameplay_metric"), SNAME("choose_gameplay_state") }) {
 		const GDScriptFunction *const *function = functions.getptr(function_name);
 		REQUIRE(function != nullptr);
 		CHECK_MESSAGE((*function)->has_baseline_jit(), vformat("Function '%s' should keep its trivial struct values in a native frame.", function_name));
@@ -708,6 +729,40 @@ func named_roundtrip(value: Named) -> Named:
 	const Variant boxed = instance->call(SNAME("box_motion"), updated);
 	REQUIRE(boxed.get_type() == Variant::STRUCT);
 	CHECK(bool(instance->call(SNAME("motion_equal"), boxed, updated)));
+
+	const GDScriptFunction *const *make_gameplay_state = functions.getptr(SNAME("make_gameplay_state"));
+	const GDScriptFunction *const *choose_gameplay_state = functions.getptr(SNAME("choose_gameplay_state"));
+	const GDScriptFunction *const *motion_equal_function = functions.getptr(SNAME("motion_equal"));
+	REQUIRE(make_gameplay_state != nullptr);
+	REQUIRE(choose_gameplay_state != nullptr);
+	REQUIRE(motion_equal_function != nullptr);
+	Variant gameplay_state;
+	for (uint32_t i = 0; i < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		gameplay_state = instance->call(SNAME("make_gameplay_state"), Vector2(1.0, 2.0), Vector3(3.0, 4.0, 5.0), Color(0.2, 0.4, 0.6, 0.8));
+	}
+	REQUIRE(gameplay_state.get_type() == Variant::STRUCT);
+	CHECK_MESSAGE((*make_gameplay_state)->has_optimizing_jit(), "Struct construction and typed returns should remain in the compact SSA tier.");
+	const GDScriptFunction *const *gameplay_metric = functions.getptr(SNAME("gameplay_metric"));
+	REQUIRE(gameplay_metric != nullptr);
+	CHECK_FALSE((*gameplay_metric)->has_optimizing_jit());
+	for (uint32_t i = 0; i < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		const double metric = instance->call(SNAME("gameplay_metric"), gameplay_state, Vector2(0.5, -0.5), Vector3(1.0, 2.0, 3.0), 0.5);
+		CHECK(Math::is_equal_approx(metric, 7.9));
+	}
+	CHECK_MESSAGE((*gameplay_metric)->has_optimizing_jit(), "Struct field operations should remain in the compact SSA tier.");
+	CHECK_MESSAGE((*gameplay_metric)->get_optimizing_jit_scalar_replaced_math_value_count() >= 3, "Vector2, Vector3, and Color struct fields should be split into scalar SSA components.");
+	CHECK_MESSAGE((*gameplay_metric)->get_optimizing_jit_eliminated_node_count() >= 3, "Field forwarding should eliminate temporary gameplay-struct updates that do not escape.");
+
+	for (uint32_t i = 0; i < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		const Variant selected = instance->call(SNAME("choose_gameplay_state"), gameplay_state, gameplay_state, true);
+		CHECK(selected.get_type() == Variant::STRUCT);
+	}
+	CHECK_MESSAGE((*choose_gameplay_state)->has_optimizing_jit(), "Struct values should preserve their aligned native layout across SSA phis.");
+
+	for (uint32_t i = 0; i < GDScriptBaselineJIT::OPTIMIZING_CALL_THRESHOLD; i++) {
+		CHECK(bool(instance->call(SNAME("motion_equal"), motion, motion)));
+	}
+	CHECK_MESSAGE((*motion_equal_function)->has_optimizing_jit(), "Struct equality should remain in the compact SSA tier.");
 }
 
 TEST_CASE("[Modules][GDScript] Compact SSA JIT promotes hot functions and consumes export profiles") {

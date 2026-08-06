@@ -340,6 +340,11 @@ public:
 		VALUE_MATH_UPDATE,
 		VALUE_MATH_SET_COMPONENT,
 		VALUE_MATH_LENGTH,
+		VALUE_STRUCT_CONSTRUCT,
+		VALUE_STRUCT_FIELD,
+		VALUE_STRUCT_FIELD_COMPONENT,
+		VALUE_STRUCT_UPDATE,
+		VALUE_STRUCT_EQUAL,
 		VALUE_PTRCALL_RESULT,
 	};
 
@@ -353,6 +358,8 @@ public:
 		int replacement = -1;
 		int frame_offset = -1;
 		int component_index = -1;
+		int struct_field_index = -1;
+		Ref<StructLayout> struct_layout;
 		Vector<int> inputs;
 		// Math aggregates have no frame slot in the optimizing tier. Their
 		// independently live scalar values are tracked here instead.
@@ -388,7 +395,9 @@ private:
 	const Variant *constants = nullptr;
 	int constant_count = 0;
 	const Vector<Variant::Type> &stack_types;
+	const Vector<Ref<StructLayout>> &stack_struct_layouts;
 	int max_ptrcall_argument_count = 0;
+	int max_materialized_value_count = 2;
 	Vector<Value> values;
 	Vector<Instruction> instructions;
 	Vector<Block> blocks;
@@ -419,14 +428,21 @@ private:
 			case GDScriptFunction::OPCODE_ASSIGN_BOOL:
 			case GDScriptFunction::OPCODE_ASSIGN_INT:
 			case GDScriptFunction::OPCODE_ASSIGN_FLOAT:
+			case GDScriptFunction::OPCODE_ASSIGN_STRUCT:
 			case GDScriptFunction::OPCODE_JUMP_IF_BOOL:
 			case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
+			case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
 				return 3;
 			case GDScriptFunction::OPCODE_ASSIGN_MATH:
 			case GDScriptFunction::OPCODE_GET_MATH_COMPONENT:
 			case GDScriptFunction::OPCODE_SET_MATH_COMPONENT:
 			case GDScriptFunction::OPCODE_MATH_LENGTH:
+			case GDScriptFunction::OPCODE_GET_STRUCT_FIELD:
+			case GDScriptFunction::OPCODE_SET_STRUCT_FIELD:
+			case GDScriptFunction::OPCODE_EQUAL_STRUCT:
 				return 4;
+			case GDScriptFunction::OPCODE_CONSTRUCT_STRUCT:
+				return code[p_ip + 1] + 3;
 			case GDScriptFunction::OPCODE_OPERATOR_INT:
 			case GDScriptFunction::OPCODE_OPERATOR_FLOAT:
 				return 5;
@@ -447,12 +463,13 @@ private:
 		}
 	}
 
-	int add_value(ValueKind p_kind, Variant::Type p_type, int p_block = -1, int p_ip = -1) {
+	int add_value(ValueKind p_kind, Variant::Type p_type, int p_block = -1, int p_ip = -1, const Ref<StructLayout> &p_struct_layout = Ref<StructLayout>()) {
 		Value value;
 		value.kind = p_kind;
 		value.type = p_type;
 		value.block = p_block;
 		value.ip = p_ip;
+		value.struct_layout = p_struct_layout;
 		values.push_back(value);
 		return values.size() - 1;
 	}
@@ -476,6 +493,10 @@ private:
 		DEV_ASSERT(p_value >= 0 && is_unboxed_math_type(values[p_value].type));
 		DEV_ASSERT(p_component >= 0 && p_component < values[p_value].components.size());
 		return resolve(values[p_value].components[p_component]);
+	}
+
+	Ref<StructLayout> get_stack_struct_layout(int p_slot) const {
+		return p_slot >= 0 && p_slot < stack_struct_layouts.size() ? stack_struct_layouts[p_slot] : Ref<StructLayout>();
 	}
 
 	int resolve(int p_value) const {
@@ -572,6 +593,45 @@ private:
 					const int destination = code[ip + 1] & GDScriptFunction::ADDR_MASK;
 					environment.write[destination] = inputs[0];
 				} break;
+				case GDScriptFunction::OPCODE_ASSIGN_STRUCT: {
+					inputs.push_back(address_value(code[ip + 2], environment));
+					const int destination = code[ip + 1] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = inputs[0];
+				} break;
+				case GDScriptFunction::OPCODE_CONSTRUCT_STRUCT: {
+					const int argument_count = code[ip + 1] - 2;
+					for (int i = 0; i < argument_count; i++) {
+						inputs.push_back(address_value(code[ip + i + 2], environment));
+					}
+					changed = set_inputs(instruction.output, inputs) || changed;
+					const int destination = code[ip + argument_count + 2] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
+				case GDScriptFunction::OPCODE_GET_STRUCT_FIELD: {
+					inputs.push_back(address_value(code[ip + 1], environment));
+					changed = set_inputs(instruction.output, inputs) || changed;
+					if (is_unboxed_math_type(values[instruction.output].type)) {
+						for (int component : values[instruction.output].components) {
+							changed = set_inputs(component, inputs) || changed;
+						}
+					}
+					const int destination = code[ip + 2] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
+				case GDScriptFunction::OPCODE_SET_STRUCT_FIELD: {
+					inputs.push_back(address_value(code[ip + 1], environment));
+					inputs.push_back(address_value(code[ip + 2], environment));
+					changed = set_inputs(instruction.output, inputs) || changed;
+					const int destination = code[ip + 1] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
+				case GDScriptFunction::OPCODE_EQUAL_STRUCT: {
+					inputs.push_back(address_value(code[ip + 1], environment));
+					inputs.push_back(address_value(code[ip + 2], environment));
+					changed = set_inputs(instruction.output, inputs) || changed;
+					const int destination = code[ip + 3] & GDScriptFunction::ADDR_MASK;
+					environment.write[destination] = instruction.output;
+				} break;
 				case GDScriptFunction::OPCODE_OPERATOR_INT:
 				case GDScriptFunction::OPCODE_OPERATOR_FLOAT:
 				case GDScriptFunction::OPCODE_OPERATOR_MATH: {
@@ -635,6 +695,7 @@ private:
 				case GDScriptFunction::OPCODE_JUMP_IF_BOOL:
 				case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
 				case GDScriptFunction::OPCODE_RETURN:
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
 					inputs.push_back(address_value(code[ip + 1], environment));
 					break;
 				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
@@ -703,7 +764,7 @@ private:
 			}
 			if ((differs || block.phis[slot] >= 0) && incoming >= 0) {
 				if (block.phis[slot] < 0) {
-					block.phis.write[slot] = add_value(VALUE_PHI, stack_types[slot], p_block);
+					block.phis.write[slot] = add_value(VALUE_PHI, stack_types[slot], p_block, -1, get_stack_struct_layout(slot));
 					if (is_unboxed_math_type(stack_types[slot])) {
 						add_math_components(block.phis[slot], VALUE_PHI);
 					}
@@ -886,6 +947,45 @@ private:
 		return true;
 	}
 
+	void forward_struct_fields() {
+		for (int i = 0; i < values.size(); i++) {
+			Value &field_value = values.write[i];
+			if (field_value.kind != VALUE_STRUCT_FIELD || field_value.inputs.size() != 1) {
+				continue;
+			}
+
+			int source = resolve(field_value.inputs[0]);
+			int forwarded = -1;
+			while (source >= 0) {
+				const Value &source_value = values[source];
+				if (source_value.kind == VALUE_STRUCT_UPDATE && source_value.inputs.size() == 2) {
+					if (source_value.struct_field_index == field_value.struct_field_index) {
+						forwarded = resolve(source_value.inputs[1]);
+						break;
+					}
+					source = resolve(source_value.inputs[0]);
+					continue;
+				}
+				if (source_value.kind == VALUE_STRUCT_CONSTRUCT && source_value.inputs.size() == source_value.struct_layout->get_field_count()) {
+					forwarded = resolve(source_value.inputs[field_value.struct_field_index]);
+				}
+				break;
+			}
+
+			if (forwarded >= 0) {
+				field_value.replacement = forwarded;
+				eliminated_node_count++;
+				continue;
+			}
+			if (source >= 0 && source != resolve(field_value.inputs[0])) {
+				field_value.inputs.write[0] = source;
+				for (int component : field_value.components) {
+					values.write[component].inputs.write[0] = source;
+				}
+			}
+		}
+	}
+
 	void optimize_values() {
 		// Local value numbering removes repeated pure expressions without
 		// requiring global alias or invalidation guards.
@@ -1002,6 +1102,7 @@ private:
 				case GDScriptFunction::OPCODE_JUMP_IF_BOOL:
 				case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
 				case GDScriptFunction::OPCODE_RETURN:
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
 				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
 				case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
 				case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN:
@@ -1015,7 +1116,7 @@ private:
 			}
 		}
 		for (Value &value : values) {
-			if ((value.kind == VALUE_INT_OPERATOR || value.kind == VALUE_FLOAT_OPERATOR || value.kind == VALUE_MATH_OPERATOR || value.kind == VALUE_MATH_COMPONENT || value.kind == VALUE_MATH_EXTRACT || value.kind == VALUE_MATH_SET_COMPONENT || value.kind == VALUE_MATH_LENGTH) && value.replacement < 0 && !value.is_constant && !value.live) {
+			if ((value.kind == VALUE_INT_OPERATOR || value.kind == VALUE_FLOAT_OPERATOR || value.kind == VALUE_MATH_OPERATOR || value.kind == VALUE_MATH_COMPONENT || value.kind == VALUE_MATH_EXTRACT || value.kind == VALUE_MATH_SET_COMPONENT || value.kind == VALUE_MATH_LENGTH || value.kind == VALUE_STRUCT_CONSTRUCT || value.kind == VALUE_STRUCT_FIELD || value.kind == VALUE_STRUCT_FIELD_COMPONENT || value.kind == VALUE_STRUCT_UPDATE || value.kind == VALUE_STRUCT_EQUAL) && value.replacement < 0 && !value.is_constant && !value.live) {
 				eliminated_node_count++;
 			}
 		}
@@ -1029,14 +1130,14 @@ private:
 		if (p_value.kind == VALUE_MATH_COMPONENT || p_value.kind == VALUE_MATH_SET_COMPONENT || (p_value.kind == VALUE_PHI && is_unboxed_math_type(p_value.type) && p_value.components.is_empty())) {
 			return get_math_component_size(p_value.type);
 		}
-		return get_unboxed_value_size(p_value.type);
+		return get_unboxed_native_size(p_value.type, p_value.struct_layout);
 	}
 
 	static int get_value_alignment(const Value &p_value) {
 		if (p_value.kind == VALUE_MATH_COMPONENT || p_value.kind == VALUE_MATH_SET_COMPONENT || (p_value.kind == VALUE_PHI && is_unboxed_math_type(p_value.type) && p_value.components.is_empty())) {
 			return get_math_component_size(p_value.type);
 		}
-		return get_unboxed_value_alignment(p_value.type);
+		return get_unboxed_native_alignment(p_value.type, p_value.struct_layout);
 	}
 
 	void allocate_frame() {
@@ -1075,7 +1176,7 @@ private:
 		offset += max_phi_copies;
 		offset = align_native_offset(offset, NATIVE_VALUE_ALIGNMENT);
 		ptrcall_values_offset = offset;
-		offset += MAX(max_ptrcall_argument_count, 2) * NATIVE_VALUE_STRIDE;
+		offset += MAX(max_ptrcall_argument_count, max_materialized_value_count) * NATIVE_VALUE_STRIDE;
 		ptrcall_arguments_offset = offset;
 		offset += max_ptrcall_argument_count * sizeof(void *);
 		ptrcall_return_offset = offset;
@@ -1084,8 +1185,8 @@ private:
 	}
 
 public:
-	CompactSSAPlan(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, const Vector<Variant::Type> &p_stack_types, int p_max_ptrcall_argument_count) :
-			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constants(p_constants), constant_count(p_constant_count), stack_types(p_stack_types), max_ptrcall_argument_count(p_max_ptrcall_argument_count) {}
+	CompactSSAPlan(const int *p_code, int p_code_size, int p_stack_size, const Variant *p_constants, int p_constant_count, const Vector<Variant::Type> &p_stack_types, const Vector<Ref<StructLayout>> &p_stack_struct_layouts, int p_max_ptrcall_argument_count) :
+			code(p_code), code_size(p_code_size), stack_size(p_stack_size), constants(p_constants), constant_count(p_constant_count), stack_types(p_stack_types), stack_struct_layouts(p_stack_struct_layouts), max_ptrcall_argument_count(p_max_ptrcall_argument_count) {}
 
 	bool build() {
 		Vector<uint8_t> starts;
@@ -1116,6 +1217,7 @@ public:
 					if (next < code_size) starts.write[next] = 1;
 					break;
 				case GDScriptFunction::OPCODE_RETURN:
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
 				case GDScriptFunction::OPCODE_END:
 					if (next < code_size) starts.write[next] = 1;
 					break;
@@ -1151,7 +1253,7 @@ public:
 		initial_values.fill(-1);
 		for (int slot = 0; slot < stack_size; slot++) {
 			if (stack_types[slot] != Variant::NIL) {
-				initial_values.write[slot] = add_value(VALUE_INPUT, stack_types[slot]);
+				initial_values.write[slot] = add_value(VALUE_INPUT, stack_types[slot], -1, -1, get_stack_struct_layout(slot));
 				if (is_unboxed_math_type(stack_types[slot])) {
 					add_math_components(initial_values[slot], VALUE_MATH_COMPONENT);
 				}
@@ -1188,10 +1290,28 @@ public:
 				} else if (instruction.opcode == GDScriptFunction::OPCODE_MATH_LENGTH) {
 					const int destination = code[cursor + 2] & GDScriptFunction::ADDR_MASK;
 					instruction.output = add_value(VALUE_MATH_LENGTH, stack_types[destination], block_index, cursor);
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_CONSTRUCT_STRUCT) {
+					const int argument_count = code[cursor + 1] - 2;
+					max_materialized_value_count = MAX(max_materialized_value_count, argument_count);
+					const int destination = code[cursor + argument_count + 2] & GDScriptFunction::ADDR_MASK;
+					instruction.output = add_value(VALUE_STRUCT_CONSTRUCT, Variant::STRUCT, block_index, cursor, get_stack_struct_layout(destination));
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_GET_STRUCT_FIELD) {
+					const int destination = code[cursor + 2] & GDScriptFunction::ADDR_MASK;
+					instruction.output = add_value(VALUE_STRUCT_FIELD, stack_types[destination], block_index, cursor, get_stack_struct_layout(destination));
+					values.write[instruction.output].struct_field_index = code[cursor + 3];
+					if (is_unboxed_math_type(stack_types[destination])) {
+						add_math_components(instruction.output, VALUE_STRUCT_FIELD_COMPONENT);
+					}
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_SET_STRUCT_FIELD) {
+					const int destination = code[cursor + 1] & GDScriptFunction::ADDR_MASK;
+					instruction.output = add_value(VALUE_STRUCT_UPDATE, Variant::STRUCT, block_index, cursor, get_stack_struct_layout(destination));
+					values.write[instruction.output].struct_field_index = code[cursor + 3];
+				} else if (instruction.opcode == GDScriptFunction::OPCODE_EQUAL_STRUCT) {
+					instruction.output = add_value(VALUE_STRUCT_EQUAL, Variant::BOOL, block_index, cursor);
 				} else if (instruction.opcode == GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN || instruction.opcode == GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN) {
 					const int instruction_argument_count = code[cursor + 1];
 					const int destination = code[cursor + 1 + instruction_argument_count] & GDScriptFunction::ADDR_MASK;
-					instruction.output = add_value(VALUE_PTRCALL_RESULT, stack_types[destination], block_index, cursor);
+					instruction.output = add_value(VALUE_PTRCALL_RESULT, stack_types[destination], block_index, cursor, get_stack_struct_layout(destination));
 					if (is_unboxed_math_type(stack_types[destination])) {
 						add_math_components(instruction.output, VALUE_MATH_COMPONENT);
 					}
@@ -1225,6 +1345,7 @@ public:
 					add_successor(code[last_ip + 1]);
 					break;
 				case GDScriptFunction::OPCODE_RETURN:
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
 				case GDScriptFunction::OPCODE_END:
 					break;
 				default:
@@ -1254,6 +1375,7 @@ public:
 		}
 
 		finish_phi_inputs();
+		forward_struct_fields();
 		optimize_values();
 		find_live_values();
 		allocate_frame();
@@ -2440,6 +2562,14 @@ class BaselineCompiler {
 		return ssa_plan->get_values()[p_value];
 	}
 
+	static int get_ssa_value_size(const CompactSSAPlan::Value &p_value) {
+		return get_unboxed_native_size(p_value.type, p_value.struct_layout);
+	}
+
+	static int get_ssa_value_alignment(const CompactSSAPlan::Value &p_value) {
+		return get_unboxed_native_alignment(p_value.type, p_value.struct_layout);
+	}
+
 	void emit_ssa_load_raw(int p_value, int p_register) {
 		const CompactSSAPlan::Value &value = get_ssa_value(p_value);
 		if (value.is_constant) {
@@ -2540,18 +2670,26 @@ class BaselineCompiler {
 			if (argument_index >= 0 && argument_index < argument_types.size()) {
 				if (typed_entry) {
 					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), argument_index * sizeof(void *));
-					emit_copy_memory(SLJIT_SP, value.frame_offset, SLJIT_R0, 0, get_unboxed_value_size(value.type));
+					emit_copy_memory(SLJIT_SP, value.frame_offset, SLJIT_R0, 0, get_ssa_value_size(value));
 				} else {
-					emit_load_base(slot, SLJIT_R0);
-					if (is_unboxed_large_value_type(value.type)) {
-						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), get_address_offset(slot, variant_data_offset));
-						emit_copy_memory(SLJIT_SP, value.frame_offset, SLJIT_R0, 0, get_unboxed_value_size(value.type));
+					if (value.type == Variant::STRUCT) {
+						emit_zero_memory(SLJIT_SP, value.frame_offset, get_ssa_value_size(value));
+						emit_variant_pointer(slot, SLJIT_R0);
+						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(value.struct_layout.ptr()));
+						sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_SP, 0, SLJIT_IMM, value.frame_offset);
+						sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_unbox_struct_variant));
 					} else {
-						emit_copy_memory(SLJIT_SP, value.frame_offset, SLJIT_R0, get_address_offset(slot, variant_data_offset), get_unboxed_value_size(value.type));
+						emit_load_base(slot, SLJIT_R0);
+						if (is_unboxed_large_value_type(value.type)) {
+							sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), get_address_offset(slot, variant_data_offset));
+							emit_copy_memory(SLJIT_SP, value.frame_offset, SLJIT_R0, 0, get_unboxed_value_size(value.type));
+						} else {
+							emit_copy_memory(SLJIT_SP, value.frame_offset, SLJIT_R0, get_address_offset(slot, variant_data_offset), get_unboxed_value_size(value.type));
+						}
 					}
 				}
 			} else {
-				emit_zero_memory(SLJIT_SP, value.frame_offset, get_unboxed_value_size(value.type));
+				emit_zero_memory(SLJIT_SP, value.frame_offset, get_ssa_value_size(value));
 			}
 		}
 	}
@@ -2731,6 +2869,77 @@ class BaselineCompiler {
 		sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP), value.frame_offset, SLJIT_FR0, 0);
 	}
 
+	void emit_ssa_struct_construct(const CompactSSAPlan::Instruction &p_instruction) {
+		const CompactSSAPlan::Value &output = get_ssa_value(p_instruction.output);
+		if (!output.live || output.frame_offset < 0 || output.struct_layout.is_null()) {
+			return;
+		}
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(output.struct_layout.ptr()));
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_SP, 0, SLJIT_IMM, output.frame_offset);
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_construct_struct));
+
+		for (int i = 0; i < p_instruction.inputs.size(); i++) {
+			const StructLayout::Field &field = output.struct_layout->get_field(i);
+			emit_ssa_pointer(p_instruction.inputs[i], i, SLJIT_R0);
+			emit_copy_memory(SLJIT_SP, output.frame_offset + field.native_offset, SLJIT_R0, 0, field.native_size);
+		}
+	}
+
+	void emit_ssa_struct_field(const CompactSSAPlan::Instruction &p_instruction, bool p_set) {
+		const int output_index = ssa_plan->get_resolved_value(p_instruction.output);
+		if (output_index != p_instruction.output) {
+			return;
+		}
+		const CompactSSAPlan::Value &output = ssa_plan->get_values()[output_index];
+		if (p_set) {
+			if (!output.live || output.frame_offset < 0 || output.struct_layout.is_null()) {
+				return;
+			}
+			const StructLayout::Field &field = output.struct_layout->get_field(output.struct_field_index);
+			emit_ssa_pointer(output.inputs[0], 0, SLJIT_R0);
+			emit_copy_memory(SLJIT_SP, output.frame_offset, SLJIT_R0, 0, get_ssa_value_size(output));
+			emit_ssa_pointer(output.inputs[1], 1, SLJIT_R0);
+			emit_copy_memory(SLJIT_SP, output.frame_offset + field.native_offset, SLJIT_R0, 0, field.native_size);
+			return;
+		}
+
+		const CompactSSAPlan::Value &source = get_ssa_value(output.inputs[0]);
+		DEV_ASSERT(source.type == Variant::STRUCT && source.struct_layout.is_valid());
+		const StructLayout::Field &field = source.struct_layout->get_field(output.struct_field_index);
+		if (is_unboxed_math_type(output.type) && !output.components.is_empty()) {
+			emit_ssa_pointer(output.inputs[0], 0, SLJIT_R0);
+			const int move_op = math_uses_double_components(output.type) ? SLJIT_MOV_F64 : SLJIT_MOV_F32;
+			for (int component = 0; component < output.components.size(); component++) {
+				const CompactSSAPlan::Value &component_value = get_ssa_value(output.components[component]);
+				if (!component_value.live || component_value.is_constant || component_value.frame_offset < 0) {
+					continue;
+				}
+				sljit_emit_fop1(compiler, move_op, SLJIT_FR0, 0, SLJIT_MEM1(SLJIT_R0), field.native_offset + component * get_math_component_size(output.type));
+				emit_ssa_store_math_component(component_value, SLJIT_FR0);
+			}
+			return;
+		}
+		if (!output.live || output.frame_offset < 0) {
+			return;
+		}
+		emit_ssa_pointer(output.inputs[0], 0, SLJIT_R0);
+		emit_copy_memory(SLJIT_SP, output.frame_offset, SLJIT_R0, field.native_offset, field.native_size);
+	}
+
+	void emit_ssa_struct_equal(const CompactSSAPlan::Instruction &p_instruction) {
+		const CompactSSAPlan::Value &output = get_ssa_value(p_instruction.output);
+		if (!output.live || output.frame_offset < 0) {
+			return;
+		}
+		const CompactSSAPlan::Value &left = get_ssa_value(output.inputs[0]);
+		DEV_ASSERT(left.type == Variant::STRUCT && left.struct_layout.is_valid());
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(left.struct_layout.ptr()));
+		emit_ssa_pointer(output.inputs[0], 0, SLJIT_R1);
+		emit_ssa_pointer(output.inputs[1], 1, SLJIT_R2);
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_equal_struct));
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_SP), output.frame_offset, SLJIT_R0, 0);
+	}
+
 	void emit_ssa_pointer(int p_value, int p_argument, int p_register) {
 		const CompactSSAPlan::Value &value = get_ssa_value(p_value);
 		if (value.kind == CompactSSAPlan::VALUE_CONSTANT && value.constant_index >= 0) {
@@ -2844,10 +3053,10 @@ class BaselineCompiler {
 			if (!destination.live || destination.frame_offset < 0) {
 				continue;
 			}
-			copy_offset = align_native_offset(copy_offset, MAX(NATIVE_VALUE_ALIGNMENT, get_unboxed_value_alignment(destination.type)));
+			copy_offset = align_native_offset(copy_offset, get_ssa_value_alignment(destination));
 			emit_ssa_pointer(ssa_plan->get_values()[phi].inputs[predecessor_input], 0, SLJIT_R0);
-			emit_copy_memory(SLJIT_SP, ssa_plan->get_phi_scratch_offset() + copy_offset, SLJIT_R0, 0, get_unboxed_value_size(destination.type));
-			copy_offset += get_unboxed_value_size(destination.type);
+			emit_copy_memory(SLJIT_SP, ssa_plan->get_phi_scratch_offset() + copy_offset, SLJIT_R0, 0, get_ssa_value_size(destination));
+			copy_offset += get_ssa_value_size(destination);
 		}
 		copy_offset = 0;
 		for (int phi : target.phis) {
@@ -2873,9 +3082,9 @@ class BaselineCompiler {
 			if (!destination.live || destination.frame_offset < 0) {
 				continue;
 			}
-			copy_offset = align_native_offset(copy_offset, MAX(NATIVE_VALUE_ALIGNMENT, get_unboxed_value_alignment(destination.type)));
-			emit_copy_memory(SLJIT_SP, destination.frame_offset, SLJIT_SP, ssa_plan->get_phi_scratch_offset() + copy_offset, get_unboxed_value_size(destination.type));
-			copy_offset += get_unboxed_value_size(destination.type);
+			copy_offset = align_native_offset(copy_offset, get_ssa_value_alignment(destination));
+			emit_copy_memory(SLJIT_SP, destination.frame_offset, SLJIT_SP, ssa_plan->get_phi_scratch_offset() + copy_offset, get_ssa_value_size(destination));
+			copy_offset += get_ssa_value_size(destination);
 		}
 	}
 
@@ -2936,7 +3145,7 @@ class BaselineCompiler {
 		const CompactSSAPlan::Value &value = get_ssa_value(p_instruction.inputs[0]);
 		if (typed_entry) {
 			emit_ssa_pointer(p_instruction.inputs[0], 0, SLJIT_R0);
-			emit_copy_memory(SLJIT_S2, 0, SLJIT_R0, 0, get_unboxed_value_size(value.type));
+			emit_copy_memory(SLJIT_S2, 0, SLJIT_R0, 0, get_ssa_value_size(value));
 			sljit_emit_return_void(compiler);
 			return;
 		}
@@ -2950,6 +3159,15 @@ class BaselineCompiler {
 
 		const int address = code[p_instruction.ip + 1];
 		DEV_ASSERT(((address & GDScriptFunction::ADDR_TYPE_MASK) >> GDScriptFunction::ADDR_BITS) == GDScriptFunction::ADDR_TYPE_STACK);
+		if (value.type == Variant::STRUCT) {
+			emit_variant_pointer(address, SLJIT_R0);
+			emit_ssa_pointer(p_instruction.inputs[0], 0, SLJIT_R1);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(value.struct_layout.ptr()));
+			sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, P), SLJIT_IMM, SLJIT_FUNC_ADDR(invoke_store_struct_variant));
+			emit_variant_pointer(address, SLJIT_R0);
+			sljit_emit_return(compiler, SLJIT_MOV, SLJIT_R0, 0);
+			return;
+		}
 		if (is_unboxed_large_value_type(value.type)) {
 			emit_variant_pointer(address, SLJIT_R0);
 			emit_ssa_pointer(p_instruction.inputs[0], 0, SLJIT_R1);
@@ -2994,6 +3212,18 @@ class BaselineCompiler {
 						break;
 					case GDScriptFunction::OPCODE_MATH_LENGTH:
 						emit_ssa_math_length(instruction);
+						break;
+					case GDScriptFunction::OPCODE_CONSTRUCT_STRUCT:
+						emit_ssa_struct_construct(instruction);
+						break;
+					case GDScriptFunction::OPCODE_GET_STRUCT_FIELD:
+						emit_ssa_struct_field(instruction, false);
+						break;
+					case GDScriptFunction::OPCODE_SET_STRUCT_FIELD:
+						emit_ssa_struct_field(instruction, true);
+						break;
+					case GDScriptFunction::OPCODE_EQUAL_STRUCT:
+						emit_ssa_struct_equal(instruction);
 						break;
 					case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
 					case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
@@ -3047,6 +3277,7 @@ class BaselineCompiler {
 					emit_ssa_jump(block_index, ssa_plan->get_block_at_ip(code[terminator.ip + 1]));
 					break;
 				case GDScriptFunction::OPCODE_RETURN:
+				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
 					emit_ssa_return(terminator);
 					break;
 				case GDScriptFunction::OPCODE_END:
@@ -3104,7 +3335,7 @@ public:
 			return nullptr;
 		}
 		if (optimizing) {
-			ssa_plan = memnew(CompactSSAPlan(code, code_size, stack_size, constants, constant_count, stack_slot_types, max_ptrcall_argument_count));
+			ssa_plan = memnew(CompactSSAPlan(code, code_size, stack_size, constants, constant_count, stack_slot_types, stack_slot_struct_layouts, max_ptrcall_argument_count));
 			if (!ssa_plan->build()) {
 				memdelete(ssa_plan);
 				ssa_plan = nullptr;
