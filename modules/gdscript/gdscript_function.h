@@ -43,6 +43,10 @@
 
 class GDScriptInstance;
 class GDScript;
+class GDScriptCompiledModule;
+namespace GDScriptCompiledModuleImplementation {
+class Internals;
+}
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 class GDScriptBaselineJIT;
 #endif
@@ -416,6 +420,8 @@ private:
 	friend class GDScript;
 	friend class GDScriptCompiler;
 	friend class GDScriptByteCodeGenerator;
+	friend class GDScriptCompiledModule;
+	friend class GDScriptCompiledModuleImplementation::Internals;
 	friend class GDScriptLanguage;
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 	friend class GDScriptBaselineJIT;

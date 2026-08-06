@@ -30,6 +30,8 @@
 
 #include "gdscript_cache.h"
 
+#include "gdscript_compiled_module.h"
+
 #include "gdscript.h"
 #include "gdscript_analyzer.h"
 #include "gdscript_compiler.h"
@@ -82,8 +84,13 @@ Error GDScriptParserRef::raise_status(Status p_new_status) {
 				get_parser()->clear();
 				status = PARSED;
 				String remapped_path = ResourceLoader::path_remap(path);
-				if (remapped_path.has_extension("gdc")) {
-					Vector<uint8_t> tokens = GDScriptCache::get_binary_tokens(remapped_path);
+				if (remapped_path.has_extension("gdc") || remapped_path.has_extension("gdm")) {
+					Vector<uint8_t> tokens;
+					if (remapped_path.has_extension("gdm")) {
+						GDScriptCompiledModule::extract_fallback(GDScriptCache::get_binary_tokens(remapped_path), tokens);
+					} else {
+						tokens = GDScriptCache::get_binary_tokens(remapped_path);
+					}
 					source_hash = hash_djb2_buffer(tokens.ptr(), tokens.size());
 					result = get_parser()->parse_binary(tokens, path);
 				} else {
@@ -320,14 +327,32 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 	script.instantiate();
 
 	script->set_path_cache(p_path);
-	if (remapped_path.has_extension("gdc")) {
+	if (remapped_path.has_extension("gdc") || remapped_path.has_extension("gdm")) {
 		Vector<uint8_t> buffer = get_binary_tokens(remapped_path);
 		if (buffer.is_empty()) {
 			r_error = ERR_FILE_CANT_READ;
 		}
-		script->set_binary_tokens_source(buffer);
+		if (remapped_path.has_extension("gdm")) {
+			Vector<uint8_t> fallback_tokens;
+			if (GDScriptCompiledModule::extract_fallback(buffer, fallback_tokens) != OK) {
+				r_error = ERR_FILE_CORRUPT;
+				return Ref<GDScript>();
+			}
+			script->set_binary_tokens_source(fallback_tokens);
+			script->set_compiled_module_source(buffer);
+		} else {
+			script->set_binary_tokens_source(buffer);
+		}
 	} else {
 		r_error = script->load_source_code(remapped_path);
+#ifdef TOOLS_ENABLED
+		if (r_error == OK) {
+			Vector<uint8_t> cached_module;
+			if (GDScriptCompiledModule::load_editor_cache(p_path, script->get_source_code(), cached_module) == OK) {
+				script->set_compiled_module_source(cached_module);
+			}
+		}
+#endif
 	}
 
 	if (r_error) {
@@ -371,18 +396,35 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 	const String remapped_path = ResourceLoader::path_remap(p_path);
 
 	if (p_update_from_disk) {
-		if (remapped_path.has_extension("gdc")) {
+		if (remapped_path.has_extension("gdc") || remapped_path.has_extension("gdm")) {
 			Vector<uint8_t> buffer = get_binary_tokens(remapped_path);
 			if (buffer.is_empty()) {
 				r_error = ERR_FILE_CANT_READ;
 				goto finish;
 			}
-			script->set_binary_tokens_source(buffer);
+			if (remapped_path.has_extension("gdm")) {
+				Vector<uint8_t> fallback_tokens;
+				if (GDScriptCompiledModule::extract_fallback(buffer, fallback_tokens) != OK) {
+					r_error = ERR_FILE_CORRUPT;
+					goto finish;
+				}
+				script->set_binary_tokens_source(fallback_tokens);
+				script->set_compiled_module_source(buffer);
+			} else {
+				script->set_binary_tokens_source(buffer);
+			}
 		} else {
+			script->set_binary_tokens_source(Vector<uint8_t>());
 			r_error = script->load_source_code(remapped_path);
 			if (r_error) {
 				goto finish;
 			}
+#ifdef TOOLS_ENABLED
+			Vector<uint8_t> cached_module;
+			if (GDScriptCompiledModule::load_editor_cache(p_path, script->get_source_code(), cached_module) == OK) {
+				script->set_compiled_module_source(cached_module);
+			}
+#endif
 		}
 	}
 

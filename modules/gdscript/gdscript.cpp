@@ -33,6 +33,7 @@
 #include "gdscript_analyzer.h"
 #include "gdscript_cache.h"
 #include "gdscript_compiler.h"
+#include "gdscript_compiled_module.h"
 #include "gdscript_parser.h"
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 #include "gdscript_baseline_jit.h"
@@ -453,6 +454,8 @@ void GDScript::set_source_code(const String &p_code) {
 		return;
 	}
 	source = p_code;
+	binary_tokens.clear();
+	compiled_module.clear();
 #ifdef TOOLS_ENABLED
 	source_changed_cache = true;
 #endif
@@ -872,6 +875,17 @@ Error GDScript::reload(bool p_keep_state) {
 		}
 	}
 
+	// Compiled modules are installed only after the regular front end has
+	// produced the complete class and lambda graph. This first format revision
+	// uses that graph as a verification oracle and falls back to it atomically
+	// if a fingerprint or relocation does not match.
+	if (!compiled_module.is_empty()) {
+		String module_error;
+		if (GDScriptCompiledModule::apply(this, compiled_module, &module_error) != OK) {
+			compiled_module.clear();
+		}
+	}
+
 #ifdef TOOLS_ENABLED
 	// Done after compilation because it needs the GDScript object's inner class GDScript objects,
 	// which are made by calling make_scripts() within compiler.compile() above.
@@ -903,6 +917,13 @@ Error GDScript::reload(bool p_keep_state) {
 	if (p_keep_state) {
 		// Update the properties in the inspector.
 		update_exports();
+	}
+
+	if (Engine::get_singleton()->is_editor_hint() && !source.is_empty() && get_script_path().get_extension() == "gd") {
+		const Vector<uint8_t> fallback_tokens = get_as_binary_tokens();
+		if (!fallback_tokens.is_empty()) {
+			GDScriptCompiledModule::save_editor_cache(this, fallback_tokens, &compiled_module);
+		}
 	}
 #endif
 
@@ -1173,6 +1194,7 @@ Error GDScript::load_source_code(const String &p_path) {
 
 void GDScript::set_binary_tokens_source(const Vector<uint8_t> &p_binary_tokens) {
 	binary_tokens = p_binary_tokens;
+	compiled_module.clear();
 }
 
 const Vector<uint8_t> &GDScript::get_binary_tokens_source() const {
@@ -1182,6 +1204,14 @@ const Vector<uint8_t> &GDScript::get_binary_tokens_source() const {
 Vector<uint8_t> GDScript::get_as_binary_tokens() const {
 	GDScriptTokenizerBuffer tokenizer;
 	return tokenizer.parse_code_string(source, GDScriptTokenizerBuffer::COMPRESS_NONE);
+}
+
+void GDScript::set_compiled_module_source(const Vector<uint8_t> &p_compiled_module) {
+	compiled_module = p_compiled_module;
+}
+
+const Vector<uint8_t> &GDScript::get_compiled_module_source() const {
+	return compiled_module;
 }
 
 const HashMap<StringName, GDScriptFunction *> &GDScript::debug_get_member_functions() const {
@@ -1388,7 +1418,7 @@ String GDScript::debug_get_script_name(const Ref<Script> &p_script) {
 #endif
 
 String GDScript::canonicalize_path(const String &p_path) {
-	if (p_path.get_extension() == "gdc") {
+	if (p_path.get_extension() == "gdc" || p_path.get_extension() == "gdm") {
 		return p_path.get_basename() + ".gd";
 	}
 	return p_path;

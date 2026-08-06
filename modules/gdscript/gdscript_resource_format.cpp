@@ -31,6 +31,7 @@
 #include "gdscript_resource_format.h"
 
 #include "gdscript_cache.h"
+#include "gdscript_compiled_module.h"
 #include "gdscript_parser.h"
 
 #include "core/io/file_access.h"
@@ -57,6 +58,7 @@ Ref<Resource> ResourceFormatLoaderGDScript::load(const String &p_path, const Str
 void ResourceFormatLoaderGDScript::get_recognized_extensions(List<String> *p_extensions) const {
 	p_extensions->push_back("gd");
 	p_extensions->push_back("gdc");
+	p_extensions->push_back("gdm");
 }
 
 bool ResourceFormatLoaderGDScript::handles_type(const String &p_type) const {
@@ -65,13 +67,27 @@ bool ResourceFormatLoaderGDScript::handles_type(const String &p_type) const {
 
 String ResourceFormatLoaderGDScript::get_resource_type(const String &p_path) const {
 	String el = p_path.get_extension().to_lower();
-	if (el == "gd" || el == "gdc") {
+	if (el == "gd" || el == "gdc" || el == "gdm") {
 		return "GDScript";
 	}
 	return "";
 }
 
 void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<String> *p_dependencies, bool p_add_types) {
+	if (p_path.get_extension() == "gdm") {
+		Vector<uint8_t> fallback_tokens;
+		if (GDScriptCompiledModule::extract_fallback(FileAccess::get_file_as_bytes(p_path), fallback_tokens) != OK) {
+			return;
+		}
+		GDScriptParser parser;
+		if (parser.parse_binary(fallback_tokens, p_path) != OK) {
+			return;
+		}
+		for (const String &dependency : parser.get_dependencies()) {
+			p_dependencies->push_back(dependency);
+		}
+		return;
+	}
 	Ref<FileAccess> file = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_MSG(file.is_null(), "Cannot open file '" + p_path + "'.");
 

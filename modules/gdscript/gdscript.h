@@ -73,6 +73,8 @@ class GDScript : public Script {
 	friend class GDScriptFunction;
 	friend class GDScriptAnalyzer;
 	friend class GDScriptCompiler;
+	friend class GDScriptCompiledModule;
+	friend class GDScriptCompiledModuleImplementation::Internals;
 	friend class GDScriptDocGen;
 	friend class GDScriptLambdaCallable;
 	friend class GDScriptLambdaSelfCallable;
@@ -169,6 +171,7 @@ private:
 	//exported members
 	String source;
 	Vector<uint8_t> binary_tokens;
+	Vector<uint8_t> compiled_module;
 	String path;
 	bool path_valid = false; // False if using default path.
 	StringName local_name; // Inner class identifier or `class_name`.
@@ -298,6 +301,8 @@ public:
 	void set_binary_tokens_source(const Vector<uint8_t> &p_binary_tokens);
 	const Vector<uint8_t> &get_binary_tokens_source() const;
 	Vector<uint8_t> get_as_binary_tokens() const;
+	void set_compiled_module_source(const Vector<uint8_t> &p_compiled_module);
+	const Vector<uint8_t> &get_compiled_module_source() const;
 
 	bool get_property_default_value(const StringName &p_property, Variant &r_value) const override;
 

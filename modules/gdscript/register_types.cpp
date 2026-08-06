@@ -32,6 +32,7 @@
 
 #include "gdscript.h"
 #include "gdscript_cache.h"
+#include "gdscript_compiled_module.h"
 #include "gdscript_parser.h"
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 #include "gdscript_optimization_profile.h"
@@ -56,6 +57,7 @@
 #include "tests/test_gdscript.h"
 #endif
 
+#include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
@@ -89,10 +91,66 @@ class GDScriptExportPlugin : public EditorExportPlugin {
 
 	static constexpr EditorExportPreset::ScriptExportMode DEFAULT_SCRIPT_MODE = EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED;
 	EditorExportPreset::ScriptExportMode script_mode = DEFAULT_SCRIPT_MODE;
+	Vector<GDScriptCompiledModule::Summary> module_summaries;
+	HashMap<String, Vector<uint8_t>> compiled_modules;
+
+	static void _collect_project_scripts(const String &p_directory, Vector<String> &r_scripts) {
+		Ref<DirAccess> directory = DirAccess::open(p_directory);
+		if (directory.is_null() || directory->list_dir_begin() != OK) {
+			return;
+		}
+		for (String entry = directory->get_next(); !entry.is_empty(); entry = directory->get_next()) {
+			if (entry.begins_with(".")) {
+				continue;
+			}
+			const String path = p_directory.path_join(entry);
+			if (directory->current_is_dir()) {
+				_collect_project_scripts(path, r_scripts);
+			} else if (entry.get_extension() == "gd") {
+				r_scripts.push_back(path);
+			}
+		}
+		directory->list_dir_end();
+	}
+
+	void _analyze_project() {
+		if (script_mode == EditorExportPreset::MODE_SCRIPT_TEXT) {
+			return;
+		}
+		Vector<String> paths;
+		_collect_project_scripts("res://", paths);
+		paths.sort();
+		for (const String &path : paths) {
+			const Vector<uint8_t> source_bytes = FileAccess::get_file_as_bytes(path);
+			if (source_bytes.is_empty()) {
+				continue;
+			}
+			const String source = String::utf8(reinterpret_cast<const char *>(source_bytes.ptr()), source_bytes.size());
+			const GDScriptTokenizerBuffer::CompressMode compress_mode = script_mode == EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED ?
+					GDScriptTokenizerBuffer::COMPRESS_ZSTD :
+					GDScriptTokenizerBuffer::COMPRESS_NONE;
+			const Vector<uint8_t> tokens = GDScriptTokenizerBuffer::parse_code_string(source, compress_mode);
+			Ref<GDScript> script = ResourceLoader::load(path, "GDScript");
+			if (tokens.is_empty() || script.is_null()) {
+				continue;
+			}
+			Vector<uint8_t> module;
+			GDScriptCompiledModule::Summary summary;
+			if (GDScriptCompiledModule::create(script.ptr(), tokens, module, &summary) == OK && !module.is_empty()) {
+				compiled_modules.insert(path, module);
+				module_summaries.push_back(summary);
+			}
+		}
+		if (!module_summaries.is_empty()) {
+			add_file("res://.godot/gdscript_project.gdmanifest", GDScriptCompiledModule::create_project_manifest(module_summaries), false);
+		}
+	}
 
 protected:
 	virtual void _export_begin(const HashSet<String> &p_features, bool p_debug, const String &p_path, int p_flags) override {
 		script_mode = DEFAULT_SCRIPT_MODE;
+		module_summaries.clear();
+		compiled_modules.clear();
 
 		const Ref<EditorExportPreset> &preset = get_export_preset();
 		if (preset.is_valid()) {
@@ -110,6 +168,8 @@ protected:
 			}
 		}
 #endif
+
+		_analyze_project();
 	}
 
 	virtual void _export_file(const String &p_path, const String &p_type, const HashSet<String> &p_features) override {
@@ -123,13 +183,27 @@ protected:
 		}
 
 		String source = String::utf8(reinterpret_cast<const char *>(file.ptr()), file.size());
-		GDScriptTokenizerBuffer::CompressMode compress_mode = script_mode == EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED ? GDScriptTokenizerBuffer::COMPRESS_ZSTD : GDScriptTokenizerBuffer::COMPRESS_NONE;
+		GDScriptTokenizerBuffer::CompressMode compress_mode = script_mode == EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED ?
+				GDScriptTokenizerBuffer::COMPRESS_ZSTD :
+				GDScriptTokenizerBuffer::COMPRESS_NONE;
 		file = GDScriptTokenizerBuffer::parse_code_string(source, compress_mode);
 		if (file.is_empty()) {
 			return;
 		}
 
+		if (const Vector<uint8_t> *module = compiled_modules.getptr(p_path)) {
+			add_file(p_path.get_basename() + ".gdm", *module, true);
+			return;
+		}
+
+		// A script that cannot be compiled or represented portably keeps the
+		// established binary-token export path.
 		add_file(p_path.get_basename() + ".gdc", file, true);
+	}
+
+	virtual void _export_end() override {
+		module_summaries.clear();
+		compiled_modules.clear();
 	}
 
 public:

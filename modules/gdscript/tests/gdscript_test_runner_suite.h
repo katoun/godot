@@ -31,8 +31,10 @@
 #pragma once
 
 #include "../gdscript_cache.h"
+#include "../gdscript_compiled_module.h"
 #include "gdscript_test_runner.h"
 
+#include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
@@ -95,6 +97,83 @@ func _init():
 	Ref<RefCounted> ref_counted = memnew(RefCounted);
 	ref_counted->set_script(gdscript);
 	CHECK_MESSAGE(int(ref_counted->get_meta("result")) == 42, "The script should assign object metadata successfully.");
+}
+
+TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM bytecode") {
+	GDScriptLanguage::get_singleton()->init();
+	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_source_code(R"(
+extends RefCounted
+
+func compute(value: int) -> String:
+	var text: String = str(value * 2)
+	set_meta("compiled_module_result", text)
+	return text.to_upper()
+)");
+	REQUIRE(gdscript->reload() == OK);
+
+	const Vector<uint8_t> tokens = gdscript->get_as_binary_tokens();
+	REQUIRE_FALSE(tokens.is_empty());
+	Vector<uint8_t> module;
+	GDScriptCompiledModule::Summary summary;
+	REQUIRE(GDScriptCompiledModule::create(gdscript.ptr(), tokens, module, &summary) == OK);
+	CHECK_FALSE(module.is_empty());
+	CHECK(summary.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
+	CHECK(summary.source_fingerprint == GDScriptCompiledModule::fingerprint_source(gdscript->get_source_code()));
+	CHECK(summary.skipped_functions == 0);
+	CHECK_FALSE(summary.functions.is_empty());
+
+	Vector<uint8_t> fallback;
+	uint64_t source_fingerprint = 0;
+	CHECK(GDScriptCompiledModule::extract_fallback(module, fallback, &source_fingerprint) == OK);
+	CHECK(fallback == tokens);
+	CHECK(source_fingerprint == summary.source_fingerprint);
+	CHECK(GDScriptCompiledModule::apply(gdscript.ptr(), module) == OK);
+
+	Ref<RefCounted> instance = memnew(RefCounted);
+	instance->set_script(gdscript);
+	CHECK(String(instance->call(SNAME("compute"), 21)) == "42");
+	CHECK(String(instance->get_meta(SNAME("compiled_module_result"))) == "42");
+
+	const String module_path = OS::get_singleton()->get_temp_path().path_join("portable_gdscript_module.gdm");
+	{
+		Ref<FileAccess> file = FileAccess::open(module_path, FileAccess::WRITE);
+		REQUIRE(file.is_valid());
+		REQUIRE(file->store_buffer(module));
+	}
+	Ref<GDScript> loaded_module = ResourceLoader::load(module_path, "GDScript", ResourceFormatLoader::CACHE_MODE_IGNORE);
+	REQUIRE(loaded_module.is_valid());
+	CHECK(loaded_module->get_binary_tokens_source() == tokens);
+	CHECK(loaded_module->get_compiled_module_source() == module);
+	Ref<RefCounted> loaded_instance = memnew(RefCounted);
+	loaded_instance->set_script(loaded_module);
+	CHECK(String(loaded_instance->call(SNAME("compute"), 7)) == "14");
+
+	Vector<uint8_t> corrupt = module;
+	corrupt.write[corrupt.size() - 1] ^= 0x80;
+	CHECK(GDScriptCompiledModule::extract_fallback(corrupt, fallback) == ERR_FILE_CORRUPT);
+
+	Ref<GDScript> changed_script = memnew(GDScript);
+	changed_script->set_source_code("extends RefCounted\nfunc compute(value: int) -> String:\n\treturn str(value + 1)\n");
+	REQUIRE(changed_script->reload() == OK);
+	CHECK(GDScriptCompiledModule::apply(changed_script.ptr(), module) == ERR_INVALID_DATA);
+
+	Ref<GDScript> cached_script = memnew(GDScript);
+	const String cached_script_path = "res://__portable_gdscript_cache_test.gd";
+	cached_script->set_path(cached_script_path);
+	cached_script->set_source_code("extends RefCounted\nfunc cached(value: int) -> int:\n\treturn value * 3\n");
+	REQUIRE(cached_script->reload() == OK);
+	const Vector<uint8_t> cached_tokens = cached_script->get_as_binary_tokens();
+	REQUIRE(GDScriptCompiledModule::save_editor_cache(cached_script.ptr(), cached_tokens) == OK);
+	Vector<uint8_t> cached_module;
+	CHECK(GDScriptCompiledModule::load_editor_cache(cached_script_path, cached_script->get_source_code(), cached_module) == OK);
+	CHECK_FALSE(cached_module.is_empty());
+	CHECK(GDScriptCompiledModule::load_editor_cache(cached_script_path, cached_script->get_source_code() + "\n# stale", cached_module) == ERR_INVALID_DATA);
+	CHECK(DirAccess::remove_absolute(GDScriptCompiledModule::get_editor_cache_path(cached_script_path)) == OK);
+
+	Vector<GDScriptCompiledModule::Summary> modules;
+	modules.push_back(summary);
+	CHECK_FALSE(GDScriptCompiledModule::create_project_manifest(modules).is_empty());
 }
 
 TEST_CASE("[Modules][GDScript] Struct expressions use specialized VM instructions") {
