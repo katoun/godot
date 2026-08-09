@@ -6,20 +6,25 @@ JOBS=28
 NICE_LEVEL=5
 PLATFORM=linuxbsd
 ARCH=x86_64
+COMPILE_ARGS="use_llvm=yes linker=mold"
 
 TARGET="${1:-editor}"
 
+build_godot() {
+    local target="$1"
+    
+    echo "Building Godot target: $target"
+    
+    nice -n "$NICE_LEVEL" scons -j"$JOBS" platform="$PLATFORM" target="$target" arch="$ARCH" $COMPILE_ARGS
+}
+
 build_editor() {
-    echo "Building Godot editor..."
-    nice -n "$NICE_LEVEL" scons -j"$JOBS" platform="$PLATFORM" target=editor arch="$ARCH"
+    build_godot editor
 }
 
 build_templates() {
-    echo "Building Godot debug export template..."
-    nice -n "$NICE_LEVEL" scons -j"$JOBS" platform="$PLATFORM" target=template_debug arch="$ARCH"
-
-    echo "Building Godot release export template..."
-    nice -n "$NICE_LEVEL" scons -j"$JOBS" platform="$PLATFORM" target=template_release arch="$ARCH"
+    build_godot template_debug
+    build_godot template_release
 }
 
 case "$TARGET" in
