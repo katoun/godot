@@ -882,6 +882,7 @@ Error GDScript::reload(bool p_keep_state) {
 	if (!compiled_module.is_empty()) {
 		String module_error;
 		if (GDScriptCompiledModule::apply(this, compiled_module, &module_error) != OK) {
+			print_verbose("Discarding compiled GDScript module for '" + get_script_path() + "': " + module_error);
 			compiled_module.clear();
 		}
 	}

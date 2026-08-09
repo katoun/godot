@@ -185,6 +185,93 @@ struct ConstantData {
 	String owner;
 };
 
+struct DataTypeRecord {
+	uint32_t kind = GDScriptDataType::VARIANT;
+	uint32_t builtin_type = Variant::NIL;
+	String native_type;
+	String script_path;
+	String script_class;
+	Vector<uint8_t> struct_layout;
+	Vector<DataTypeRecord> container_element_types;
+};
+
+struct PropertyRecord {
+	uint32_t type = Variant::NIL;
+	String name;
+	String class_name;
+	uint32_t hint = PROPERTY_HINT_NONE;
+	String hint_string;
+	uint32_t usage = PROPERTY_USAGE_DEFAULT;
+};
+
+struct MethodRecord {
+	String name;
+	PropertyRecord return_value;
+	uint32_t flags = METHOD_FLAGS_DEFAULT;
+	int32_t id = 0;
+	Vector<PropertyRecord> arguments;
+	Vector<ConstantData> default_arguments;
+	int32_t return_value_metadata = 0;
+	Vector<int> argument_metadata;
+};
+
+struct NamedConstantRecord {
+	String name;
+	ConstantData value;
+};
+
+struct MemberRecord {
+	String name;
+	int32_t index = 0;
+	String setter;
+	String getter;
+	bool own_member = false;
+	DataTypeRecord data_type;
+	PropertyRecord property;
+};
+
+struct BindingRecord {
+	String name;
+	String identity;
+};
+
+struct SignalRecord {
+	String name;
+	MethodRecord method;
+};
+
+struct LambdaRecord {
+	String identity;
+	int32_t capture_count = 0;
+	bool use_self = false;
+};
+
+struct ClassRecord {
+	String identity;
+	String owner_identity;
+	String script_path;
+	String local_name;
+	String global_name;
+	String fully_qualified_name;
+	String native_base;
+	String script_base_path;
+	String script_base_class;
+	bool tool = false;
+	bool abstract = false;
+	Vector<MemberRecord> members;
+	Vector<MemberRecord> static_members;
+	Vector<NamedConstantRecord> constants;
+	Vector<BindingRecord> functions;
+	Vector<BindingRecord> subclasses;
+	Vector<SignalRecord> signals;
+	Vector<LambdaRecord> lambdas;
+	ConstantData rpc_config;
+	String initializer;
+	String implicit_initializer;
+	String implicit_ready;
+	String static_initializer;
+};
+
 struct Symbol {
 	int32_t x = 0;
 	int32_t y = 0;
@@ -196,6 +283,8 @@ struct Symbol {
 
 struct FunctionRecord {
 	String identity;
+	String name;
+	String source;
 	uint32_t fingerprint = 0;
 	int32_t initial_line = 0;
 	int32_t argument_count = 0;
@@ -204,8 +293,14 @@ struct FunctionRecord {
 	int32_t instruction_args_size = 0;
 	int32_t operator_feedback_count = 0;
 	int32_t call_feedback_count = 0;
+	int32_t default_argument_count = 0;
 	bool is_static = false;
 	bool profile_guided = false;
+	Vector<DataTypeRecord> argument_types;
+	DataTypeRecord return_type;
+	MethodRecord method;
+	ConstantData rpc_config;
+	Vector<NamedConstantRecord> local_constants;
 	Vector<int> code;
 	Vector<int> default_arguments;
 	Vector<ConstantData> constants;
@@ -220,6 +315,7 @@ struct ParsedModule {
 	uint64_t engine_api_fingerprint = 0;
 	Vector<uint8_t> fallback_tokens;
 	Vector<GDScriptCompiledModule::Dependency> dependencies;
+	Vector<ClassRecord> classes;
 	Vector<FunctionRecord> functions;
 };
 
@@ -228,13 +324,21 @@ public:
 	static bool make_relocations(const GDScriptFunction *p_function, const HashMap<GDScriptFunction *, String> &p_identities, Vector<Vector<Symbol>> &r_tables);
 	static void add_function_tree(GDScriptFunction *p_function, const String &p_identity, HashMap<GDScriptFunction *, String> &r_identities, Vector<GDScriptFunction *> &r_functions);
 	static void collect_functions(GDScript *p_script, const String &p_class_identity, HashMap<GDScriptFunction *, String> &r_identities, Vector<GDScriptFunction *> &r_functions);
+	static void collect_classes(GDScript *p_script, const String &p_identity, HashMap<GDScript *, String> &r_identities, Vector<GDScript *> &r_classes);
 	static uint64_t dependency_source_fingerprint(GDScript *p_script);
 	static void add_script_dependency(GDScript *p_root, GDScript *p_dependency, HashMap<String, uint64_t> &r_dependencies);
 	static void collect_dependencies_from_function(GDScript *p_root, GDScriptFunction *p_function, HashMap<String, uint64_t> &r_dependencies, HashSet<GDScriptFunction *> &r_visited);
 	static void collect_dependencies_from_script(GDScript *p_root, GDScript *p_script, HashMap<String, uint64_t> &r_dependencies);
+	static bool make_function_metadata(GDScriptFunction *p_function, FunctionRecord &r_record);
+	static bool function_metadata_matches(const FunctionRecord &p_record, GDScriptFunction *p_function);
 	static bool make_record(GDScriptFunction *p_function, const String &p_identity, const HashMap<GDScriptFunction *, String> &p_identities, FunctionRecord &r_record);
+	static bool make_class_record(GDScript *p_script, const String &p_identity, const HashMap<GDScript *, String> &p_class_identities,
+			const HashMap<GDScriptFunction *, String> &p_function_identities, ClassRecord &r_record);
+	static bool validate_class_record(const ClassRecord &p_record, GDScript *p_script, const HashMap<GDScript *, String> &p_class_identities,
+			const HashMap<GDScriptFunction *, String> &p_function_identities);
 	static bool validate_relocations(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions);
-	static bool validate_record(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions);
+	static bool validate_record(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions,
+			String *r_error = nullptr);
 	static void install_record(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions);
 };
 
@@ -256,6 +360,293 @@ Vector<int> read_int_vector(Reader &p_reader) {
 		values.write[i] = int32_t(p_reader.u32());
 	}
 	return values;
+}
+
+void write_constant(Writer &p_writer, const ConstantData &p_constant) {
+	p_writer.u32(p_constant.kind);
+	p_writer.bytes(p_constant.encoded);
+	p_writer.string(p_constant.name);
+	p_writer.string(p_constant.owner);
+}
+
+ConstantData read_constant(Reader &p_reader) {
+	ConstantData constant;
+	constant.kind = ConstantKind(p_reader.u32());
+	if (constant.kind > CONSTANT_NATIVE_CLASS) {
+		p_reader.failed = true;
+	}
+	constant.encoded = p_reader.bytes();
+	constant.name = p_reader.string();
+	constant.owner = p_reader.string();
+	return constant;
+}
+
+void write_data_type(Writer &p_writer, const DataTypeRecord &p_type) {
+	p_writer.u32(p_type.kind);
+	p_writer.u32(p_type.builtin_type);
+	p_writer.string(p_type.native_type);
+	p_writer.string(p_type.script_path);
+	p_writer.string(p_type.script_class);
+	p_writer.bytes(p_type.struct_layout);
+	p_writer.u32(p_type.container_element_types.size());
+	for (const DataTypeRecord &element_type : p_type.container_element_types) {
+		write_data_type(p_writer, element_type);
+	}
+}
+
+DataTypeRecord read_data_type(Reader &p_reader, int p_depth = 0) {
+	DataTypeRecord type;
+	if (p_depth > Variant::MAX_RECURSION_DEPTH) {
+		p_reader.failed = true;
+		return type;
+	}
+	type.kind = p_reader.u32();
+	type.builtin_type = p_reader.u32();
+	if (type.kind > GDScriptDataType::GDSCRIPT || type.builtin_type >= Variant::VARIANT_MAX) {
+		p_reader.failed = true;
+	}
+	type.native_type = p_reader.string();
+	type.script_path = p_reader.string();
+	type.script_class = p_reader.string();
+	type.struct_layout = p_reader.bytes();
+	const uint32_t element_count = p_reader.count();
+	type.container_element_types.resize(element_count);
+	for (uint32_t i = 0; i < element_count; i++) {
+		type.container_element_types.write[i] = read_data_type(p_reader, p_depth + 1);
+	}
+	return type;
+}
+
+void write_property(Writer &p_writer, const PropertyRecord &p_property) {
+	p_writer.u32(p_property.type);
+	p_writer.string(p_property.name);
+	p_writer.string(p_property.class_name);
+	p_writer.u32(p_property.hint);
+	p_writer.string(p_property.hint_string);
+	p_writer.u32(p_property.usage);
+}
+
+PropertyRecord read_property(Reader &p_reader) {
+	PropertyRecord property;
+	property.type = p_reader.u32();
+	property.name = p_reader.string();
+	property.class_name = p_reader.string();
+	property.hint = p_reader.u32();
+	property.hint_string = p_reader.string();
+	property.usage = p_reader.u32();
+	if (property.type >= Variant::VARIANT_MAX || property.hint >= PROPERTY_HINT_MAX) {
+		p_reader.failed = true;
+	}
+	return property;
+}
+
+void write_method(Writer &p_writer, const MethodRecord &p_method) {
+	p_writer.string(p_method.name);
+	write_property(p_writer, p_method.return_value);
+	p_writer.u32(p_method.flags);
+	p_writer.u32(uint32_t(p_method.id));
+	p_writer.u32(p_method.arguments.size());
+	for (const PropertyRecord &argument : p_method.arguments) {
+		write_property(p_writer, argument);
+	}
+	p_writer.u32(p_method.default_arguments.size());
+	for (const ConstantData &argument : p_method.default_arguments) {
+		write_constant(p_writer, argument);
+	}
+	p_writer.u32(uint32_t(p_method.return_value_metadata));
+	write_int_vector(p_writer, p_method.argument_metadata);
+}
+
+MethodRecord read_method(Reader &p_reader) {
+	MethodRecord method;
+	method.name = p_reader.string();
+	method.return_value = read_property(p_reader);
+	method.flags = p_reader.u32();
+	method.id = int32_t(p_reader.u32());
+	const uint32_t argument_count = p_reader.count();
+	method.arguments.resize(argument_count);
+	for (uint32_t i = 0; i < argument_count; i++) {
+		method.arguments.write[i] = read_property(p_reader);
+	}
+	const uint32_t default_count = p_reader.count();
+	method.default_arguments.resize(default_count);
+	for (uint32_t i = 0; i < default_count; i++) {
+		method.default_arguments.write[i] = read_constant(p_reader);
+	}
+	method.return_value_metadata = int32_t(p_reader.u32());
+	method.argument_metadata = read_int_vector(p_reader);
+	return method;
+}
+
+void write_named_constant(Writer &p_writer, const NamedConstantRecord &p_constant) {
+	p_writer.string(p_constant.name);
+	write_constant(p_writer, p_constant.value);
+}
+
+NamedConstantRecord read_named_constant(Reader &p_reader) {
+	NamedConstantRecord constant;
+	constant.name = p_reader.string();
+	constant.value = read_constant(p_reader);
+	return constant;
+}
+
+void write_member(Writer &p_writer, const MemberRecord &p_member) {
+	p_writer.string(p_member.name);
+	p_writer.u32(uint32_t(p_member.index));
+	p_writer.string(p_member.setter);
+	p_writer.string(p_member.getter);
+	p_writer.u32(p_member.own_member ? 1 : 0);
+	write_data_type(p_writer, p_member.data_type);
+	write_property(p_writer, p_member.property);
+}
+
+MemberRecord read_member(Reader &p_reader) {
+	MemberRecord member;
+	member.name = p_reader.string();
+	member.index = int32_t(p_reader.u32());
+	member.setter = p_reader.string();
+	member.getter = p_reader.string();
+	const uint32_t own_member = p_reader.u32();
+	if (own_member > 1) {
+		p_reader.failed = true;
+	}
+	member.own_member = own_member != 0;
+	member.data_type = read_data_type(p_reader);
+	member.property = read_property(p_reader);
+	return member;
+}
+
+void write_binding(Writer &p_writer, const BindingRecord &p_binding) {
+	p_writer.string(p_binding.name);
+	p_writer.string(p_binding.identity);
+}
+
+BindingRecord read_binding(Reader &p_reader) {
+	BindingRecord binding;
+	binding.name = p_reader.string();
+	binding.identity = p_reader.string();
+	return binding;
+}
+
+void write_class(Writer &p_writer, const ClassRecord &p_class) {
+	p_writer.string(p_class.identity);
+	p_writer.string(p_class.owner_identity);
+	p_writer.string(p_class.script_path);
+	p_writer.string(p_class.local_name);
+	p_writer.string(p_class.global_name);
+	p_writer.string(p_class.fully_qualified_name);
+	p_writer.string(p_class.native_base);
+	p_writer.string(p_class.script_base_path);
+	p_writer.string(p_class.script_base_class);
+	p_writer.u32(p_class.tool ? 1 : 0);
+	p_writer.u32(p_class.abstract ? 1 : 0);
+
+	p_writer.u32(p_class.members.size());
+	for (const MemberRecord &member : p_class.members) {
+		write_member(p_writer, member);
+	}
+	p_writer.u32(p_class.static_members.size());
+	for (const MemberRecord &member : p_class.static_members) {
+		write_member(p_writer, member);
+	}
+	p_writer.u32(p_class.constants.size());
+	for (const NamedConstantRecord &constant : p_class.constants) {
+		write_named_constant(p_writer, constant);
+	}
+	p_writer.u32(p_class.functions.size());
+	for (const BindingRecord &function : p_class.functions) {
+		write_binding(p_writer, function);
+	}
+	p_writer.u32(p_class.subclasses.size());
+	for (const BindingRecord &subclass : p_class.subclasses) {
+		write_binding(p_writer, subclass);
+	}
+	p_writer.u32(p_class.signals.size());
+	for (const SignalRecord &signal : p_class.signals) {
+		p_writer.string(signal.name);
+		write_method(p_writer, signal.method);
+	}
+	p_writer.u32(p_class.lambdas.size());
+	for (const LambdaRecord &lambda : p_class.lambdas) {
+		p_writer.string(lambda.identity);
+		p_writer.u32(uint32_t(lambda.capture_count));
+		p_writer.u32(lambda.use_self ? 1 : 0);
+	}
+	write_constant(p_writer, p_class.rpc_config);
+	p_writer.string(p_class.initializer);
+	p_writer.string(p_class.implicit_initializer);
+	p_writer.string(p_class.implicit_ready);
+	p_writer.string(p_class.static_initializer);
+}
+
+ClassRecord read_class(Reader &p_reader) {
+	ClassRecord script_class;
+	script_class.identity = p_reader.string();
+	script_class.owner_identity = p_reader.string();
+	script_class.script_path = p_reader.string();
+	script_class.local_name = p_reader.string();
+	script_class.global_name = p_reader.string();
+	script_class.fully_qualified_name = p_reader.string();
+	script_class.native_base = p_reader.string();
+	script_class.script_base_path = p_reader.string();
+	script_class.script_base_class = p_reader.string();
+	const uint32_t tool = p_reader.u32();
+	const uint32_t abstract = p_reader.u32();
+	if (tool > 1 || abstract > 1) {
+		p_reader.failed = true;
+	}
+	script_class.tool = tool != 0;
+	script_class.abstract = abstract != 0;
+
+	uint32_t count = p_reader.count();
+	script_class.members.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.members.write[i] = read_member(p_reader);
+	}
+	count = p_reader.count();
+	script_class.static_members.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.static_members.write[i] = read_member(p_reader);
+	}
+	count = p_reader.count();
+	script_class.constants.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.constants.write[i] = read_named_constant(p_reader);
+	}
+	count = p_reader.count();
+	script_class.functions.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.functions.write[i] = read_binding(p_reader);
+	}
+	count = p_reader.count();
+	script_class.subclasses.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.subclasses.write[i] = read_binding(p_reader);
+	}
+	count = p_reader.count();
+	script_class.signals.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.signals.write[i].name = p_reader.string();
+		script_class.signals.write[i].method = read_method(p_reader);
+	}
+	count = p_reader.count();
+	script_class.lambdas.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		LambdaRecord &lambda = script_class.lambdas.write[i];
+		lambda.identity = p_reader.string();
+		lambda.capture_count = int32_t(p_reader.u32());
+		const uint32_t use_self = p_reader.u32();
+		if (lambda.capture_count < 0 || use_self > 1) {
+			p_reader.failed = true;
+		}
+		lambda.use_self = use_self != 0;
+	}
+	script_class.rpc_config = read_constant(p_reader);
+	script_class.initializer = p_reader.string();
+	script_class.implicit_initializer = p_reader.string();
+	script_class.implicit_ready = p_reader.string();
+	script_class.static_initializer = p_reader.string();
+	return script_class;
 }
 
 void write_symbol(Writer &p_writer, const Symbol &p_symbol) {
@@ -280,6 +671,8 @@ Symbol read_symbol(Reader &p_reader) {
 
 void write_function(Writer &p_writer, const FunctionRecord &p_record) {
 	p_writer.string(p_record.identity);
+	p_writer.string(p_record.name);
+	p_writer.string(p_record.source);
 	p_writer.u32(p_record.fingerprint);
 	p_writer.u32(uint32_t(p_record.initial_line));
 	p_writer.u32(uint32_t(p_record.argument_count));
@@ -288,17 +681,26 @@ void write_function(Writer &p_writer, const FunctionRecord &p_record) {
 	p_writer.u32(uint32_t(p_record.instruction_args_size));
 	p_writer.u32(uint32_t(p_record.operator_feedback_count));
 	p_writer.u32(uint32_t(p_record.call_feedback_count));
+	p_writer.u32(uint32_t(p_record.default_argument_count));
 	p_writer.u32(p_record.is_static ? 1 : 0);
 	p_writer.u32(p_record.profile_guided ? 1 : 0);
+	p_writer.u32(p_record.argument_types.size());
+	for (const DataTypeRecord &argument_type : p_record.argument_types) {
+		write_data_type(p_writer, argument_type);
+	}
+	write_data_type(p_writer, p_record.return_type);
+	write_method(p_writer, p_record.method);
+	write_constant(p_writer, p_record.rpc_config);
+	p_writer.u32(p_record.local_constants.size());
+	for (const NamedConstantRecord &constant : p_record.local_constants) {
+		write_named_constant(p_writer, constant);
+	}
 	write_int_vector(p_writer, p_record.code);
 	write_int_vector(p_writer, p_record.default_arguments);
 
 	p_writer.u32(p_record.constants.size());
 	for (const ConstantData &constant : p_record.constants) {
-		p_writer.u32(constant.kind);
-		p_writer.bytes(constant.encoded);
-		p_writer.string(constant.name);
-		p_writer.string(constant.owner);
+		write_constant(p_writer, constant);
 	}
 
 	p_writer.u32(p_record.global_names.size());
@@ -324,6 +726,8 @@ void write_function(Writer &p_writer, const FunctionRecord &p_record) {
 FunctionRecord read_function(Reader &p_reader) {
 	FunctionRecord record;
 	record.identity = p_reader.string();
+	record.name = p_reader.string();
+	record.source = p_reader.string();
 	record.fingerprint = p_reader.u32();
 	record.initial_line = int32_t(p_reader.u32());
 	record.argument_count = int32_t(p_reader.u32());
@@ -332,22 +736,35 @@ FunctionRecord read_function(Reader &p_reader) {
 	record.instruction_args_size = int32_t(p_reader.u32());
 	record.operator_feedback_count = int32_t(p_reader.u32());
 	record.call_feedback_count = int32_t(p_reader.u32());
-	record.is_static = p_reader.u32() != 0;
-	record.profile_guided = p_reader.u32() != 0;
+	record.default_argument_count = int32_t(p_reader.u32());
+	const uint32_t is_static = p_reader.u32();
+	const uint32_t profile_guided = p_reader.u32();
+	if (record.argument_count < 0 || record.stack_size < 0 || record.instruction_args_size < 0 || record.operator_feedback_count < 0 ||
+			record.call_feedback_count < 0 || record.default_argument_count < 0 || is_static > 1 || profile_guided > 1) {
+		p_reader.failed = true;
+	}
+	record.is_static = is_static != 0;
+	record.profile_guided = profile_guided != 0;
+	const uint32_t argument_type_count = p_reader.count();
+	record.argument_types.resize(argument_type_count);
+	for (uint32_t i = 0; i < argument_type_count; i++) {
+		record.argument_types.write[i] = read_data_type(p_reader);
+	}
+	record.return_type = read_data_type(p_reader);
+	record.method = read_method(p_reader);
+	record.rpc_config = read_constant(p_reader);
+	const uint32_t local_constant_count = p_reader.count();
+	record.local_constants.resize(local_constant_count);
+	for (uint32_t i = 0; i < local_constant_count; i++) {
+		record.local_constants.write[i] = read_named_constant(p_reader);
+	}
 	record.code = read_int_vector(p_reader);
 	record.default_arguments = read_int_vector(p_reader);
 
 	const uint32_t constant_count = p_reader.count();
 	record.constants.resize(constant_count);
 	for (uint32_t i = 0; i < constant_count; i++) {
-		ConstantData &constant = record.constants.write[i];
-		constant.kind = ConstantKind(p_reader.u32());
-		if (constant.kind > CONSTANT_NATIVE_CLASS) {
-			p_reader.failed = true;
-		}
-		constant.encoded = p_reader.bytes();
-		constant.name = p_reader.string();
-		constant.owner = p_reader.string();
+		record.constants.write[i] = read_constant(p_reader);
 	}
 
 	const uint32_t name_count = p_reader.count();
@@ -422,12 +839,17 @@ Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, Stri
 		r_module.dependencies.write[i].path = payload.string();
 		r_module.dependencies.write[i].source_fingerprint = payload.u64();
 	}
+	const uint32_t class_count = payload.count();
+	r_module.classes.resize(class_count);
+	for (uint32_t i = 0; i < class_count; i++) {
+		r_module.classes.write[i] = read_class(payload);
+	}
 	const uint32_t function_count = payload.count();
 	r_module.functions.resize(function_count);
 	for (uint32_t i = 0; i < function_count; i++) {
 		r_module.functions.write[i] = read_function(payload);
 	}
-	if (payload.failed || payload.offset != payload.size || r_module.fallback_tokens.is_empty()) {
+	if (payload.failed || payload.offset != payload.size || r_module.fallback_tokens.is_empty() || r_module.classes.is_empty()) {
 		return fail("Malformed compiled GDScript module payload.");
 	}
 	return OK;
@@ -477,6 +899,14 @@ bool is_pointer_free_variant(const Variant &p_value, int p_depth = 0) {
 	}
 }
 
+String canonicalize_qualified_script_name(const String &p_name) {
+	const int separator = p_name.find("::");
+	if (separator < 0) {
+		return GDScript::canonicalize_path(p_name);
+	}
+	return GDScript::canonicalize_path(p_name.left(separator)) + p_name.substr(separator);
+}
+
 bool encode_constant(const Variant &p_value, ConstantData &r_constant) {
 	if (p_value.get_type() == Variant::OBJECT) {
 		Object *object = p_value;
@@ -487,8 +917,8 @@ bool encode_constant(const Variant &p_value, ConstantData &r_constant) {
 		}
 		if (GDScript *script = Object::cast_to<GDScript>(object)) {
 			r_constant.kind = CONSTANT_GDSCRIPT;
-			r_constant.name = script->get_script_path();
-			r_constant.owner = script->get_fully_qualified_name();
+			r_constant.name = GDScript::canonicalize_path(script->get_script_path());
+			r_constant.owner = canonicalize_qualified_script_name(script->get_fully_qualified_name());
 			return !r_constant.name.is_empty();
 		}
 		if (Resource *resource = Object::cast_to<Resource>(object)) {
@@ -527,7 +957,8 @@ bool constant_matches(const ConstantData &p_constant, const Variant &p_value) {
 		}
 		case CONSTANT_GDSCRIPT: {
 			GDScript *script = Object::cast_to<GDScript>(p_value.get_validated_object());
-			return script != nullptr && script->get_script_path() == p_constant.name && script->get_fully_qualified_name() == p_constant.owner;
+			return script != nullptr && GDScript::canonicalize_path(script->get_script_path()) == p_constant.name &&
+					canonicalize_qualified_script_name(script->get_fully_qualified_name()) == p_constant.owner;
 		}
 		case CONSTANT_NATIVE_CLASS: {
 			GDScriptNativeClass *native_class = Object::cast_to<GDScriptNativeClass>(p_value.get_validated_object());
@@ -535,6 +966,171 @@ bool constant_matches(const ConstantData &p_constant, const Variant &p_value) {
 		}
 	}
 	return false;
+}
+
+bool make_data_type_record(const GDScriptDataType &p_type, DataTypeRecord &r_record, int p_depth = 0) {
+	if (p_depth > Variant::MAX_RECURSION_DEPTH || p_type.kind < GDScriptDataType::VARIANT || p_type.kind > GDScriptDataType::GDSCRIPT ||
+			p_type.builtin_type < Variant::NIL || p_type.builtin_type >= Variant::VARIANT_MAX) {
+		return false;
+	}
+	r_record.kind = p_type.kind;
+	r_record.builtin_type = p_type.builtin_type;
+	r_record.native_type = p_type.native_type;
+
+	Script *script_type = p_type.script_type;
+	if (script_type == nullptr && p_type.script_type_ref.is_valid()) {
+		script_type = p_type.script_type_ref.ptr();
+	}
+	if (script_type != nullptr) {
+		if (GDScript *gdscript = Object::cast_to<GDScript>(script_type)) {
+			r_record.script_path = GDScript::canonicalize_path(gdscript->get_script_path());
+			r_record.script_class = canonicalize_qualified_script_name(gdscript->get_fully_qualified_name());
+		} else {
+			r_record.script_path = script_type->get_path();
+			r_record.script_class = script_type->get_global_name();
+		}
+	}
+	if ((p_type.kind == GDScriptDataType::SCRIPT || p_type.kind == GDScriptDataType::GDSCRIPT) &&
+			(script_type == nullptr || r_record.script_path.is_empty())) {
+		return false;
+	}
+
+	if (p_type.struct_layout.is_valid()) {
+		if (p_type.builtin_type != Variant::STRUCT || !p_type.struct_layout->is_finalized()) {
+			return false;
+		}
+		ConstantData layout;
+		if (!encode_constant(p_type.struct_layout->to_dictionary(), layout) || layout.kind != CONSTANT_VARIANT) {
+			return false;
+		}
+		r_record.struct_layout = layout.encoded;
+	}
+
+	for (const GDScriptDataType &element_type : p_type.container_element_types) {
+		DataTypeRecord element_record;
+		if (!make_data_type_record(element_type, element_record, p_depth + 1)) {
+			return false;
+		}
+		r_record.container_element_types.push_back(element_record);
+	}
+	return true;
+}
+
+PropertyRecord make_property_record(const PropertyInfo &p_property) {
+	PropertyRecord record;
+	record.type = p_property.type;
+	record.name = p_property.name;
+	record.class_name = p_property.class_name;
+	record.hint = p_property.hint;
+	record.hint_string = p_property.hint_string;
+	record.usage = p_property.usage;
+	return record;
+}
+
+bool make_method_record(const MethodInfo &p_method, MethodRecord &r_record) {
+	r_record.name = p_method.name;
+	r_record.return_value = make_property_record(p_method.return_val);
+	r_record.flags = p_method.flags;
+	r_record.id = p_method.id;
+	for (const PropertyInfo &argument : p_method.arguments) {
+		r_record.arguments.push_back(make_property_record(argument));
+	}
+	for (const Variant &argument : p_method.default_arguments) {
+		ConstantData encoded;
+		if (!encode_constant(argument, encoded)) {
+			return false;
+		}
+		r_record.default_arguments.push_back(encoded);
+	}
+	r_record.return_value_metadata = p_method.return_val_metadata;
+	r_record.argument_metadata = p_method.arguments_metadata;
+	return true;
+}
+
+bool Internals::make_function_metadata(GDScriptFunction *p_function, FunctionRecord &r_record) {
+	r_record.name = p_function->name;
+	r_record.source = GDScript::canonicalize_path(p_function->source);
+	r_record.default_argument_count = p_function->_default_arg_count;
+	for (const GDScriptDataType &argument_type : p_function->argument_types) {
+		DataTypeRecord type;
+		if (!make_data_type_record(argument_type, type)) {
+			return false;
+		}
+		r_record.argument_types.push_back(type);
+	}
+	if (!make_data_type_record(p_function->return_type, r_record.return_type) || !make_method_record(p_function->method_info, r_record.method) ||
+			!encode_constant(p_function->rpc_config, r_record.rpc_config)) {
+		return false;
+	}
+	Vector<StringName> constant_names;
+	for (const KeyValue<StringName, Variant> &constant : p_function->constant_map) {
+		constant_names.push_back(constant.key);
+	}
+	constant_names.sort();
+	for (const StringName &name : constant_names) {
+		NamedConstantRecord constant;
+		constant.name = name;
+		if (!encode_constant(p_function->constant_map[name], constant.value)) {
+			return false;
+		}
+		r_record.local_constants.push_back(constant);
+	}
+	return true;
+}
+
+bool Internals::function_metadata_matches(const FunctionRecord &p_record, GDScriptFunction *p_function) {
+	FunctionRecord current;
+	if (!make_function_metadata(p_function, current)) {
+		return false;
+	}
+	Writer expected;
+	expected.string(p_record.name);
+	expected.string(p_record.source);
+	expected.u32(uint32_t(p_record.default_argument_count));
+	expected.u32(p_record.argument_types.size());
+	for (const DataTypeRecord &type : p_record.argument_types) {
+		write_data_type(expected, type);
+	}
+	write_data_type(expected, p_record.return_type);
+	write_method(expected, p_record.method);
+	write_constant(expected, p_record.rpc_config);
+	expected.u32(p_record.local_constants.size());
+	for (const NamedConstantRecord &constant : p_record.local_constants) {
+		write_named_constant(expected, constant);
+	}
+
+	Writer actual;
+	actual.string(current.name);
+	actual.string(current.source);
+	actual.u32(uint32_t(current.default_argument_count));
+	actual.u32(current.argument_types.size());
+	for (const DataTypeRecord &type : current.argument_types) {
+		write_data_type(actual, type);
+	}
+	write_data_type(actual, current.return_type);
+	write_method(actual, current.method);
+	write_constant(actual, current.rpc_config);
+	actual.u32(current.local_constants.size());
+	for (const NamedConstantRecord &constant : current.local_constants) {
+		write_named_constant(actual, constant);
+	}
+	return expected.data == actual.data;
+}
+
+uint32_t get_portable_function_fingerprint(const FunctionRecord &p_record) {
+	Writer serialized;
+	write_int_vector(serialized, p_record.code);
+	serialized.u32(p_record.constants.size());
+	for (const ConstantData &constant : p_record.constants) {
+		write_constant(serialized, constant);
+	}
+	serialized.u32(p_record.argument_types.size());
+	for (const DataTypeRecord &type : p_record.argument_types) {
+		write_data_type(serialized, type);
+	}
+	write_data_type(serialized, p_record.return_type);
+	const uint64_t fingerprint = GDScriptCompiledModule::fingerprint_bytes(serialized.data.ptr(), serialized.data.size());
+	return uint32_t(fingerprint) ^ uint32_t(fingerprint >> 32);
 }
 
 template <typename T>
@@ -777,6 +1373,190 @@ void Internals::collect_functions(GDScript *p_script, const String &p_class_iden
 	}
 }
 
+void Internals::collect_classes(GDScript *p_script, const String &p_identity, HashMap<GDScript *, String> &r_identities, Vector<GDScript *> &r_classes) {
+	if (p_script == nullptr || r_identities.has(p_script)) {
+		return;
+	}
+	r_identities.insert(p_script, p_identity);
+	r_classes.push_back(p_script);
+	Vector<StringName> subclass_names;
+	for (const KeyValue<StringName, Ref<GDScript>> &entry : p_script->subclasses) {
+		subclass_names.push_back(entry.key);
+	}
+	subclass_names.sort();
+	for (const StringName &name : subclass_names) {
+		collect_classes(p_script->subclasses[name].ptr(), p_identity + "/class:" + String(name), r_identities, r_classes);
+	}
+}
+
+bool Internals::make_class_record(GDScript *p_script, const String &p_identity, const HashMap<GDScript *, String> &p_class_identities,
+		const HashMap<GDScriptFunction *, String> &p_function_identities, ClassRecord &r_record) {
+	ERR_FAIL_NULL_V(p_script, false);
+	r_record.identity = p_identity;
+	r_record.script_path = GDScript::canonicalize_path(p_script->get_script_path());
+	r_record.local_name = p_script->local_name;
+	r_record.global_name = p_script->global_name;
+	r_record.fully_qualified_name = canonicalize_qualified_script_name(p_script->fully_qualified_name);
+	r_record.tool = p_script->tool;
+	r_record.abstract = p_script->_is_abstract;
+	if (p_script->_owner != nullptr) {
+		const String *owner_identity = p_class_identities.getptr(p_script->_owner);
+		if (owner_identity == nullptr) {
+			return false;
+		}
+		r_record.owner_identity = *owner_identity;
+	}
+	if (p_script->native.is_valid()) {
+		r_record.native_base = p_script->native->get_name();
+	}
+	if (p_script->base.is_valid()) {
+		r_record.script_base_path = GDScript::canonicalize_path(p_script->base->get_script_path());
+		r_record.script_base_class = canonicalize_qualified_script_name(p_script->base->fully_qualified_name);
+		if (r_record.script_base_path.is_empty()) {
+			return false;
+		}
+	}
+
+	auto make_member = [&](const StringName &p_name, const GDScript::MemberInfo &p_member, bool p_own, MemberRecord &r_member) {
+		r_member.name = p_name;
+		r_member.index = p_member.index;
+		r_member.setter = p_member.setter;
+		r_member.getter = p_member.getter;
+		r_member.own_member = p_own;
+		r_member.property = make_property_record(p_member.property_info);
+		return make_data_type_record(p_member.data_type, r_member.data_type);
+	};
+
+	Vector<StringName> names;
+	for (const KeyValue<StringName, GDScript::MemberInfo> &member : p_script->member_indices) {
+		names.push_back(member.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		MemberRecord member;
+		if (!make_member(name, p_script->member_indices[name], p_script->members.has(name), member)) {
+			return false;
+		}
+		r_record.members.push_back(member);
+	}
+
+	names.clear();
+	for (const KeyValue<StringName, GDScript::MemberInfo> &member : p_script->static_variables_indices) {
+		names.push_back(member.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		MemberRecord member;
+		if (!make_member(name, p_script->static_variables_indices[name], true, member)) {
+			return false;
+		}
+		r_record.static_members.push_back(member);
+	}
+
+	names.clear();
+	for (const KeyValue<StringName, Variant> &constant : p_script->constants) {
+		names.push_back(constant.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		NamedConstantRecord constant;
+		constant.name = name;
+		if (!encode_constant(p_script->constants[name], constant.value)) {
+			return false;
+		}
+		r_record.constants.push_back(constant);
+	}
+
+	names.clear();
+	for (const KeyValue<StringName, GDScriptFunction *> &function : p_script->member_functions) {
+		names.push_back(function.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		const String *identity = p_function_identities.getptr(p_script->member_functions[name]);
+		if (identity == nullptr) {
+			return false;
+		}
+		r_record.functions.push_back({ String(name), *identity });
+	}
+
+	names.clear();
+	for (const KeyValue<StringName, Ref<GDScript>> &subclass : p_script->subclasses) {
+		names.push_back(subclass.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		const String *identity = p_class_identities.getptr(p_script->subclasses[name].ptr());
+		if (identity == nullptr) {
+			return false;
+		}
+		r_record.subclasses.push_back({ String(name), *identity });
+	}
+
+	names.clear();
+	for (const KeyValue<StringName, MethodInfo> &signal : p_script->_signals) {
+		names.push_back(signal.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		SignalRecord signal;
+		signal.name = name;
+		if (!make_method_record(p_script->_signals[name], signal.method)) {
+			return false;
+		}
+		r_record.signals.push_back(signal);
+	}
+
+	Vector<String> lambda_identities;
+	HashMap<String, GDScript::LambdaInfo> lambdas;
+	for (const KeyValue<GDScriptFunction *, GDScript::LambdaInfo> &lambda : p_script->lambda_info) {
+		const String *identity = p_function_identities.getptr(lambda.key);
+		if (identity == nullptr) {
+			return false;
+		}
+		lambda_identities.push_back(*identity);
+		lambdas.insert(*identity, lambda.value);
+	}
+	lambda_identities.sort();
+	for (const String &identity : lambda_identities) {
+		const GDScript::LambdaInfo &info = lambdas[identity];
+		r_record.lambdas.push_back({ identity, info.capture_count, info.use_self });
+	}
+
+	if (!encode_constant(p_script->rpc_config, r_record.rpc_config)) {
+		return false;
+	}
+	auto set_function_identity = [&](GDScriptFunction *p_function, String &r_identity) {
+		if (p_function == nullptr) {
+			return true;
+		}
+		const String *identity = p_function_identities.getptr(p_function);
+		if (identity == nullptr) {
+			return false;
+		}
+		r_identity = *identity;
+		return true;
+	};
+	return set_function_identity(p_script->initializer, r_record.initializer) &&
+			set_function_identity(p_script->implicit_initializer, r_record.implicit_initializer) &&
+			set_function_identity(p_script->implicit_ready, r_record.implicit_ready) &&
+			set_function_identity(p_script->static_initializer, r_record.static_initializer);
+}
+
+bool Internals::validate_class_record(const ClassRecord &p_record, GDScript *p_script, const HashMap<GDScript *, String> &p_class_identities,
+		const HashMap<GDScriptFunction *, String> &p_function_identities) {
+	ClassRecord current;
+	const String *identity = p_class_identities.getptr(p_script);
+	if (identity == nullptr || !make_class_record(p_script, *identity, p_class_identities, p_function_identities, current)) {
+		return false;
+	}
+	Writer expected;
+	Writer actual;
+	write_class(expected, p_record);
+	write_class(actual, current);
+	return expected.data == actual.data;
+}
+
 uint64_t Internals::dependency_source_fingerprint(GDScript *p_script) {
 	if (p_script == nullptr) {
 		return 0;
@@ -839,7 +1619,10 @@ void Internals::collect_dependencies_from_script(GDScript *p_root, GDScript *p_s
 
 bool Internals::make_record(GDScriptFunction *p_function, const String &p_identity, const HashMap<GDScriptFunction *, String> &p_identities, FunctionRecord &r_record) {
 	r_record.identity = p_identity;
-	r_record.fingerprint = p_function->get_optimization_fingerprint();
+	if (!make_function_metadata(p_function, r_record)) {
+		return false;
+	}
+	const uint32_t runtime_fingerprint = p_function->get_optimization_fingerprint();
 	r_record.initial_line = p_function->_initial_line;
 	r_record.argument_count = p_function->_argument_count;
 	r_record.vararg_index = p_function->_vararg_index;
@@ -848,7 +1631,7 @@ bool Internals::make_record(GDScriptFunction *p_function, const String &p_identi
 	r_record.operator_feedback_count = p_function->_operator_feedback_count;
 	r_record.call_feedback_count = p_function->_call_feedback_count;
 	r_record.is_static = p_function->_static;
-	r_record.profile_guided = GDScriptOptimizationProfile::has_hint(p_function->get_optimization_profile_key(), r_record.fingerprint);
+	r_record.profile_guided = GDScriptOptimizationProfile::has_hint(p_function->get_optimization_profile_key(), runtime_fingerprint);
 	r_record.code = p_function->code;
 	r_record.default_arguments = p_function->default_arguments;
 	r_record.global_names = p_function->global_names;
@@ -865,6 +1648,7 @@ bool Internals::make_record(GDScriptFunction *p_function, const String &p_identi
 		}
 		r_record.constants.push_back(encoded);
 	}
+	r_record.fingerprint = get_portable_function_fingerprint(r_record);
 	return make_relocations(p_function, p_identities, r_record.relocations);
 }
 
@@ -1006,32 +1790,53 @@ bool Internals::validate_relocations(const FunctionRecord &p_record, GDScriptFun
 	return true;
 }
 
-bool Internals::validate_record(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions) {
-	if (p_record.identity.is_empty() || p_record.code.is_empty() || p_record.code[p_record.code.size() - 1] != GDScriptFunction::OPCODE_END ||
-			p_record.code != p_function->code || p_record.default_arguments != p_function->default_arguments || p_record.global_names != p_function->global_names ||
-			p_record.fingerprint != p_function->get_optimization_fingerprint() || p_record.initial_line != p_function->_initial_line ||
+bool Internals::validate_record(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions, String *r_error) {
+	auto fail = [&](const String &p_message) {
+		if (r_error != nullptr) {
+			*r_error = p_message;
+		}
+		return false;
+	};
+	if (p_record.identity.is_empty() || p_record.code.is_empty() || p_record.code[p_record.code.size() - 1] != GDScriptFunction::OPCODE_END) {
+		return fail("invalid function identity or bytecode terminator");
+	}
+	if (!function_metadata_matches(p_record, p_function)) {
+		return fail("function signature metadata mismatch");
+	}
+	if (p_record.code != p_function->code) {
+		return fail("bytecode mismatch");
+	}
+	if (p_record.default_arguments != p_function->default_arguments || p_record.global_names != p_function->global_names) {
+		return fail("default-argument or global-name table mismatch");
+	}
+	if (p_record.fingerprint != get_portable_function_fingerprint(p_record) || p_record.initial_line != p_function->_initial_line ||
 			p_record.argument_count != p_function->_argument_count || p_record.vararg_index != p_function->_vararg_index || p_record.stack_size != p_function->_stack_size ||
 			p_record.instruction_args_size != p_function->_instruction_args_size || p_record.operator_feedback_count != p_function->_operator_feedback_count ||
-			p_record.call_feedback_count != p_function->_call_feedback_count || p_record.is_static != p_function->_static || p_record.constants.size() != p_function->constants.size() ||
-			p_record.temporary_slots.size() != p_function->temporary_slots.size()) {
-		return false;
+			p_record.call_feedback_count != p_function->_call_feedback_count || p_record.is_static != p_function->_static) {
+		return fail("function frame metadata mismatch");
+	}
+	if (p_record.constants.size() != p_function->constants.size() || p_record.temporary_slots.size() != p_function->temporary_slots.size()) {
+		return fail("constant or temporary-slot table size mismatch");
 	}
 	for (int i = 0; i < p_record.constants.size(); i++) {
 		if (!constant_matches(p_record.constants[i], p_function->constants[i])) {
-			return false;
+			return fail("constant table mismatch at index " + itos(i));
 		}
 	}
 	for (int i = 0; i < p_record.temporary_slots.size(); i++) {
 		if (p_record.temporary_slots[i] != p_function->temporary_slots[i] || p_record.temporary_slots[i].first < 0 || p_record.temporary_slots[i].first >= p_record.stack_size) {
-			return false;
+			return fail("temporary-slot mismatch at index " + itos(i));
 		}
 	}
 	for (int target : p_record.default_arguments) {
 		if (target < 0 || target >= p_record.code.size()) {
-			return false;
+			return fail("default-argument jump target is outside bytecode");
 		}
 	}
-	return validate_relocations(p_record, p_function, p_functions);
+	if (!validate_relocations(p_record, p_function, p_functions)) {
+		return fail("symbolic relocation mismatch");
+	}
+	return true;
 }
 
 void Internals::install_record(const FunctionRecord &p_record, GDScriptFunction *p_function, const HashMap<String, GDScriptFunction *> &p_functions) {
@@ -1193,6 +1998,17 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 	HashMap<GDScriptFunction *, String> identities;
 	Vector<GDScriptFunction *> functions;
 	Internals::collect_functions(p_script, "root", identities, functions);
+	HashMap<GDScript *, String> class_identities;
+	Vector<GDScript *> classes;
+	Internals::collect_classes(p_script, "root", class_identities, classes);
+	Vector<ClassRecord> class_records;
+	for (GDScript *script_class : classes) {
+		ClassRecord record;
+		if (!Internals::make_class_record(script_class, *class_identities.getptr(script_class), class_identities, identities, record)) {
+			return ERR_UNAVAILABLE;
+		}
+		class_records.push_back(record);
+	}
 
 	Vector<FunctionRecord> records;
 	int skipped_functions = 0;
@@ -1226,6 +2042,10 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 		payload.string(dependency.path);
 		payload.u64(dependency.source_fingerprint);
 	}
+	payload.u32(class_records.size());
+	for (const ClassRecord &record : class_records) {
+		write_class(payload, record);
+	}
 	payload.u32(records.size());
 	for (const FunctionRecord &record : records) {
 		write_function(payload, record);
@@ -1245,11 +2065,21 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 	r_module = module.data;
 
 	if (r_summary != nullptr) {
+		*r_summary = Summary();
 		r_summary->path = GDScript::canonicalize_path(p_script->get_script_path());
 		r_summary->source_fingerprint = source_fingerprint;
 		r_summary->engine_api_fingerprint = engine_api_fingerprint;
 		r_summary->dependencies = dependencies;
 		r_summary->skipped_functions = skipped_functions;
+		for (const ClassRecord &record : class_records) {
+			Writer metadata;
+			write_class(metadata, record);
+			ClassSummary summary;
+			summary.identity = record.identity;
+			summary.metadata_fingerprint = fingerprint_bytes(metadata.data.ptr(), metadata.data.size());
+			r_summary->classes.push_back(summary);
+		}
+		r_summary->classes.sort();
 		for (const FunctionRecord &record : records) {
 			FunctionSummary summary;
 			summary.identity = record.identity;
@@ -1307,15 +2137,42 @@ Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p
 	HashMap<GDScriptFunction *, String> identities;
 	Vector<GDScriptFunction *> function_list;
 	Internals::collect_functions(p_script, "root", identities, function_list);
+	HashMap<GDScript *, String> class_identities;
+	Vector<GDScript *> class_list;
+	Internals::collect_classes(p_script, "root", class_identities, class_list);
+	HashMap<String, GDScript *> classes;
+	for (GDScript *script_class : class_list) {
+		classes.insert(*class_identities.getptr(script_class), script_class);
+	}
+	if (module.classes.size() != classes.size()) {
+		if (r_error != nullptr) {
+			*r_error = "Compiled class table does not match the freshly compiled script.";
+		}
+		return ERR_INVALID_DATA;
+	}
+	HashSet<String> validated_classes;
+	for (const ClassRecord &record : module.classes) {
+		GDScript *const *script_class = classes.getptr(record.identity);
+		if (record.identity.is_empty() || validated_classes.has(record.identity) || script_class == nullptr ||
+				!Internals::validate_class_record(record, *script_class, class_identities, identities)) {
+			if (r_error != nullptr) {
+				*r_error = "Class metadata verification failed for '" + record.identity + "'.";
+			}
+			return ERR_INVALID_DATA;
+		}
+		validated_classes.insert(record.identity);
+	}
 	HashMap<String, GDScriptFunction *> functions;
 	for (GDScriptFunction *function : function_list) {
 		functions.insert(*identities.getptr(function), function);
 	}
 	for (const FunctionRecord &record : module.functions) {
 		GDScriptFunction *const *function = functions.getptr(record.identity);
-		if (function == nullptr || !Internals::validate_record(record, *function, functions)) {
+		String verification_error;
+		if (function == nullptr || !Internals::validate_record(record, *function, functions, &verification_error)) {
 			if (r_error != nullptr) {
-				*r_error = "Bytecode verification or symbolic relocation failed for '" + record.identity + "'.";
+				*r_error = "Bytecode verification or symbolic relocation failed for '" + record.identity + "': " +
+						(function == nullptr ? String("function is missing") : verification_error) + ".";
 			}
 			return ERR_INVALID_DATA;
 		}
@@ -1387,6 +2244,11 @@ Vector<uint8_t> GDScriptCompiledModule::create_project_manifest(Vector<Summary> 
 		for (const Dependency &dependency : module.dependencies) {
 			payload.string(dependency.path);
 			payload.u64(dependency.source_fingerprint);
+		}
+		payload.u32(module.classes.size());
+		for (const ClassSummary &script_class : module.classes) {
+			payload.string(script_class.identity);
+			payload.u64(script_class.metadata_fingerprint);
 		}
 		payload.u32(module.functions.size());
 		for (const FunctionSummary &function : module.functions) {

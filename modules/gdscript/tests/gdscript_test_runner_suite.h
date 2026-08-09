@@ -101,12 +101,36 @@ func _init():
 
 TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM bytecode") {
 	GDScriptLanguage::get_singleton()->init();
+	const String module_path = OS::get_singleton()->get_temp_path().path_join("portable_gdscript_module.gdm");
+	const String script_path = module_path.get_basename() + ".gd";
 	Ref<GDScript> gdscript = memnew(GDScript);
+	gdscript->set_path(script_path);
 	gdscript->set_source_code(R"(
+@tool
 extends RefCounted
 
+signal computed(value: int)
+
+const SCALE := 2
+var amount: int = 1
+static var calls: int = 0
+
+struct Sample:
+	var value: int
+
+class Nested:
+	var enabled: bool = true
+
+	func state() -> bool:
+		return enabled
+
+func read_sample(sample: Sample) -> int:
+	return sample.value
+
+@rpc("any_peer", "call_remote", "reliable")
 func compute(value: int) -> String:
-	var text: String = str(value * 2)
+	calls += 1
+	var text: String = str(value * SCALE)
 	set_meta("compiled_module_result", text)
 	return text.to_upper()
 )");
@@ -121,6 +145,11 @@ func compute(value: int) -> String:
 	CHECK(summary.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
 	CHECK(summary.source_fingerprint == GDScriptCompiledModule::fingerprint_source(gdscript->get_source_code()));
 	CHECK(summary.skipped_functions == 0);
+	CHECK(summary.classes.size() == 2);
+	for (const GDScriptCompiledModule::ClassSummary &script_class : summary.classes) {
+		CHECK_FALSE(script_class.identity.is_empty());
+		CHECK(script_class.metadata_fingerprint != 0);
+	}
 	CHECK_FALSE(summary.functions.is_empty());
 
 	Vector<uint8_t> fallback;
@@ -135,7 +164,6 @@ func compute(value: int) -> String:
 	CHECK(String(instance->call(SNAME("compute"), 21)) == "42");
 	CHECK(String(instance->get_meta(SNAME("compiled_module_result"))) == "42");
 
-	const String module_path = OS::get_singleton()->get_temp_path().path_join("portable_gdscript_module.gdm");
 	{
 		Ref<FileAccess> file = FileAccess::open(module_path, FileAccess::WRITE);
 		REQUIRE(file.is_valid());
@@ -143,11 +171,21 @@ func compute(value: int) -> String:
 	}
 	Ref<GDScript> loaded_module = ResourceLoader::load(module_path, "GDScript", ResourceFormatLoader::CACHE_MODE_IGNORE);
 	REQUIRE(loaded_module.is_valid());
+	String loaded_module_error;
+	CHECK_MESSAGE(GDScriptCompiledModule::apply(loaded_module.ptr(), module, &loaded_module_error) == OK, loaded_module_error);
 	CHECK(loaded_module->get_binary_tokens_source() == tokens);
 	CHECK(loaded_module->get_compiled_module_source() == module);
 	Ref<RefCounted> loaded_instance = memnew(RefCounted);
 	loaded_instance->set_script(loaded_module);
 	CHECK(String(loaded_instance->call(SNAME("compute"), 7)) == "14");
+
+	Ref<GDScript> wrong_path_script = memnew(GDScript);
+	wrong_path_script->set_path(module_path.get_basename() + "_other.gd");
+	wrong_path_script->set_source_code(gdscript->get_source_code());
+	REQUIRE(wrong_path_script->reload() == OK);
+	String metadata_error;
+	CHECK(GDScriptCompiledModule::apply(wrong_path_script.ptr(), module, &metadata_error) == ERR_INVALID_DATA);
+	CHECK(metadata_error.contains("Class metadata verification failed"));
 
 	Vector<uint8_t> corrupt = module;
 	corrupt.write[corrupt.size() - 1] ^= 0x80;
@@ -174,6 +212,24 @@ func compute(value: int) -> String:
 	Vector<GDScriptCompiledModule::Summary> modules;
 	modules.push_back(summary);
 	CHECK_FALSE(GDScriptCompiledModule::create_project_manifest(modules).is_empty());
+
+	instance.unref();
+	loaded_instance.unref();
+	gdscript->clear();
+	loaded_module->clear();
+	wrong_path_script->clear();
+	changed_script->clear();
+	cached_script->clear();
+	GDScriptCache::remove_script(module_path);
+	GDScriptCache::remove_script(script_path);
+	GDScriptCache::remove_script(module_path.get_basename() + "_other.gd");
+	GDScriptCache::remove_script(cached_script_path);
+	gdscript.unref();
+	loaded_module.unref();
+	wrong_path_script.unref();
+	changed_script.unref();
+	cached_script.unref();
+	CHECK(DirAccess::remove_absolute(module_path) == OK);
 }
 
 TEST_CASE("[Modules][GDScript] Struct expressions use specialized VM instructions") {

@@ -285,7 +285,26 @@ String GDScriptFunction::get_optimization_profile_key() const {
 uint32_t GDScriptFunction::get_optimization_fingerprint() const {
 	uint32_t fingerprint = hash_murmur3_buffer(_code_ptr, _code_size * sizeof(int));
 	for (int i = 0; i < _constant_count; i++) {
-		fingerprint = hash_murmur3_one_64(uint64_t(_constants_ptr[i].get_type()) << 32 | _constants_ptr[i].hash(), fingerprint);
+		uint32_t constant_hash = _constants_ptr[i].hash();
+		if (_constants_ptr[i].get_type() == Variant::OBJECT) {
+			Object *object = _constants_ptr[i].get_validated_object();
+			if (GDScript *script = Object::cast_to<GDScript>(object)) {
+				constant_hash = GDScript::canonicalize_path(script->get_script_path()).hash();
+				String qualified_name = script->get_fully_qualified_name();
+				const int separator = qualified_name.find("::");
+				if (separator >= 0) {
+					qualified_name = GDScript::canonicalize_path(qualified_name.left(separator)) + qualified_name.substr(separator);
+				} else {
+					qualified_name = GDScript::canonicalize_path(qualified_name);
+				}
+				constant_hash = hash_murmur3_one_32(qualified_name.hash(), constant_hash);
+			} else if (GDScriptNativeClass *native_class = Object::cast_to<GDScriptNativeClass>(object)) {
+				constant_hash = native_class->get_name().hash();
+			} else if (Resource *resource = Object::cast_to<Resource>(object)) {
+				constant_hash = resource->get_path().hash();
+			}
+		}
+		fingerprint = hash_murmur3_one_64(uint64_t(_constants_ptr[i].get_type()) << 32 | constant_hash, fingerprint);
 	}
 	for (const GDScriptDataType &argument_type : argument_types) {
 		fingerprint = hash_murmur3_one_64(argument_type.kind == GDScriptDataType::BUILTIN ? argument_type.builtin_type + 1 : 0, fingerprint);

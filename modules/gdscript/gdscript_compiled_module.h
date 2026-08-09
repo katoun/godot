@@ -55,18 +55,26 @@ public:
 		bool operator<(const FunctionSummary &p_other) const { return identity < p_other.identity; }
 	};
 
+	struct ClassSummary {
+		String identity;
+		uint64_t metadata_fingerprint = 0;
+
+		bool operator<(const ClassSummary &p_other) const { return identity < p_other.identity; }
+	};
+
 	struct Summary {
 		String path;
 		uint64_t source_fingerprint = 0;
 		uint64_t engine_api_fingerprint = 0;
 		Vector<Dependency> dependencies;
+		Vector<ClassSummary> classes;
 		Vector<FunctionSummary> functions;
 		int skipped_functions = 0;
 
 		bool operator<(const Summary &p_other) const { return path < p_other.path; }
 	};
 
-	static constexpr uint32_t FORMAT_VERSION = 1;
+	static constexpr uint32_t FORMAT_VERSION = 2;
 	static constexpr uint32_t BYTECODE_VERSION = 1;
 
 	static uint64_t fingerprint_bytes(const uint8_t *p_data, uint64_t p_size);
