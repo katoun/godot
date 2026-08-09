@@ -30,6 +30,7 @@
 
 #include "gdscript_resource_format.h"
 
+#include "gdscript_analyzer.h"
 #include "gdscript_cache.h"
 #include "gdscript_compiled_module.h"
 #include "gdscript_parser.h"
@@ -75,12 +76,31 @@ String ResourceFormatLoaderGDScript::get_resource_type(const String &p_path) con
 
 void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<String> *p_dependencies, bool p_add_types) {
 	if (p_path.get_extension() == "gdm") {
+		const Vector<uint8_t> module = FileAccess::get_file_as_bytes(p_path);
 		Vector<GDScriptCompiledModule::Dependency> dependencies;
-		if (GDScriptCompiledModule::get_dependencies(FileAccess::get_file_as_bytes(p_path), dependencies) != OK) {
+		if (GDScriptCompiledModule::get_dependencies(module, dependencies) == OK) {
+			for (const GDScriptCompiledModule::Dependency &dependency : dependencies) {
+				p_dependencies->push_back(dependency.path);
+			}
 			return;
 		}
-		for (const GDScriptCompiledModule::Dependency &dependency : dependencies) {
-			p_dependencies->push_back(dependency.path);
+
+		// Dependency scanning follows the same compatibility policy as runtime
+		// loading: a rejected portable payload is still a valid tokenized script.
+		Vector<uint8_t> fallback_tokens;
+		if (GDScriptCompiledModule::extract_fallback(module, fallback_tokens) != OK) {
+			return;
+		}
+		GDScriptParser parser;
+		if (parser.parse_binary(fallback_tokens, p_path) != OK) {
+			return;
+		}
+		GDScriptAnalyzer analyzer(&parser);
+		if (analyzer.analyze() != OK) {
+			return;
+		}
+		for (const KeyValue<String, Ref<GDScriptParserRef>> &dependency : parser.get_depended_parsers()) {
+			p_dependencies->push_back(dependency.key);
 		}
 		return;
 	}

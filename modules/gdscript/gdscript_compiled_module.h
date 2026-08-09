@@ -81,7 +81,13 @@ public:
 		bool operator<(const Summary &p_other) const { return path < p_other.path; }
 	};
 
-	static constexpr uint32_t FORMAT_VERSION = 6;
+	// The envelope remains stable across payload format revisions so an older
+	// engine can recover the embedded token stream without understanding newer
+	// class metadata or bytecode.
+	static constexpr uint32_t ENVELOPE_VERSION = 1;
+	static constexpr uint32_t ENVELOPE_HEADER_SIZE = 60;
+	static constexpr uint32_t ENVELOPE_FLAG_HAS_FALLBACK = 1 << 0;
+	static constexpr uint32_t FORMAT_VERSION = 7;
 	static constexpr uint32_t DEBUG_INFO_VERSION = 1;
 	// Version 2 stores OPCODE_STORE_GLOBAL operands as indices into the
 	// function's symbolic name table. They are relocated to the running
@@ -97,6 +103,30 @@ public:
 		DEBUG_INFO_STRIPPED,
 	};
 
+	enum RejectionReason {
+		REJECTION_NONE,
+		REJECTION_FORMAT_VERSION,
+		REJECTION_BYTECODE_VERSION,
+		REJECTION_ENGINE_API,
+		REJECTION_CHANGED_DEPENDENCY,
+		REJECTION_UNKNOWN_METADATA,
+		REJECTION_FAILED_RELOCATION,
+		REJECTION_INVALID_BYTECODE,
+		REJECTION_UNSUPPORTED_FEATURE,
+		REJECTION_SOURCE_MISMATCH,
+		REJECTION_CORRUPT_MODULE,
+	};
+
+	struct Rejection {
+		RejectionReason reason = REJECTION_NONE;
+		String detail;
+		bool fallback_available = false;
+
+		String describe() const;
+	};
+
+	static String get_rejection_reason_name(RejectionReason p_reason);
+
 	static Error create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary = nullptr,
 			DebugInfoMode p_debug_info = DEBUG_INFO_FULL);
 	static Error extract_fallback(const Vector<uint8_t> &p_module, Vector<uint8_t> &r_fallback_tokens, uint64_t *r_source_fingerprint = nullptr, String *r_error = nullptr);
@@ -104,15 +134,15 @@ public:
 	// Performs pointer-free structural, semantic, control-flow, type, and
 	// symbolic-relocation validation. The deterministic module registry also
 	// validates the complete dependency closure and handles metadata cycles.
-	static Error verify(const Vector<uint8_t> &p_module, String *r_error = nullptr);
+	static Error verify(const Vector<uint8_t> &p_module, String *r_error = nullptr, Rejection *r_rejection = nullptr);
 	// Creates only the nested GDScript resource graph. This lets cyclic
 	// dependencies resolve class identities before either module is fully
 	// loaded, without invoking the parser for a valid module.
-	static Error prepare_shallow(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error = nullptr);
+	static Error prepare_shallow(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error = nullptr, Rejection *r_rejection = nullptr);
 	// Builds the complete runtime class/function graph directly from portable
 	// metadata and verified bytecode.
-	static Error build_runtime(GDScript *p_script, const Vector<uint8_t> &p_module, bool p_keep_state, String *r_error = nullptr);
-	static Error apply(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error = nullptr);
+	static Error build_runtime(GDScript *p_script, const Vector<uint8_t> &p_module, bool p_keep_state, String *r_error = nullptr, Rejection *r_rejection = nullptr);
+	static Error apply(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error = nullptr, Rejection *r_rejection = nullptr);
 
 	static String get_editor_cache_path(const String &p_script_path);
 	static Error load_editor_cache(const String &p_script_path, const String &p_source, Vector<uint8_t> &r_module, String *r_error = nullptr);

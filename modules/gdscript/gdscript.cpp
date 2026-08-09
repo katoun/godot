@@ -829,7 +829,8 @@ Error GDScript::reload(bool p_keep_state) {
 	// through to the normal front end and binary-token fallback below.
 	if (!compiled_module.is_empty()) {
 		String module_error;
-		if (GDScriptCompiledModule::build_runtime(this, compiled_module, p_keep_state, &module_error) == OK) {
+		GDScriptCompiledModule::Rejection rejection;
+		if (GDScriptCompiledModule::build_runtime(this, compiled_module, p_keep_state, &module_error, &rejection) == OK) {
 			compiled_module_fallback_reason.clear();
 			can_run = ScriptServer::is_scripting_enabled() || is_tool();
 			bool has_static_data = false;
@@ -870,7 +871,7 @@ Error GDScript::reload(bool p_keep_state) {
 			reloading = false;
 			return OK;
 		}
-		compiled_module_fallback_reason = "Direct runtime build failed: " + module_error;
+		compiled_module_fallback_reason = "Direct runtime build rejected (" + rejection.describe() + ")";
 		print_verbose("Could not build compiled GDScript module directly for '" + get_script_path() + "': " + compiled_module_fallback_reason + ". Falling back to the GDScript front end.");
 	}
 
@@ -933,8 +934,9 @@ Error GDScript::reload(bool p_keep_state) {
 	// bytecode it can prove equivalent to that graph.
 	if (!compiled_module.is_empty()) {
 		String module_error;
-		if (GDScriptCompiledModule::apply(this, compiled_module, &module_error) != OK) {
-			compiled_module_fallback_reason = "Fresh-compile verification failed: " + module_error;
+		GDScriptCompiledModule::Rejection rejection;
+		if (GDScriptCompiledModule::apply(this, compiled_module, &module_error, &rejection) != OK) {
+			compiled_module_fallback_reason = "Fresh-compile verification rejected (" + rejection.describe() + ")";
 			print_verbose("Discarding compiled GDScript module for '" + get_script_path() + "': " + compiled_module_fallback_reason);
 			compiled_module.clear();
 		}

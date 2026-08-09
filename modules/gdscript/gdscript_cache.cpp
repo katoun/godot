@@ -367,9 +367,10 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 	bool module_shells_ready = false;
 	if (!script->get_compiled_module_source().is_empty()) {
 		String module_error;
-		module_shells_ready = GDScriptCompiledModule::prepare_shallow(script.ptr(), script->get_compiled_module_source(), &module_error) == OK;
+		GDScriptCompiledModule::Rejection rejection;
+		module_shells_ready = GDScriptCompiledModule::prepare_shallow(script.ptr(), script->get_compiled_module_source(), &module_error, &rejection) == OK;
 		if (!module_shells_ready) {
-			script->set_compiled_module_fallback_reason("Shallow class preparation failed: " + module_error);
+			script->set_compiled_module_fallback_reason("Shallow class preparation rejected (" + rejection.describe() + ")");
 			print_verbose("Could not prepare compiled GDScript module shells for '" + p_path + "': " + module_error);
 		}
 	}

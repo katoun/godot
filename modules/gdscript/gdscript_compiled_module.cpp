@@ -217,6 +217,69 @@ struct Reader {
 	}
 };
 
+struct ModuleEnvelope {
+	uint32_t format_version = 0;
+	uint32_t bytecode_version = 0;
+	uint32_t flags = 0;
+	uint64_t engine_api_fingerprint = 0;
+	uint64_t source_fingerprint = 0;
+	uint64_t payload_fingerprint = 0;
+	uint64_t fallback_fingerprint = 0;
+	Vector<uint8_t> fallback_tokens;
+	uint64_t payload_offset = 0;
+	uint32_t payload_size = 0;
+};
+
+void set_rejection(GDScriptCompiledModule::Rejection *r_rejection, GDScriptCompiledModule::RejectionReason p_reason,
+		const String &p_detail, bool p_fallback_available) {
+	if (r_rejection == nullptr) {
+		return;
+	}
+	r_rejection->reason = p_reason;
+	r_rejection->detail = p_detail;
+	r_rejection->fallback_available = p_fallback_available;
+}
+
+Error read_envelope(const Vector<uint8_t> &p_module, ModuleEnvelope &r_envelope, String *r_error,
+		GDScriptCompiledModule::Rejection *r_rejection = nullptr) {
+	auto fail = [&](const String &p_message) {
+		if (r_error != nullptr) {
+			*r_error = p_message;
+		}
+		set_rejection(r_rejection, GDScriptCompiledModule::REJECTION_CORRUPT_MODULE, p_message, false);
+		return ERR_FILE_CORRUPT;
+	};
+	Reader header(p_module.ptr(), p_module.size());
+	if (header.u32() != MODULE_MAGIC) {
+		return fail("Not a compiled GDScript module.");
+	}
+	if (header.u32() != GDScriptCompiledModule::ENVELOPE_VERSION) {
+		return fail("Unsupported compiled GDScript envelope version.");
+	}
+	r_envelope.format_version = header.u32();
+	r_envelope.bytecode_version = header.u32();
+	r_envelope.flags = header.u32();
+	r_envelope.engine_api_fingerprint = header.u64();
+	r_envelope.source_fingerprint = header.u64();
+	r_envelope.payload_fingerprint = header.u64();
+	r_envelope.fallback_fingerprint = header.u64();
+	const uint32_t fallback_size = header.u32();
+	r_envelope.payload_size = header.u32();
+	if (header.failed || header.offset != GDScriptCompiledModule::ENVELOPE_HEADER_SIZE || fallback_size > MAX_BLOB_SIZE ||
+			r_envelope.payload_size > MAX_BLOB_SIZE || header.offset + fallback_size + r_envelope.payload_size != header.size) {
+		return fail("Invalid compiled GDScript envelope sizes.");
+	}
+	if (fallback_size > 0) {
+		r_envelope.fallback_tokens.resize(fallback_size);
+		memcpy(r_envelope.fallback_tokens.ptrw(), p_module.ptr() + header.offset, fallback_size);
+		if (GDScriptCompiledModule::fingerprint_bytes(r_envelope.fallback_tokens.ptr(), r_envelope.fallback_tokens.size()) != r_envelope.fallback_fingerprint) {
+			return fail("Embedded GDScript token fallback checksum mismatch.");
+		}
+	}
+	r_envelope.payload_offset = header.offset + fallback_size;
+	return OK;
+}
+
 struct ConstantData {
 	ConstantKind kind = CONSTANT_VARIANT;
 	Vector<uint8_t> encoded;
@@ -470,6 +533,7 @@ class ModuleVerifier {
 	uint64_t metadata_entries = 0;
 	uint64_t constant_bytes = 0;
 	uint64_t total_code_words = 0;
+	GDScriptCompiledModule::RejectionReason failure_context = GDScriptCompiledModule::REJECTION_INVALID_BYTECODE;
 
 	Error fail(const String &p_message);
 	Error add_metadata_entries(uint64_t p_count, const String &p_context);
@@ -494,6 +558,7 @@ public:
 	explicit ModuleVerifier(const ParsedModule &p_module) :
 			module(p_module) {}
 	Error verify(String *r_error = nullptr);
+	GDScriptCompiledModule::RejectionReason get_rejection_reason() const { return failure_context; }
 };
 
 class RuntimeBuilder {
@@ -1240,42 +1305,46 @@ bool read_debug_section(const Vector<uint8_t> &p_data, ParsedModule &r_module) {
 	return true;
 }
 
-Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, String *r_error) {
-	auto fail = [&](const String &p_message) {
+Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, String *r_error,
+		GDScriptCompiledModule::Rejection *r_rejection = nullptr) {
+	ModuleEnvelope envelope;
+	const Error envelope_error = read_envelope(p_module, envelope, r_error, r_rejection);
+	if (envelope_error != OK) {
+		return envelope_error;
+	}
+	const bool fallback_available = !envelope.fallback_tokens.is_empty();
+	auto fail = [&](GDScriptCompiledModule::RejectionReason p_reason, const String &p_message, Error p_error = ERR_FILE_CORRUPT) {
 		if (r_error != nullptr) {
 			*r_error = p_message;
 		}
-		return ERR_FILE_CORRUPT;
+		set_rejection(r_rejection, p_reason, p_message, fallback_available);
+		return p_error;
 	};
-
-	Reader header(p_module.ptr(), p_module.size());
-	if (header.u32() != MODULE_MAGIC) {
-		return fail("Not a compiled GDScript module.");
+	if ((envelope.flags & ~GDScriptCompiledModule::ENVELOPE_FLAG_HAS_FALLBACK) != 0) {
+		return fail(GDScriptCompiledModule::REJECTION_UNSUPPORTED_FEATURE, "Compiled GDScript module requires unsupported envelope features.", ERR_UNAVAILABLE);
 	}
-	if (header.u32() != GDScriptCompiledModule::FORMAT_VERSION) {
-		return fail("Unsupported compiled GDScript module format.");
+	if (((envelope.flags & GDScriptCompiledModule::ENVELOPE_FLAG_HAS_FALLBACK) != 0) != fallback_available) {
+		return fail(GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA, "Compiled GDScript fallback flag and token section disagree.");
 	}
-	if (header.u32() != GDScriptCompiledModule::BYTECODE_VERSION) {
-		return fail("Unsupported GDScript bytecode version.");
+	if (envelope.format_version != GDScriptCompiledModule::FORMAT_VERSION) {
+		return fail(GDScriptCompiledModule::REJECTION_FORMAT_VERSION, "Unsupported compiled GDScript module format.", ERR_UNAVAILABLE);
 	}
-	r_module.engine_api_fingerprint = header.u64();
-	r_module.source_fingerprint = header.u64();
-	const uint64_t payload_fingerprint = header.u64();
-	const uint32_t payload_size = header.u32();
-	if (header.failed || payload_size > MAX_BLOB_SIZE || header.offset + payload_size != header.size) {
-		return fail("Invalid compiled GDScript module payload size.");
+	if (envelope.bytecode_version != GDScriptCompiledModule::BYTECODE_VERSION) {
+		return fail(GDScriptCompiledModule::REJECTION_BYTECODE_VERSION, "Unsupported GDScript bytecode version.", ERR_UNAVAILABLE);
 	}
-	const uint8_t *payload_data = p_module.ptr() + header.offset;
-	if (GDScriptCompiledModule::fingerprint_bytes(payload_data, payload_size) != payload_fingerprint) {
-		return fail("Compiled GDScript module checksum mismatch.");
+	r_module.engine_api_fingerprint = envelope.engine_api_fingerprint;
+	r_module.source_fingerprint = envelope.source_fingerprint;
+	r_module.fallback_tokens = envelope.fallback_tokens;
+	const uint8_t *payload_data = p_module.ptr() + envelope.payload_offset;
+	if (GDScriptCompiledModule::fingerprint_bytes(payload_data, envelope.payload_size) != envelope.payload_fingerprint) {
+		return fail(GDScriptCompiledModule::REJECTION_CORRUPT_MODULE, "Compiled GDScript module payload checksum mismatch.");
 	}
 
-	Reader payload(payload_data, payload_size);
+	Reader payload(payload_data, envelope.payload_size);
 	r_module.path = payload.string();
 	r_module.module_fingerprint = payload.u64();
 	r_module.schema_fingerprint = payload.u64();
 	r_module.dependency_fingerprint = payload.u64();
-	r_module.fallback_tokens = payload.bytes();
 	const uint32_t dependency_count = payload.count(MAX_MODULE_CLASSES);
 	r_module.dependencies.resize(dependency_count);
 	for (uint32_t i = 0; i < dependency_count; i++) {
@@ -1297,11 +1366,12 @@ Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, Stri
 	}
 	const Vector<uint8_t> debug_section = payload.bytes();
 	if (!read_debug_section(debug_section, r_module)) {
-		return fail("Malformed or unsupported compiled GDScript debug section.");
+		return fail(GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA, "Malformed or unsupported compiled GDScript debug section.");
 	}
 	if (payload.failed || payload.offset != payload.size || r_module.fallback_tokens.is_empty() || r_module.classes.is_empty()) {
-		return fail("Malformed compiled GDScript module payload.");
+		return fail(GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA, "Malformed compiled GDScript module payload.");
 	}
+	set_rejection(r_rejection, GDScriptCompiledModule::REJECTION_NONE, String(), fallback_available);
 	return OK;
 }
 
@@ -2434,9 +2504,12 @@ private:
 
 	HashMap<String, Entry> entries;
 	String error;
+	String root_path;
+	GDScriptCompiledModule::RejectionReason rejection_reason = GDScriptCompiledModule::REJECTION_CHANGED_DEPENDENCY;
 
-	Error fail(const String &p_message) {
+	Error fail(const String &p_message, GDScriptCompiledModule::RejectionReason p_reason = GDScriptCompiledModule::REJECTION_CHANGED_DEPENDENCY) {
 		error = p_message;
+		rejection_reason = p_reason;
 		return ERR_INVALID_DATA;
 	}
 
@@ -2558,11 +2631,14 @@ private:
 		entry->state = STATE_RESOLVING;
 		const ParsedModule module = entry->module;
 		if (module.engine_api_fingerprint != GDScriptCompiledModule::get_engine_api_fingerprint()) {
-			return fail("Engine API fingerprint mismatch for module '" + p_path + "'.");
+			return fail("Engine API fingerprint mismatch for module '" + p_path + "'.", p_path == root_path ?
+					GDScriptCompiledModule::REJECTION_ENGINE_API : GDScriptCompiledModule::REJECTION_CHANGED_DEPENDENCY);
 		}
 		String verification_error;
-		if (ModuleVerifier(module).verify(&verification_error) != OK) {
-			return fail("Module verification failed for '" + p_path + "': " + verification_error);
+		ModuleVerifier verifier(module);
+		if (verifier.verify(&verification_error) != OK) {
+			return fail("Module verification failed for '" + p_path + "': " + verification_error,
+					p_path == root_path ? verifier.get_rejection_reason() : GDScriptCompiledModule::REJECTION_CHANGED_DEPENDENCY);
 		}
 		for (const GDScriptCompiledModule::Dependency &dependency : module.dependencies) {
 			if (validate_dependency(dependency) != OK) {
@@ -2576,6 +2652,8 @@ private:
 
 public:
 	Error verify_graph(const ParsedModule &p_root, String *r_error) {
+		root_path = p_root.path;
+		rejection_reason = GDScriptCompiledModule::REJECTION_NONE;
 		Entry root;
 		root.state = STATE_LOADING_METADATA;
 		root.module = p_root;
@@ -2593,6 +2671,8 @@ public:
 		}
 		return result;
 	}
+
+	GDScriptCompiledModule::RejectionReason get_rejection_reason() const { return rejection_reason; }
 };
 
 bool validate_constructor_symbol(const Symbol &p_symbol) {
@@ -4166,8 +4246,10 @@ Error ModuleVerifier::verify(String *r_error) {
 	if (r_error != nullptr) {
 		r_error->clear();
 	}
+	failure_context = GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA;
 	Error result = index_and_verify_metadata();
 	if (result == OK) {
+		failure_context = GDScriptCompiledModule::REJECTION_INVALID_BYTECODE;
 		result = decode_instructions();
 	}
 	if (result == OK) {
@@ -4186,16 +4268,22 @@ Error ModuleVerifier::verify(String *r_error) {
 		result = validate_operations();
 	}
 	if (result == OK) {
+		failure_context = GDScriptCompiledModule::REJECTION_FAILED_RELOCATION;
 		result = validate_relocations();
 	}
 	if (result == OK) {
+		failure_context = GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA;
 		result = validate_debug_metadata();
 	}
 	if (result == OK) {
+		failure_context = GDScriptCompiledModule::REJECTION_INVALID_BYTECODE;
 		result = validate_final_limits();
 	}
 	if (result != OK && r_error != nullptr) {
 		*r_error = error.is_empty() ? String("Compiled module verification failed.") : error;
+	}
+	if (result == OK) {
+		failure_context = GDScriptCompiledModule::REJECTION_NONE;
 	}
 	return result;
 }
@@ -5753,6 +5841,39 @@ Error RuntimeBuilder::build(GDScript *p_script, const ParsedModule &p_module, bo
 
 using namespace GDScriptCompiledModuleImplementation;
 
+String GDScriptCompiledModule::get_rejection_reason_name(RejectionReason p_reason) {
+	switch (p_reason) {
+		case REJECTION_NONE:
+			return "none";
+		case REJECTION_FORMAT_VERSION:
+			return "format-version mismatch";
+		case REJECTION_BYTECODE_VERSION:
+			return "bytecode-version mismatch";
+		case REJECTION_ENGINE_API:
+			return "engine API mismatch";
+		case REJECTION_CHANGED_DEPENDENCY:
+			return "changed dependency";
+		case REJECTION_UNKNOWN_METADATA:
+			return "unknown metadata";
+		case REJECTION_FAILED_RELOCATION:
+			return "failed relocation";
+		case REJECTION_INVALID_BYTECODE:
+			return "invalid bytecode";
+		case REJECTION_UNSUPPORTED_FEATURE:
+			return "unsupported feature";
+		case REJECTION_SOURCE_MISMATCH:
+			return "source mismatch";
+		case REJECTION_CORRUPT_MODULE:
+			return "corrupt module";
+	}
+	return "unknown rejection";
+}
+
+String GDScriptCompiledModule::Rejection::describe() const {
+	const String reason_name = GDScriptCompiledModule::get_rejection_reason_name(reason);
+	return detail.is_empty() ? reason_name : reason_name + ": " + detail;
+}
+
 uint64_t GDScriptCompiledModule::fingerprint_bytes(const uint8_t *p_data, uint64_t p_size) {
 	if (p_size == 0 || p_data == nullptr) {
 		return 0x9e3779b97f4a7c15ULL;
@@ -5900,7 +6021,6 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 	payload.u64(module_fingerprint);
 	payload.u64(schema_fingerprint);
 	payload.u64(dependency_fingerprint);
-	payload.bytes(p_fallback_tokens);
 	payload.u32(dependencies.size());
 	for (const Dependency &dependency : dependencies) {
 		payload.string(dependency.path);
@@ -5921,15 +6041,21 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 
 	Writer module;
 	module.u32(MODULE_MAGIC);
+	module.u32(ENVELOPE_VERSION);
 	module.u32(FORMAT_VERSION);
 	module.u32(BYTECODE_VERSION);
+	module.u32(ENVELOPE_FLAG_HAS_FALLBACK);
 	module.u64(engine_api_fingerprint);
 	module.u64(source_fingerprint);
 	module.u64(fingerprint_bytes(payload.data.ptr(), payload.data.size()));
+	module.u64(fingerprint_bytes(p_fallback_tokens.ptr(), p_fallback_tokens.size()));
+	module.u32(p_fallback_tokens.size());
 	module.u32(payload.data.size());
 	const int header_size = module.data.size();
-	module.data.resize(header_size + payload.data.size());
-	memcpy(module.data.ptrw() + header_size, payload.data.ptr(), payload.data.size());
+	CRASH_COND(header_size != ENVELOPE_HEADER_SIZE);
+	module.data.resize(header_size + p_fallback_tokens.size() + payload.data.size());
+	memcpy(module.data.ptrw() + header_size, p_fallback_tokens.ptr(), p_fallback_tokens.size());
+	memcpy(module.data.ptrw() + header_size + p_fallback_tokens.size(), payload.data.ptr(), payload.data.size());
 	r_module = module.data;
 
 	if (r_summary != nullptr) {
@@ -5965,14 +6091,20 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 }
 
 Error GDScriptCompiledModule::extract_fallback(const Vector<uint8_t> &p_module, Vector<uint8_t> &r_fallback_tokens, uint64_t *r_source_fingerprint, String *r_error) {
-	ParsedModule module;
-	const Error error = parse_module(p_module, module, r_error);
+	ModuleEnvelope envelope;
+	const Error error = read_envelope(p_module, envelope, r_error);
 	if (error != OK) {
 		return error;
 	}
-	r_fallback_tokens = module.fallback_tokens;
+	if ((envelope.flags & ENVELOPE_FLAG_HAS_FALLBACK) == 0 || envelope.fallback_tokens.is_empty()) {
+		if (r_error != nullptr) {
+			*r_error = "Compiled GDScript module has no embedded token fallback.";
+		}
+		return ERR_UNAVAILABLE;
+	}
+	r_fallback_tokens = envelope.fallback_tokens;
 	if (r_source_fingerprint != nullptr) {
-		*r_source_fingerprint = module.source_fingerprint;
+		*r_source_fingerprint = envelope.source_fingerprint;
 	}
 	return OK;
 }
@@ -5987,99 +6119,134 @@ Error GDScriptCompiledModule::get_dependencies(const Vector<uint8_t> &p_module, 
 	return OK;
 }
 
-Error GDScriptCompiledModule::verify(const Vector<uint8_t> &p_module, String *r_error) {
+Error GDScriptCompiledModule::verify(const Vector<uint8_t> &p_module, String *r_error, Rejection *r_rejection) {
 	ParsedModule module;
-	const Error parse_error = parse_module(p_module, module, r_error);
+	const Error parse_error = parse_module(p_module, module, r_error, r_rejection);
 	if (parse_error != OK) {
 		return parse_error;
 	}
 	if (module.engine_api_fingerprint != get_engine_api_fingerprint()) {
+		const String detail = "Engine/Variant API fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Engine/Variant API fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_ENGINE_API, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	ModuleRegistry registry;
-	return registry.verify_graph(module, r_error);
+	const Error result = registry.verify_graph(module, r_error);
+	if (result != OK) {
+		set_rejection(r_rejection, registry.get_rejection_reason(), r_error != nullptr ? *r_error : String(), !module.fallback_tokens.is_empty());
+	} else {
+		set_rejection(r_rejection, REJECTION_NONE, String(), !module.fallback_tokens.is_empty());
+	}
+	return result;
 }
 
-Error GDScriptCompiledModule::prepare_shallow(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error) {
+Error GDScriptCompiledModule::prepare_shallow(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error, Rejection *r_rejection) {
 	ERR_FAIL_NULL_V(p_script, ERR_INVALID_PARAMETER);
 	ParsedModule module;
-	Error parse_error = parse_module(p_module, module, r_error);
+	Error parse_error = parse_module(p_module, module, r_error, r_rejection);
 	if (parse_error != OK) {
 		return parse_error;
 	}
 	if (module.engine_api_fingerprint != get_engine_api_fingerprint()) {
+		const String detail = "Engine/Variant API fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Engine/Variant API fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_ENGINE_API, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	if ((!p_script->source.is_empty() && module.source_fingerprint != fingerprint_source(p_script->source)) ||
 			(!p_script->binary_tokens.is_empty() && module.fallback_tokens != p_script->binary_tokens)) {
+		const String detail = "Source or binary-token fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Source or binary-token fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_SOURCE_MISMATCH, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	ModuleRegistry registry;
 	if (registry.verify_graph(module, r_error) != OK) {
+		set_rejection(r_rejection, registry.get_rejection_reason(), r_error != nullptr ? *r_error : String(), !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
-	return RuntimeBuilder::prepare_shell_graph(p_script, module, nullptr, r_error);
+	const Error result = RuntimeBuilder::prepare_shell_graph(p_script, module, nullptr, r_error);
+	if (result != OK) {
+		set_rejection(r_rejection, REJECTION_UNKNOWN_METADATA, r_error != nullptr ? *r_error : String(), !module.fallback_tokens.is_empty());
+	} else {
+		set_rejection(r_rejection, REJECTION_NONE, String(), !module.fallback_tokens.is_empty());
+	}
+	return result;
 }
 
-Error GDScriptCompiledModule::build_runtime(GDScript *p_script, const Vector<uint8_t> &p_module, bool p_keep_state, String *r_error) {
+Error GDScriptCompiledModule::build_runtime(GDScript *p_script, const Vector<uint8_t> &p_module, bool p_keep_state, String *r_error, Rejection *r_rejection) {
 	ERR_FAIL_NULL_V(p_script, ERR_INVALID_PARAMETER);
 	ParsedModule module;
-	Error parse_error = parse_module(p_module, module, r_error);
+	Error parse_error = parse_module(p_module, module, r_error, r_rejection);
 	if (parse_error != OK) {
 		return parse_error;
 	}
 	if (module.engine_api_fingerprint != get_engine_api_fingerprint()) {
+		const String detail = "Engine/Variant API fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Engine/Variant API fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_ENGINE_API, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	if ((!p_script->source.is_empty() && module.source_fingerprint != fingerprint_source(p_script->source)) ||
 			(!p_script->binary_tokens.is_empty() && module.fallback_tokens != p_script->binary_tokens)) {
+		const String detail = "Source or binary-token fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Source or binary-token fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_SOURCE_MISMATCH, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	ModuleRegistry registry;
 	if (registry.verify_graph(module, r_error) != OK) {
+		set_rejection(r_rejection, registry.get_rejection_reason(), r_error != nullptr ? *r_error : String(), !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	RuntimeBuilder builder;
-	return builder.build(p_script, module, p_keep_state, r_error);
+	const Error result = builder.build(p_script, module, p_keep_state, r_error);
+	if (result != OK) {
+		set_rejection(r_rejection, REJECTION_FAILED_RELOCATION, r_error != nullptr ? *r_error : String(), !module.fallback_tokens.is_empty());
+	} else {
+		set_rejection(r_rejection, REJECTION_NONE, String(), !module.fallback_tokens.is_empty());
+	}
+	return result;
 }
 
-Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error) {
+Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error, Rejection *r_rejection) {
 	ERR_FAIL_NULL_V(p_script, ERR_INVALID_PARAMETER);
 	ParsedModule module;
-	Error error = parse_module(p_module, module, r_error);
+	Error error = parse_module(p_module, module, r_error, r_rejection);
 	if (error != OK) {
 		return error;
 	}
 	if (module.engine_api_fingerprint != get_engine_api_fingerprint()) {
+		const String detail = "Engine/Variant API fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Engine/Variant API fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_ENGINE_API, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	if ((!p_script->source.is_empty() && module.source_fingerprint != fingerprint_source(p_script->source)) ||
 			(!p_script->binary_tokens.is_empty() && module.fallback_tokens != p_script->binary_tokens)) {
+		const String detail = "Source or binary-token fingerprint mismatch.";
 		if (r_error != nullptr) {
-			*r_error = "Source or binary-token fingerprint mismatch.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_SOURCE_MISMATCH, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	ModuleRegistry registry;
 	if (registry.verify_graph(module, r_error) != OK) {
+		set_rejection(r_rejection, registry.get_rejection_reason(), r_error != nullptr ? *r_error : String(), !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 
@@ -6094,9 +6261,11 @@ Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p
 		classes.insert(*class_identities.getptr(script_class), script_class);
 	}
 	if (module.classes.size() != classes.size()) {
+		const String detail = "Compiled class table does not match the freshly compiled script.";
 		if (r_error != nullptr) {
-			*r_error = "Compiled class table does not match the freshly compiled script.";
+			*r_error = detail;
 		}
+		set_rejection(r_rejection, REJECTION_UNKNOWN_METADATA, detail, !module.fallback_tokens.is_empty());
 		return ERR_INVALID_DATA;
 	}
 	HashSet<String> validated_classes;
@@ -6104,9 +6273,11 @@ Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p
 		GDScript *const *script_class = classes.getptr(record.identity);
 		if (record.identity.is_empty() || validated_classes.has(record.identity) || script_class == nullptr ||
 				!Internals::validate_class_record(record, *script_class, class_identities, identities)) {
+			const String detail = "Class metadata verification failed for '" + record.identity + "'.";
 			if (r_error != nullptr) {
-				*r_error = "Class metadata verification failed for '" + record.identity + "'.";
+				*r_error = detail;
 			}
+			set_rejection(r_rejection, REJECTION_UNKNOWN_METADATA, detail, !module.fallback_tokens.is_empty());
 			return ERR_INVALID_DATA;
 		}
 		validated_classes.insert(record.identity);
@@ -6119,16 +6290,19 @@ Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p
 		GDScriptFunction *const *function = functions.getptr(record.identity);
 		String verification_error;
 		if (function == nullptr || !Internals::validate_record(record, *function, functions, &verification_error)) {
+			const String detail = "Bytecode verification or symbolic relocation failed for '" + record.identity + "': " +
+					(function == nullptr ? String("function is missing") : verification_error) + ".";
 			if (r_error != nullptr) {
-				*r_error = "Bytecode verification or symbolic relocation failed for '" + record.identity + "': " +
-						(function == nullptr ? String("function is missing") : verification_error) + ".";
+				*r_error = detail;
 			}
+			set_rejection(r_rejection, REJECTION_INVALID_BYTECODE, detail, !module.fallback_tokens.is_empty());
 			return ERR_INVALID_DATA;
 		}
 	}
 	for (const FunctionRecord &record : module.functions) {
 		Internals::install_record(record, *functions.getptr(record.identity), functions);
 	}
+	set_rejection(r_rejection, REJECTION_NONE, String(), !module.fallback_tokens.is_empty());
 	return OK;
 }
 

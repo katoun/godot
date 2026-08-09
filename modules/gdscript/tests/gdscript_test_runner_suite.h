@@ -32,6 +32,7 @@
 
 #include "../gdscript_cache.h"
 #include "../gdscript_compiled_module.h"
+#include "../gdscript_resource_format.h"
 #include "gdscript_test_runner.h"
 
 #include "core/config/project_settings.h"
@@ -328,28 +329,129 @@ func compute(value: int) -> String:
 		return uint32_t(p_bytes[p_offset]) | (uint32_t(p_bytes[p_offset + 1]) << 8) | (uint32_t(p_bytes[p_offset + 2]) << 16) |
 				(uint32_t(p_bytes[p_offset + 3]) << 24);
 	};
+	auto write_u32_le = [](Vector<uint8_t> &r_bytes, int p_offset, uint32_t p_value) {
+		for (int byte = 0; byte < 4; byte++) {
+			r_bytes.write[p_offset + byte] = uint8_t(p_value >> (byte * 8));
+		}
+	};
 	auto write_u64_le = [](Vector<uint8_t> &r_bytes, int p_offset, uint64_t p_value) {
 		for (int byte = 0; byte < 8; byte++) {
 			r_bytes.write[p_offset + byte] = uint8_t(p_value >> (byte * 8));
 		}
 	};
+	const int module_fallback_size = read_u32_le(module, 52);
+	const int module_payload_size = read_u32_le(module, 56);
+	const int module_payload_offset = GDScriptCompiledModule::ENVELOPE_HEADER_SIZE + module_fallback_size;
+	REQUIRE(module_payload_offset + module_payload_size == module.size());
 	Vector<uint8_t> stale_api_module = module;
 	const uint32_t to_upper_hash = Variant::get_builtin_method_hash(Variant::STRING, SNAME("to_upper"));
 	int api_hash_offset = -1;
-	for (int offset = 40; offset + 4 <= stale_api_module.size(); offset++) {
+	for (int offset = module_payload_offset; offset + 4 <= stale_api_module.size(); offset++) {
 		if (read_u32_le(stale_api_module, offset) == to_upper_hash) {
 			REQUIRE(api_hash_offset == -1);
 			api_hash_offset = offset;
 		}
 	}
-	REQUIRE(api_hash_offset >= 40);
+	REQUIRE(api_hash_offset >= module_payload_offset);
 	stale_api_module.write[api_hash_offset] ^= 1;
-	write_u64_le(stale_api_module, 28, GDScriptCompiledModule::fingerprint_bytes(stale_api_module.ptr() + 40, stale_api_module.size() - 40));
+	write_u64_le(stale_api_module, 36, GDScriptCompiledModule::fingerprint_bytes(stale_api_module.ptr() + module_payload_offset, module_payload_size));
 	String stale_api_error;
-	CHECK(GDScriptCompiledModule::verify(stale_api_module, &stale_api_error) == ERR_INVALID_DATA);
+	GDScriptCompiledModule::Rejection stale_api_rejection;
+	CHECK(GDScriptCompiledModule::verify(stale_api_module, &stale_api_error, &stale_api_rejection) == ERR_INVALID_DATA);
 	CHECK(stale_api_error.contains("API hash"));
+	CHECK(stale_api_rejection.reason == GDScriptCompiledModule::REJECTION_FAILED_RELOCATION);
+	CHECK(stale_api_rejection.fallback_available);
 	CHECK(GDScriptCompiledModule::extract_fallback(stale_api_module, fallback) == OK);
 	CHECK(fallback == tokens);
+
+	int compatibility_case = 0;
+	auto check_compatible_fallback = [&](const Vector<uint8_t> &p_rejected_module, GDScriptCompiledModule::RejectionReason p_reason) {
+		String rejection_error;
+		GDScriptCompiledModule::Rejection rejection;
+		CHECK(GDScriptCompiledModule::verify(p_rejected_module, &rejection_error, &rejection) != OK);
+		CHECK(rejection.reason == p_reason);
+		CHECK(rejection.fallback_available);
+		Vector<uint8_t> recovered_tokens;
+		REQUIRE(GDScriptCompiledModule::extract_fallback(p_rejected_module, recovered_tokens) == OK);
+		CHECK(recovered_tokens == tokens);
+
+		Ref<GDScript> fallback_candidate = memnew(GDScript);
+		const String fallback_path = module_path.get_basename() + "_compat_" + itos(compatibility_case++) + ".gd";
+		fallback_candidate->set_path(fallback_path);
+		fallback_candidate->set_binary_tokens_source(recovered_tokens);
+		fallback_candidate->set_compiled_module_source(p_rejected_module);
+		REQUIRE(fallback_candidate->reload() == OK);
+		CHECK(fallback_candidate->is_valid());
+		CHECK(fallback_candidate->get_compiled_module_fallback_reason().contains(GDScriptCompiledModule::get_rejection_reason_name(p_reason)));
+		Ref<RefCounted> fallback_instance = memnew(RefCounted);
+		fallback_instance->set_script(fallback_candidate);
+		CHECK(String(fallback_instance->call(SNAME("compute"), 2)) == "4");
+		fallback_instance.unref();
+		fallback_candidate->clear();
+		GDScriptCache::remove_script(fallback_path);
+		fallback_candidate.unref();
+	};
+
+	Vector<uint8_t> format_mismatch_module = module;
+	write_u32_le(format_mismatch_module, 8, GDScriptCompiledModule::FORMAT_VERSION + 1);
+	check_compatible_fallback(format_mismatch_module, GDScriptCompiledModule::REJECTION_FORMAT_VERSION);
+	Vector<uint8_t> bytecode_mismatch_module = module;
+	write_u32_le(bytecode_mismatch_module, 12, GDScriptCompiledModule::BYTECODE_VERSION + 1);
+	check_compatible_fallback(bytecode_mismatch_module, GDScriptCompiledModule::REJECTION_BYTECODE_VERSION);
+	Vector<uint8_t> engine_mismatch_module = module;
+	write_u64_le(engine_mismatch_module, 20, GDScriptCompiledModule::get_engine_api_fingerprint() ^ 1);
+	check_compatible_fallback(engine_mismatch_module, GDScriptCompiledModule::REJECTION_ENGINE_API);
+	Vector<uint8_t> unsupported_feature_module = module;
+	write_u32_le(unsupported_feature_module, 16, GDScriptCompiledModule::ENVELOPE_FLAG_HAS_FALLBACK | (1 << 8));
+	check_compatible_fallback(unsupported_feature_module, GDScriptCompiledModule::REJECTION_UNSUPPORTED_FEATURE);
+
+	Vector<uint8_t> unknown_metadata_module = module;
+	unknown_metadata_module.push_back(0);
+	write_u32_le(unknown_metadata_module, 56, module_payload_size + 1);
+	write_u64_le(unknown_metadata_module, 36,
+			GDScriptCompiledModule::fingerprint_bytes(unknown_metadata_module.ptr() + module_payload_offset, module_payload_size + 1));
+	check_compatible_fallback(unknown_metadata_module, GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA);
+
+	Vector<uint8_t> invalid_bytecode_module = module;
+	int bytecode_fingerprint_offset = -1;
+	for (const GDScriptCompiledModule::FunctionSummary &function : summary.functions) {
+		int candidate_offset = -1;
+		int matches = 0;
+		for (int offset = module_payload_offset; offset + 4 <= module.size(); offset++) {
+			if (read_u32_le(module, offset) == function.bytecode_fingerprint) {
+				candidate_offset = offset;
+				matches++;
+			}
+		}
+		if (matches == 1) {
+			bytecode_fingerprint_offset = candidate_offset;
+			break;
+		}
+	}
+	REQUIRE(bytecode_fingerprint_offset >= module_payload_offset);
+	write_u32_le(invalid_bytecode_module, bytecode_fingerprint_offset, read_u32_le(invalid_bytecode_module, bytecode_fingerprint_offset) ^ 1);
+	write_u64_le(invalid_bytecode_module, 36,
+			GDScriptCompiledModule::fingerprint_bytes(invalid_bytecode_module.ptr() + module_payload_offset, module_payload_size));
+	check_compatible_fallback(invalid_bytecode_module, GDScriptCompiledModule::REJECTION_INVALID_BYTECODE);
+	check_compatible_fallback(stale_api_module, GDScriptCompiledModule::REJECTION_FAILED_RELOCATION);
+
+	// Exercise the actual .gdm resource path, where fallback extraction must be
+	// independent of the rejected payload format.
+	const String incompatible_module_path = module_path.get_basename() + "_future.gdm";
+	{
+		Ref<FileAccess> incompatible_file = FileAccess::open(incompatible_module_path, FileAccess::WRITE);
+		REQUIRE(incompatible_file.is_valid());
+		REQUIRE(incompatible_file->store_buffer(format_mismatch_module));
+	}
+	Ref<GDScript> incompatible_resource = ResourceLoader::load(incompatible_module_path, "GDScript", ResourceFormatLoader::CACHE_MODE_IGNORE);
+	REQUIRE(incompatible_resource.is_valid());
+	CHECK(incompatible_resource->is_valid());
+	CHECK(incompatible_resource->get_compiled_module_fallback_reason().contains("format-version mismatch"));
+	incompatible_resource->clear();
+	GDScriptCache::remove_script(incompatible_module_path);
+	incompatible_resource.unref();
+	CHECK(DirAccess::remove_absolute(incompatible_module_path) == OK);
+
 	Ref<GDScript> rejected_script = memnew(GDScript);
 	const String rejected_path = "res://__unverified_module_must_not_mutate.gd";
 	rejected_script->set_path(rejected_path);
@@ -476,13 +578,15 @@ func compute(value: int) -> String:
 
 	Vector<uint8_t> corrupt = module;
 	corrupt.write[corrupt.size() - 1] ^= 0x80;
-	CHECK(GDScriptCompiledModule::extract_fallback(corrupt, fallback) == ERR_FILE_CORRUPT);
+	CHECK(GDScriptCompiledModule::extract_fallback(corrupt, fallback) == OK);
+	CHECK(fallback == tokens);
+	CHECK(GDScriptCompiledModule::verify(corrupt) == ERR_FILE_CORRUPT);
 	Ref<GDScript> fallback_script = memnew(GDScript);
 	fallback_script->set_path(module_path.get_basename() + "_fallback.gd");
 	fallback_script->set_binary_tokens_source(tokens);
 	fallback_script->set_compiled_module_source(corrupt);
 	REQUIRE(fallback_script->reload() == OK);
-	CHECK(fallback_script->get_compiled_module_fallback_reason().contains("verification failed"));
+	CHECK(fallback_script->get_compiled_module_fallback_reason().contains("corrupt module"));
 	CHECK(fallback_script->get_compiled_module_fallback_reason().contains("checksum mismatch"));
 
 	Ref<GDScript> changed_script = memnew(GDScript);
@@ -551,6 +655,7 @@ TEST_CASE("[Modules][GDScript] Compiled module registry resolves cycles and tran
 	const String root_path = temporary_directory.path_join("portable_module_dependency_root.gd");
 	const String cycle_a_path = temporary_directory.path_join("portable_module_dependency_cycle_a.gd");
 	const String cycle_b_path = temporary_directory.path_join("portable_module_dependency_cycle_b.gd");
+	const String future_module_path = temporary_directory.path_join("portable_module_dependency_future.gdm");
 	struct DependencyFileGuard {
 		Vector<String> paths;
 		~DependencyFileGuard() {
@@ -569,7 +674,7 @@ TEST_CASE("[Modules][GDScript] Compiled module registry resolves cycles and tran
 				}
 			}
 		}
-	} dependency_file_guard{ { leaf_path, middle_path, root_path, cycle_a_path, cycle_b_path } };
+	} dependency_file_guard{ { leaf_path, middle_path, root_path, cycle_a_path, cycle_b_path, future_module_path } };
 
 	auto write_source = [](const String &p_path, const String &p_source) {
 		Error error = OK;
@@ -629,6 +734,19 @@ TEST_CASE("[Modules][GDScript] Compiled module registry resolves cycles and tran
 		CHECK(serialized_dependencies[dependency_index].path == root_summary.dependencies[dependency_index].path);
 		CHECK(serialized_dependencies[dependency_index].module_fingerprint == root_summary.dependencies[dependency_index].module_fingerprint);
 	}
+	Vector<uint8_t> future_module = root_module;
+	for (int byte = 0; byte < 4; byte++) {
+		future_module.write[8 + byte] = uint8_t((GDScriptCompiledModule::FORMAT_VERSION + 1) >> (byte * 8));
+	}
+	{
+		Ref<FileAccess> future_file = FileAccess::open(future_module_path, FileAccess::WRITE);
+		REQUIRE(future_file.is_valid());
+		REQUIRE(future_file->store_buffer(future_module));
+	}
+	ResourceFormatLoaderGDScript dependency_loader;
+	List<String> fallback_dependencies;
+	dependency_loader.get_dependencies(future_module_path, &fallback_dependencies);
+	CHECK(fallback_dependencies.find(middle_path) != nullptr);
 	String registry_error;
 	CHECK_MESSAGE(GDScriptCompiledModule::verify(root_module, &registry_error) == OK, registry_error);
 	Ref<GDScript> direct_root = memnew(GDScript);
@@ -647,6 +765,23 @@ TEST_CASE("[Modules][GDScript] Compiled module registry resolves cycles and tran
 	const String changed_leaf_source = leaf_source.replace("var value: int = 1", "var value: String = \"changed\"");
 	REQUIRE(write_source(leaf_path, changed_leaf_source));
 	CHECK(GDScriptCompiledModule::load_editor_cache(root_path, root_source, loaded_root_cache) == ERR_INVALID_DATA);
+	GDScriptCompiledModule::Rejection dependency_rejection;
+	CHECK(GDScriptCompiledModule::verify(root_module, &registry_error, &dependency_rejection) == ERR_INVALID_DATA);
+	CHECK(dependency_rejection.reason == GDScriptCompiledModule::REJECTION_CHANGED_DEPENDENCY);
+	CHECK(dependency_rejection.fallback_available);
+	Vector<uint8_t> root_fallback_tokens;
+	REQUIRE(GDScriptCompiledModule::extract_fallback(root_module, root_fallback_tokens) == OK);
+	Ref<GDScript> dependency_fallback = memnew(GDScript);
+	const String dependency_fallback_path = root_path + ".fallback";
+	dependency_fallback->set_path(dependency_fallback_path);
+	dependency_fallback->set_binary_tokens_source(root_fallback_tokens);
+	dependency_fallback->set_compiled_module_source(root_module);
+	REQUIRE(dependency_fallback->reload() == OK);
+	CHECK(dependency_fallback->is_valid());
+	CHECK(dependency_fallback->get_compiled_module_fallback_reason().contains("changed dependency"));
+	dependency_fallback->clear();
+	GDScriptCache::remove_script(dependency_fallback_path);
+	dependency_fallback.unref();
 	REQUIRE(write_source(leaf_path, leaf_source));
 
 	const String cycle_a_source = "extends RefCounted\nconst Peer = preload(\"" + cycle_b_path + "\")\nfunc value_a() -> int:\n\treturn 1\n";
