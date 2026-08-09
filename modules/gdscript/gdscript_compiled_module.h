@@ -144,6 +144,25 @@ public:
 	static Error build_runtime(GDScript *p_script, const Vector<uint8_t> &p_module, bool p_keep_state, String *r_error = nullptr, Rejection *r_rejection = nullptr);
 	static Error apply(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error = nullptr, Rejection *r_rejection = nullptr);
 
+	enum TestBytecodeMutation {
+		TEST_MUTATE_UNKNOWN_OPCODE,
+		TEST_MUTATE_TRUNCATED_INSTRUCTION,
+		TEST_MUTATE_INVALID_JUMP_TARGET,
+		TEST_MUTATE_INVALID_FRAME_SLOT,
+		TEST_MUTATE_INVALID_TYPED_FRAME_SLOT,
+		TEST_MUTATE_INVALID_CONSTANT_INDEX,
+		TEST_MUTATE_INVALID_NAME_INDEX,
+		TEST_MUTATE_INVALID_FUNCTION_INDEX,
+		TEST_MUTATE_INVALID_ARGUMENT_COUNT,
+		TEST_MUTATE_INVALID_STRUCT_FIELD_INDEX,
+		TEST_MUTATE_INVALID_NATIVE_API_RELOCATION,
+	};
+
+	// Produces a checksum-valid but verifier-invalid module. This keeps hostile
+	// bytecode tests independent of the serialized metadata layout.
+	static Error make_test_bytecode_mutation(const Vector<uint8_t> &p_module, TestBytecodeMutation p_mutation,
+			Vector<uint8_t> &r_module, String *r_opcode = nullptr);
+
 	static String get_editor_cache_path(const String &p_script_path);
 	static Error load_editor_cache(const String &p_script_path, const String &p_source, Vector<uint8_t> &r_module, String *r_error = nullptr);
 	static Error save_editor_cache(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> *r_module = nullptr);

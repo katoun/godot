@@ -157,6 +157,7 @@ struct Reader {
 	const uint8_t *data = nullptr;
 	uint64_t size = 0;
 	uint64_t offset = 0;
+	uint64_t collection_entries = 0;
 	bool failed = false;
 
 	Reader() = default;
@@ -164,7 +165,7 @@ struct Reader {
 			data(p_data), size(p_size) {}
 
 	uint32_t u32() {
-		if (failed || offset + 4 > size) {
+		if (failed || offset > size || size - offset < 4) {
 			failed = true;
 			return 0;
 		}
@@ -182,7 +183,7 @@ struct Reader {
 	Vector<uint8_t> bytes(uint32_t p_limit = MAX_BLOB_SIZE) {
 		Vector<uint8_t> result;
 		const uint32_t length = u32();
-		if (failed || length > p_limit || offset + length > size) {
+		if (failed || length > p_limit || offset > size || length > size - offset) {
 			failed = true;
 			return result;
 		}
@@ -209,10 +210,15 @@ struct Reader {
 
 	uint32_t count(uint32_t p_limit = MAX_COLLECTION_SIZE) {
 		const uint32_t value = u32();
-		if (value > p_limit) {
+		// Every serialized collection element consumes at least one 32-bit word.
+		// Reject impossible and aggregate-excessive counts before resize() can
+		// amplify a tiny hostile payload into a large allocation.
+		if (failed || offset > size || value > p_limit || value > (size - offset) / 4 ||
+				collection_entries > MAX_TOTAL_METADATA_ENTRIES - value) {
 			failed = true;
 			return 0;
 		}
+		collection_entries += value;
 		return value;
 	}
 };
@@ -265,8 +271,9 @@ Error read_envelope(const Vector<uint8_t> &p_module, ModuleEnvelope &r_envelope,
 	r_envelope.fallback_fingerprint = header.u64();
 	const uint32_t fallback_size = header.u32();
 	r_envelope.payload_size = header.u32();
+	const uint64_t remaining_size = header.offset <= header.size ? header.size - header.offset : 0;
 	if (header.failed || header.offset != GDScriptCompiledModule::ENVELOPE_HEADER_SIZE || fallback_size > MAX_BLOB_SIZE ||
-			r_envelope.payload_size > MAX_BLOB_SIZE || header.offset + fallback_size + r_envelope.payload_size != header.size) {
+			r_envelope.payload_size > MAX_BLOB_SIZE || fallback_size > remaining_size || r_envelope.payload_size != remaining_size - fallback_size) {
 		return fail("Invalid compiled GDScript envelope sizes.");
 	}
 	if (fallback_size > 0) {
@@ -1303,6 +1310,54 @@ bool read_debug_section(const Vector<uint8_t> &p_data, ParsedModule &r_module) {
 	}
 	r_module.has_debug_info = true;
 	return true;
+}
+
+Error serialize_module(const ParsedModule &p_module, Vector<uint8_t> &r_module) {
+	if (p_module.fallback_tokens.is_empty() || p_module.classes.is_empty()) {
+		return ERR_INVALID_PARAMETER;
+	}
+	Writer payload;
+	payload.string(p_module.path);
+	payload.u64(p_module.module_fingerprint);
+	payload.u64(p_module.schema_fingerprint);
+	payload.u64(p_module.dependency_fingerprint);
+	payload.u32(p_module.dependencies.size());
+	for (const GDScriptCompiledModule::Dependency &dependency : p_module.dependencies) {
+		payload.string(dependency.path);
+		payload.u64(dependency.source_fingerprint);
+		payload.u64(dependency.module_fingerprint);
+		payload.u64(dependency.schema_fingerprint);
+		payload.u64(dependency.engine_api_fingerprint);
+	}
+	payload.u32(p_module.classes.size());
+	for (const ClassRecord &record : p_module.classes) {
+		write_class(payload, record);
+	}
+	payload.u32(p_module.functions.size());
+	for (const FunctionRecord &record : p_module.functions) {
+		write_function(payload, record);
+	}
+	payload.bytes(p_module.has_debug_info ? write_debug_section(p_module.classes, p_module.functions) : Vector<uint8_t>());
+
+	Writer module;
+	module.u32(MODULE_MAGIC);
+	module.u32(GDScriptCompiledModule::ENVELOPE_VERSION);
+	module.u32(GDScriptCompiledModule::FORMAT_VERSION);
+	module.u32(GDScriptCompiledModule::BYTECODE_VERSION);
+	module.u32(GDScriptCompiledModule::ENVELOPE_FLAG_HAS_FALLBACK);
+	module.u64(p_module.engine_api_fingerprint);
+	module.u64(p_module.source_fingerprint);
+	module.u64(GDScriptCompiledModule::fingerprint_bytes(payload.data.ptr(), payload.data.size()));
+	module.u64(GDScriptCompiledModule::fingerprint_bytes(p_module.fallback_tokens.ptr(), p_module.fallback_tokens.size()));
+	module.u32(p_module.fallback_tokens.size());
+	module.u32(payload.data.size());
+	const int header_size = module.data.size();
+	ERR_FAIL_COND_V(header_size != GDScriptCompiledModule::ENVELOPE_HEADER_SIZE, ERR_BUG);
+	module.data.resize(header_size + p_module.fallback_tokens.size() + payload.data.size());
+	memcpy(module.data.ptrw() + header_size, p_module.fallback_tokens.ptr(), p_module.fallback_tokens.size());
+	memcpy(module.data.ptrw() + header_size + p_module.fallback_tokens.size(), payload.data.ptr(), payload.data.size());
+	r_module = module.data;
+	return OK;
 }
 
 Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, String *r_error,
@@ -6016,47 +6071,10 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 		ERR_PRINT("GDScript compiler produced a non-portable module for '" + candidate.path + "': " + candidate_error);
 		return ERR_UNAVAILABLE;
 	}
-	Writer payload;
-	payload.string(candidate.path);
-	payload.u64(module_fingerprint);
-	payload.u64(schema_fingerprint);
-	payload.u64(dependency_fingerprint);
-	payload.u32(dependencies.size());
-	for (const Dependency &dependency : dependencies) {
-		payload.string(dependency.path);
-		payload.u64(dependency.source_fingerprint);
-		payload.u64(dependency.module_fingerprint);
-		payload.u64(dependency.schema_fingerprint);
-		payload.u64(dependency.engine_api_fingerprint);
+	const Error serialize_error = serialize_module(candidate, r_module);
+	if (serialize_error != OK) {
+		return serialize_error;
 	}
-	payload.u32(candidate.classes.size());
-	for (const ClassRecord &record : candidate.classes) {
-		write_class(payload, record);
-	}
-	payload.u32(candidate.functions.size());
-	for (const FunctionRecord &record : candidate.functions) {
-		write_function(payload, record);
-	}
-	payload.bytes(candidate.has_debug_info ? write_debug_section(candidate.classes, candidate.functions) : Vector<uint8_t>());
-
-	Writer module;
-	module.u32(MODULE_MAGIC);
-	module.u32(ENVELOPE_VERSION);
-	module.u32(FORMAT_VERSION);
-	module.u32(BYTECODE_VERSION);
-	module.u32(ENVELOPE_FLAG_HAS_FALLBACK);
-	module.u64(engine_api_fingerprint);
-	module.u64(source_fingerprint);
-	module.u64(fingerprint_bytes(payload.data.ptr(), payload.data.size()));
-	module.u64(fingerprint_bytes(p_fallback_tokens.ptr(), p_fallback_tokens.size()));
-	module.u32(p_fallback_tokens.size());
-	module.u32(payload.data.size());
-	const int header_size = module.data.size();
-	CRASH_COND(header_size != ENVELOPE_HEADER_SIZE);
-	module.data.resize(header_size + p_fallback_tokens.size() + payload.data.size());
-	memcpy(module.data.ptrw() + header_size, p_fallback_tokens.ptr(), p_fallback_tokens.size());
-	memcpy(module.data.ptrw() + header_size + p_fallback_tokens.size(), payload.data.ptr(), payload.data.size());
-	r_module = module.data;
 
 	if (r_summary != nullptr) {
 		*r_summary = Summary();
@@ -6304,6 +6322,104 @@ Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p
 	}
 	set_rejection(r_rejection, REJECTION_NONE, String(), !module.fallback_tokens.is_empty());
 	return OK;
+}
+
+Error GDScriptCompiledModule::make_test_bytecode_mutation(const Vector<uint8_t> &p_module, TestBytecodeMutation p_mutation,
+		Vector<uint8_t> &r_module, String *r_opcode) {
+	ParsedModule module;
+	Error parse_error = parse_module(p_module, module, nullptr);
+	if (parse_error != OK) {
+		return parse_error;
+	}
+	if (r_opcode != nullptr) {
+		r_opcode->clear();
+	}
+
+	for (FunctionRecord &function : module.functions) {
+		if (function.code.is_empty()) {
+			continue;
+		}
+		if (p_mutation == TEST_MUTATE_UNKNOWN_OPCODE) {
+			function.code.write[0] = GDScriptFunction::OPCODE_COUNT;
+			if (r_opcode != nullptr) {
+				*r_opcode = "unknown";
+			}
+			return serialize_module(module, r_module);
+		}
+		if (p_mutation == TEST_MUTATE_TRUNCATED_INSTRUCTION) {
+			function.code.resize(2);
+			function.code.write[0] = GDScriptFunction::OPCODE_ASSIGN;
+			function.code.write[1] = GDScriptFunction::OPCODE_END;
+			if (r_opcode != nullptr) {
+				*r_opcode = GDScriptFunction::get_opcode_descriptor(GDScriptFunction::OPCODE_ASSIGN).name;
+			}
+			return serialize_module(module, r_module);
+		}
+
+		for (int ip = 0; ip < function.code.size();) {
+			const int instruction_size = GDScriptFunction::get_instruction_size(function.code.ptr(), function.code.size(), ip);
+			if (instruction_size <= 0) {
+				return ERR_BUG;
+			}
+			const GDScriptFunction::Opcode opcode = GDScriptFunction::Opcode(function.code[ip]);
+			const GDScriptFunction::OpcodeDescriptor &descriptor = GDScriptFunction::get_opcode_descriptor(opcode);
+			for (int word = 1; word < instruction_size; word++) {
+				const GDScriptFunction::OpcodeOperandKind kind = GDScriptFunction::get_operand_kind(function.code.ptr(), function.code.size(), ip, word);
+				bool matches = false;
+				int invalid_value = 0;
+				switch (p_mutation) {
+					case TEST_MUTATE_INVALID_JUMP_TARGET:
+						matches = kind == GDScriptFunction::OPERAND_JUMP_TARGET;
+						invalid_value = function.code.size();
+						break;
+					case TEST_MUTATE_INVALID_FRAME_SLOT:
+						matches = kind == GDScriptFunction::OPERAND_FRAME_SLOT;
+						invalid_value = function.stack_size;
+						break;
+					case TEST_MUTATE_INVALID_TYPED_FRAME_SLOT:
+						matches = kind == GDScriptFunction::OPERAND_TYPED_FRAME_SLOT;
+						invalid_value = function.stack_size;
+						break;
+					case TEST_MUTATE_INVALID_CONSTANT_INDEX:
+						matches = kind == GDScriptFunction::OPERAND_CONSTANT_ADDRESS;
+						invalid_value = (GDScriptFunction::ADDR_TYPE_CONSTANT << GDScriptFunction::ADDR_BITS) | function.constants.size();
+						break;
+					case TEST_MUTATE_INVALID_NAME_INDEX:
+						matches = kind == GDScriptFunction::OPERAND_NAME_INDEX;
+						invalid_value = function.global_names.size();
+						break;
+					case TEST_MUTATE_INVALID_FUNCTION_INDEX:
+						matches = kind == GDScriptFunction::OPERAND_FUNCTION_INDEX;
+						invalid_value = descriptor.relocation_kind >= 0 ? function.relocations[descriptor.relocation_kind].size() : 0;
+						break;
+					case TEST_MUTATE_INVALID_ARGUMENT_COUNT:
+						matches = kind == GDScriptFunction::OPERAND_ARGUMENT_COUNT;
+						invalid_value = function.instruction_args_size + 1;
+						break;
+					case TEST_MUTATE_INVALID_STRUCT_FIELD_INDEX:
+						matches = kind == GDScriptFunction::OPERAND_STRUCT_FIELD_INDEX;
+						invalid_value = 1 << 16;
+						break;
+					case TEST_MUTATE_INVALID_NATIVE_API_RELOCATION:
+						matches = kind == GDScriptFunction::OPERAND_NATIVE_API_RELOCATION;
+						invalid_value = descriptor.relocation_kind >= 0 ? function.relocations[descriptor.relocation_kind].size() : 0;
+						break;
+					case TEST_MUTATE_UNKNOWN_OPCODE:
+					case TEST_MUTATE_TRUNCATED_INSTRUCTION:
+						break;
+				}
+				if (matches) {
+					function.code.write[ip + word] = invalid_value;
+					if (r_opcode != nullptr) {
+						*r_opcode = descriptor.name;
+					}
+					return serialize_module(module, r_module);
+				}
+			}
+			ip += instruction_size;
+		}
+	}
+	return ERR_DOES_NOT_EXIST;
 }
 
 String GDScriptCompiledModule::get_editor_cache_path(const String &p_script_path) {

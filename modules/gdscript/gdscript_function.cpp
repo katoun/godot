@@ -80,7 +80,7 @@ int GDScriptFunction::get_instruction_size(const int *p_code, int p_code_size, i
 	}
 	const OpcodeDescriptor &descriptor = get_opcode_descriptor(Opcode(p_code[p_ip]));
 	if (descriptor.instruction_size > 0) {
-		return p_ip + descriptor.instruction_size <= p_code_size ? descriptor.instruction_size : -1;
+		return descriptor.instruction_size <= p_code_size - p_ip ? descriptor.instruction_size : -1;
 	}
 	if (p_ip + 1 >= p_code_size || p_code[p_ip + 1] < 0 || descriptor.operand_kinds.count < 2 ||
 			_gdscript_opcode_declared_operand(descriptor.operand_kinds, 0) != OPERAND_ARGUMENT_COUNT ||
@@ -88,8 +88,8 @@ int GDScriptFunction::get_instruction_size(const int *p_code, int p_code_size, i
 		return -1;
 	}
 	const int suffix_count = descriptor.operand_kinds.count - 2;
-	const int size = 2 + p_code[p_ip + 1] + suffix_count;
-	return size >= 2 && p_ip + size <= p_code_size ? size : -1;
+	const int64_t size = int64_t(2) + p_code[p_ip + 1] + suffix_count;
+	return size <= p_code_size - p_ip ? int(size) : -1;
 }
 
 GDScriptFunction::OpcodeOperandKind GDScriptFunction::get_operand_kind(const int *p_code, int p_code_size, int p_ip, int p_word_offset) {

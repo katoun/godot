@@ -103,6 +103,11 @@ func _init():
 }
 
 TEST_CASE("[Modules][GDScript] Opcode descriptors cover every bytecode instruction") {
+	const int invalid_opcodes[] = { -1, GDScriptFunction::OPCODE_COUNT, INT32_MAX };
+	for (int invalid_opcode : invalid_opcodes) {
+		const int invalid_instruction[] = { invalid_opcode };
+		CHECK(GDScriptFunction::get_instruction_size(invalid_instruction, 1, 0) == -1);
+	}
 	for (int opcode_index = 0; opcode_index < GDScriptFunction::OPCODE_COUNT; opcode_index++) {
 		const GDScriptFunction::Opcode opcode = GDScriptFunction::Opcode(opcode_index);
 		const GDScriptFunction::OpcodeDescriptor &descriptor = GDScriptFunction::get_opcode_descriptor(opcode);
@@ -127,11 +132,227 @@ TEST_CASE("[Modules][GDScript] Opcode descriptors cover every bytecode instructi
 		const int result = GDScriptFunction::get_result_operand(instruction.ptr(), instruction.size(), 0);
 		CHECK(result < expected_size);
 
-		if (expected_size > 1) {
-			CHECK(GDScriptFunction::get_instruction_size(instruction.ptr(), instruction.size() - 1, 0) == -1);
+		for (int truncated_size = 1; truncated_size < expected_size; truncated_size++) {
+			CHECK(GDScriptFunction::get_instruction_size(instruction.ptr(), truncated_size, 0) == -1);
+		}
+		if (descriptor.instruction_size == 0) {
+			instruction.write[1] = -1;
+			CHECK(GDScriptFunction::get_instruction_size(instruction.ptr(), instruction.size(), 0) == -1);
+			instruction.write[1] = INT32_MAX;
+			CHECK(GDScriptFunction::get_instruction_size(instruction.ptr(), instruction.size(), 0) == -1);
 		}
 	}
 	CHECK(GDScriptFunction::get_opcode_descriptor(GDScriptFunction::OPCODE_END).control_flow_kind == GDScriptFunction::CONTROL_FLOW_TERMINATE);
+}
+
+TEST_CASE("[Modules][GDScript] Compiled module rejects hostile binary data without partial installation") {
+	GDScriptLanguage::get_singleton()->init();
+	const String script_path = OS::get_singleton()->get_temp_path().path_join("hostile_portable_module.gd");
+	const String source = R"(
+extends RefCounted
+
+struct Sample:
+	var value: int
+	var tint: Color = Color(0.25, 0.5, 0.75, 1.0)
+
+var accumulator: int = 1
+
+func evaluate(value: int, target: Object) -> Array:
+	var adjusted: int = value
+	if adjusted > 2:
+		adjusted += 3
+	else:
+		adjusted -= 1
+	var sample: Sample = Sample(adjusted)
+	sample.value += accumulator
+	var dynamic_target: Variant = target
+	dynamic_target.set_meta(&"sample_value", sample.value)
+	var values: Array[int] = [sample.value, adjusted]
+	var closure := func(extra: int) -> int: return sample.value + extra
+	accumulator += 1
+	return [closure.call(values[1]), target.get_meta(&"sample_value"), sample.value, accumulator]
+)";
+
+	Ref<GDScript> source_script = memnew(GDScript);
+	source_script->set_path(script_path);
+	source_script->set_source_code(source);
+	REQUIRE(source_script->reload() == OK);
+	const Vector<uint8_t> tokens = source_script->get_as_binary_tokens();
+	REQUIRE_FALSE(tokens.is_empty());
+	Vector<uint8_t> module;
+	REQUIRE(GDScriptCompiledModule::create(source_script.ptr(), tokens, module) == OK);
+	REQUIRE(GDScriptCompiledModule::verify(module) == OK);
+
+	// Round-trip into a runtime graph built without the parser/compiler and
+	// compare a stateful call sequence with the source-compiled graph.
+	Ref<GDScript> direct_script = memnew(GDScript);
+	direct_script->set_path(script_path + ".direct");
+	direct_script->set_binary_tokens_source(tokens);
+	String direct_error;
+	REQUIRE_MESSAGE(GDScriptCompiledModule::prepare_shallow(direct_script.ptr(), module, &direct_error) == OK, direct_error);
+	REQUIRE_MESSAGE(GDScriptCompiledModule::build_runtime(direct_script.ptr(), module, false, &direct_error) == OK, direct_error);
+	Ref<RefCounted> source_instance = memnew(RefCounted);
+	Ref<RefCounted> direct_instance = memnew(RefCounted);
+	source_instance->set_script(source_script);
+	direct_instance->set_script(direct_script);
+	Ref<RefCounted> source_target = memnew(RefCounted);
+	Ref<RefCounted> direct_target = memnew(RefCounted);
+	for (int value : Vector<int>{ 1, 4, -2, 9 }) {
+		const Variant source_result = source_instance->call(SNAME("evaluate"), value, source_target.ptr());
+		const Variant direct_result = direct_instance->call(SNAME("evaluate"), value, direct_target.ptr());
+		CHECK(source_result == direct_result);
+	}
+
+	auto read_u32_le = [](const Vector<uint8_t> &p_bytes, int p_offset) {
+		return uint32_t(p_bytes[p_offset]) | (uint32_t(p_bytes[p_offset + 1]) << 8) | (uint32_t(p_bytes[p_offset + 2]) << 16) |
+				(uint32_t(p_bytes[p_offset + 3]) << 24);
+	};
+	auto write_u32_le = [](Vector<uint8_t> &r_bytes, int p_offset, uint32_t p_value) {
+		for (int byte = 0; byte < 4; byte++) {
+			r_bytes.write[p_offset + byte] = uint8_t(p_value >> (byte * 8));
+		}
+	};
+	auto write_u64_le = [](Vector<uint8_t> &r_bytes, int p_offset, uint64_t p_value) {
+		for (int byte = 0; byte < 8; byte++) {
+			r_bytes.write[p_offset + byte] = uint8_t(p_value >> (byte * 8));
+		}
+	};
+	const int fallback_size = read_u32_le(module, 52);
+	const int payload_size = read_u32_le(module, 56);
+	const int payload_offset = GDScriptCompiledModule::ENVELOPE_HEADER_SIZE + fallback_size;
+	REQUIRE(payload_offset + payload_size == module.size());
+
+	// Exercise every structural truncation region, including all header bytes,
+	// evenly spaced payload cuts, and every final payload byte.
+	Vector<int> truncation_points;
+	for (int cut = 0; cut <= int(GDScriptCompiledModule::ENVELOPE_HEADER_SIZE); cut++) {
+		truncation_points.push_back(cut);
+	}
+	const int truncation_stride = MAX(1, module.size() / 256);
+	for (int cut = GDScriptCompiledModule::ENVELOPE_HEADER_SIZE; cut < module.size(); cut += truncation_stride) {
+		truncation_points.push_back(cut);
+	}
+	for (int cut = MAX(0, module.size() - 128); cut < module.size(); cut++) {
+		truncation_points.push_back(cut);
+	}
+	for (int cut : truncation_points) {
+		CAPTURE(cut);
+		const Vector<uint8_t> truncated = module.slice(0, cut);
+		CHECK(GDScriptCompiledModule::verify(truncated) != OK);
+	}
+
+	Vector<uint8_t> corrupt_fallback = module;
+	corrupt_fallback.write[GDScriptCompiledModule::ENVELOPE_HEADER_SIZE + fallback_size / 2] ^= 0x80;
+	Vector<uint8_t> recovered_tokens;
+	CHECK(GDScriptCompiledModule::extract_fallback(corrupt_fallback, recovered_tokens) == ERR_FILE_CORRUPT);
+	CHECK(GDScriptCompiledModule::verify(corrupt_fallback) == ERR_FILE_CORRUPT);
+	Vector<uint8_t> corrupt_payload = module;
+	corrupt_payload.write[payload_offset + payload_size / 2] ^= 0x40;
+	CHECK(GDScriptCompiledModule::verify(corrupt_payload) == ERR_FILE_CORRUPT);
+	CHECK(GDScriptCompiledModule::extract_fallback(corrupt_payload, recovered_tokens) == OK);
+	CHECK(recovered_tokens == tokens);
+
+	// Envelope and payload counts must fail before allocation. The dependency
+	// count is the first collection in the portable payload for this script.
+	Vector<uint8_t> oversized_envelope = module;
+	write_u32_le(oversized_envelope, 52, UINT32_MAX);
+	CHECK(GDScriptCompiledModule::verify(oversized_envelope) == ERR_FILE_CORRUPT);
+	Vector<uint8_t> oversized_payload_count = module;
+	const int path_size = read_u32_le(module, payload_offset);
+	const int dependency_count_offset = payload_offset + 4 + path_size + 24;
+	REQUIRE(dependency_count_offset + 4 <= module.size());
+	write_u32_le(oversized_payload_count, dependency_count_offset, UINT32_MAX);
+	write_u64_le(oversized_payload_count, 36,
+			GDScriptCompiledModule::fingerprint_bytes(oversized_payload_count.ptr() + payload_offset, payload_size));
+	GDScriptCompiledModule::Rejection oversized_rejection;
+	CHECK(GDScriptCompiledModule::verify(oversized_payload_count, nullptr, &oversized_rejection) != OK);
+	CHECK(oversized_rejection.reason == GDScriptCompiledModule::REJECTION_UNKNOWN_METADATA);
+
+	// Generate checksum-valid semantic corruption for the decoder/verifier. All
+	// failures must leave an already executable script graph byte-for-byte live.
+	const GDScriptFunction *const *source_evaluate = source_script->get_member_functions().getptr(SNAME("evaluate"));
+	REQUIRE(source_evaluate != nullptr);
+	const GDScriptFunction *stable_function = *source_evaluate;
+	const GDScriptCompiledModule::TestBytecodeMutation mutations[] = {
+		GDScriptCompiledModule::TEST_MUTATE_UNKNOWN_OPCODE,
+		GDScriptCompiledModule::TEST_MUTATE_TRUNCATED_INSTRUCTION,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_JUMP_TARGET,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_FRAME_SLOT,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_TYPED_FRAME_SLOT,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_CONSTANT_INDEX,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_NAME_INDEX,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_FUNCTION_INDEX,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_ARGUMENT_COUNT,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_STRUCT_FIELD_INDEX,
+		GDScriptCompiledModule::TEST_MUTATE_INVALID_NATIVE_API_RELOCATION,
+	};
+	for (GDScriptCompiledModule::TestBytecodeMutation mutation : mutations) {
+		CAPTURE(mutation);
+		Vector<uint8_t> hostile_module;
+		String mutated_opcode;
+		REQUIRE_MESSAGE(GDScriptCompiledModule::make_test_bytecode_mutation(module, mutation, hostile_module, &mutated_opcode) == OK,
+				"The security corpus must contain an operand for every requested mutation.");
+		CAPTURE(mutated_opcode);
+		GDScriptCompiledModule::Rejection rejection;
+		CHECK(GDScriptCompiledModule::verify(hostile_module, &direct_error, &rejection) == ERR_INVALID_DATA);
+		CHECK(rejection.reason == GDScriptCompiledModule::REJECTION_INVALID_BYTECODE);
+		CHECK(GDScriptCompiledModule::extract_fallback(hostile_module, recovered_tokens) == OK);
+		CHECK(recovered_tokens == tokens);
+		CHECK(GDScriptCompiledModule::build_runtime(source_script.ptr(), hostile_module, false, &direct_error, &rejection) == ERR_INVALID_DATA);
+		const GDScriptFunction *const *current_evaluate = source_script->get_member_functions().getptr(SNAME("evaluate"));
+		REQUIRE(current_evaluate != nullptr);
+		CHECK(*current_evaluate == stable_function);
+		CHECK(source_script->is_valid());
+	}
+
+	// A deterministic mutation fuzzer runs in ordinary and sanitizer builds.
+	// Half of the corpus is arbitrary bytes; the other half preserves the
+	// envelope/fallback checksum and recomputes the payload checksum so mutations
+	// reach the portable decoder and verifier instead of stopping at the header.
+	uint64_t random_state = 0x9e3779b97f4a7c15ULL;
+	auto next_random = [&]() {
+		random_state ^= random_state << 13;
+		random_state ^= random_state >> 7;
+		random_state ^= random_state << 17;
+		return random_state;
+	};
+	int rejected_random_inputs = 0;
+	for (int iteration = 0; iteration < 256; iteration++) {
+		Vector<uint8_t> random_bytes;
+		random_bytes.resize(next_random() % 2048);
+		for (int byte = 0; byte < random_bytes.size(); byte++) {
+			random_bytes.write[byte] = uint8_t(next_random());
+		}
+		if (GDScriptCompiledModule::verify(random_bytes) != OK) {
+			rejected_random_inputs++;
+		}
+		GDScriptCompiledModule::extract_fallback(random_bytes, recovered_tokens);
+	}
+	CHECK(rejected_random_inputs == 256);
+	int deep_rejections = 0;
+	for (int iteration = 0; iteration < 512; iteration++) {
+		Vector<uint8_t> fuzzed = module;
+		const int mutation_count = 1 + int(next_random() % 8);
+		for (int mutation = 0; mutation < mutation_count; mutation++) {
+			const int offset = payload_offset + int(next_random() % payload_size);
+			fuzzed.write[offset] ^= uint8_t(1 + next_random() % 255);
+		}
+		write_u64_le(fuzzed, 36, GDScriptCompiledModule::fingerprint_bytes(fuzzed.ptr() + payload_offset, payload_size));
+		if (GDScriptCompiledModule::verify(fuzzed) != OK) {
+			deep_rejections++;
+		}
+		CHECK(GDScriptCompiledModule::extract_fallback(fuzzed, recovered_tokens) == OK);
+		CHECK(recovered_tokens == tokens);
+	}
+	CHECK(deep_rejections > 480);
+
+	source_target.unref();
+	direct_target.unref();
+	source_instance.unref();
+	direct_instance.unref();
+	source_script->clear();
+	direct_script->clear();
+	GDScriptCache::remove_script(script_path);
 }
 
 TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM bytecode") {
