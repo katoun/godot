@@ -398,6 +398,8 @@ public:
 	static void collect_dependencies_from_function(GDScript *p_root, GDScriptFunction *p_function, HashMap<String, uint64_t> &r_dependencies, HashSet<GDScriptFunction *> &r_visited);
 	static void collect_dependencies_from_script(GDScript *p_root, GDScript *p_script, HashMap<String, uint64_t> &r_dependencies);
 	static bool make_function_metadata(GDScriptFunction *p_function, FunctionRecord &r_record);
+	static bool make_symbolic_global_code(const GDScriptFunction *p_function, Vector<int> &r_code, Vector<StringName> &r_names);
+	static bool resolve_symbolic_global_code(const FunctionRecord &p_record, Vector<int> &r_code, String *r_error = nullptr);
 	static bool function_metadata_matches(const FunctionRecord &p_record, GDScriptFunction *p_function);
 	static bool make_record(GDScriptFunction *p_function, const String &p_identity, const HashMap<GDScriptFunction *, String> &p_identities, FunctionRecord &r_record);
 	static bool make_class_record(GDScript *p_script, const String &p_identity, const HashMap<GDScript *, String> &p_class_identities,
@@ -493,6 +495,16 @@ class RuntimeBuilder {
 		GDScriptFunction *static_initializer = nullptr;
 	};
 
+	struct ResolvedFunction {
+		Vector<GDScriptDataType> argument_types;
+		GDScriptDataType return_type;
+		MethodInfo method;
+		Variant rpc_config;
+		HashMap<StringName, Variant> local_constants;
+		Vector<Variant> constants;
+		Vector<int> code;
+	};
+
 	GDScript *root = nullptr;
 	ParsedModule module;
 	HashMap<String, GDScript *> classes;
@@ -501,6 +513,7 @@ class RuntimeBuilder {
 	Vector<StagedClass> staged_classes;
 	HashMap<String, GDScriptFunction *> functions;
 	HashMap<String, const FunctionRecord *> function_records;
+	Vector<ResolvedFunction> resolved_functions;
 	HashSet<String> root_function_identities;
 	HashSet<String> lambda_function_identities;
 	HashMap<String, const StructLayoutRecord *> layout_records;
@@ -518,6 +531,7 @@ class RuntimeBuilder {
 	Error build_layout(const String &p_identifier);
 	Error stage_classes();
 	Error validate_function_code(const FunctionRecord &p_record);
+	Error resolve_function_symbols();
 	Error stage_functions();
 	Error resolve_function_relocations(const FunctionRecord &p_record, GDScriptFunction *p_function);
 	Error link_functions();
@@ -1396,6 +1410,10 @@ bool Internals::function_metadata_matches(const FunctionRecord &p_record, GDScri
 uint32_t get_portable_function_fingerprint(const FunctionRecord &p_record) {
 	Writer serialized;
 	write_int_vector(serialized, p_record.code);
+	serialized.u32(p_record.global_names.size());
+	for (const StringName &name : p_record.global_names) {
+		serialized.string(name);
+	}
 	serialized.u32(p_record.constants.size());
 	for (const ConstantData &constant : p_record.constants) {
 		write_constant(serialized, constant);
@@ -1952,6 +1970,100 @@ void Internals::collect_dependencies_from_script(GDScript *p_root, GDScript *p_s
 	}
 }
 
+bool Internals::make_symbolic_global_code(const GDScriptFunction *p_function, Vector<int> &r_code, Vector<StringName> &r_names) {
+	ERR_FAIL_NULL_V(p_function, false);
+	GDScriptLanguage *language = GDScriptLanguage::get_singleton();
+	if (language == nullptr) {
+		return false;
+	}
+
+	r_code = p_function->code;
+	r_names = p_function->global_names;
+	HashMap<StringName, int> name_indices;
+	for (int i = 0; i < r_names.size(); i++) {
+		name_indices.insert(r_names[i], i);
+	}
+
+	const HashMap<StringName, int> &globals = language->get_global_map();
+	for (int ip = 0; ip < r_code.size();) {
+		const int length = GDScriptFunction::get_instruction_size(r_code.ptr(), r_code.size(), ip);
+		if (length <= 0) {
+			return false;
+		}
+		for (int word = 1; word < length; word++) {
+			if (GDScriptFunction::get_operand_kind(r_code.ptr(), r_code.size(), ip, word) != GDScriptFunction::OPERAND_GLOBAL_INDEX) {
+				continue;
+			}
+			const int runtime_index = r_code[ip + word];
+			StringName global_name;
+			for (const KeyValue<StringName, int> &entry : globals) {
+				if (entry.value == runtime_index) {
+					global_name = entry.key;
+					break;
+				}
+			}
+			if (global_name.is_empty()) {
+				return false;
+			}
+			int *name_index = name_indices.getptr(global_name);
+			if (name_index == nullptr) {
+				const int new_index = r_names.size();
+				r_names.push_back(global_name);
+				name_indices.insert(global_name, new_index);
+				name_index = name_indices.getptr(global_name);
+			}
+			r_code.write[ip + word] = *name_index;
+		}
+		ip += length;
+	}
+	return true;
+}
+
+bool Internals::resolve_symbolic_global_code(const FunctionRecord &p_record, Vector<int> &r_code, String *r_error) {
+	GDScriptLanguage *language = GDScriptLanguage::get_singleton();
+	if (language == nullptr) {
+		if (r_error != nullptr) {
+			*r_error = "The GDScript language is not initialized.";
+		}
+		return false;
+	}
+
+	r_code = p_record.code;
+	const HashMap<StringName, int> &globals = language->get_global_map();
+	for (int ip = 0; ip < r_code.size();) {
+		const int length = GDScriptFunction::get_instruction_size(r_code.ptr(), r_code.size(), ip);
+		if (length <= 0) {
+			if (r_error != nullptr) {
+				*r_error = "Invalid instruction while resolving symbolic globals in '" + p_record.identity + "'.";
+			}
+			return false;
+		}
+		for (int word = 1; word < length; word++) {
+			if (GDScriptFunction::get_operand_kind(r_code.ptr(), r_code.size(), ip, word) != GDScriptFunction::OPERAND_GLOBAL_INDEX) {
+				continue;
+			}
+			const int symbol_index = r_code[ip + word];
+			if (symbol_index < 0 || symbol_index >= p_record.global_names.size()) {
+				if (r_error != nullptr) {
+					*r_error = "Invalid global symbol in function '" + p_record.identity + "'.";
+				}
+				return false;
+			}
+			const StringName &name = p_record.global_names[symbol_index];
+			const int *runtime_index = globals.getptr(name);
+			if (runtime_index == nullptr || *runtime_index < 0 || *runtime_index >= language->get_global_array_size()) {
+				if (r_error != nullptr) {
+					*r_error = "Could not resolve global symbol '" + String(name) + "' in function '" + p_record.identity + "'.";
+				}
+				return false;
+			}
+			r_code.write[ip + word] = *runtime_index;
+		}
+		ip += length;
+	}
+	return true;
+}
+
 bool Internals::make_record(GDScriptFunction *p_function, const String &p_identity, const HashMap<GDScriptFunction *, String> &p_identities, FunctionRecord &r_record) {
 	r_record.identity = p_identity;
 	if (!make_function_metadata(p_function, r_record)) {
@@ -1967,9 +2079,10 @@ bool Internals::make_record(GDScriptFunction *p_function, const String &p_identi
 	r_record.call_feedback_count = p_function->_call_feedback_count;
 	r_record.is_static = p_function->_static;
 	r_record.profile_guided = GDScriptOptimizationProfile::has_hint(p_function->get_optimization_profile_key(), runtime_fingerprint);
-	r_record.code = p_function->code;
 	r_record.default_arguments = p_function->default_arguments;
-	r_record.global_names = p_function->global_names;
+	if (!make_symbolic_global_code(p_function, r_record.code, r_record.global_names)) {
+		return false;
+	}
 	for (const Pair<int, Variant::Type> &slot : p_function->temporary_slots) {
 		r_record.temporary_slots.push_back(slot);
 	}
@@ -2083,6 +2196,22 @@ Error ModuleVerifier::verify_property(const PropertyRecord &p_property) {
 	constexpr uint32_t PROPERTY_USAGE_KNOWN_MASK = (uint32_t(1) << 30) - 2;
 	if (p_property.type >= Variant::VARIANT_MAX || p_property.hint >= PROPERTY_HINT_MAX || (p_property.usage & ~PROPERTY_USAGE_KNOWN_MASK) != 0) {
 		return fail("Unknown property type, hint, or usage flag.");
+	}
+	if (p_property.type == Variant::OBJECT && !p_property.class_name.is_empty() && !ClassDB::class_exists(p_property.class_name) &&
+			!ScriptServer::is_global_class(p_property.class_name)) {
+		return fail("Unresolved object class '" + String(p_property.class_name) + "' in property metadata.");
+	}
+	if (p_property.type == Variant::STRUCT) {
+		bool found = false;
+		for (const KeyValue<String, Ref<StructLayout>> &entry : verified_layouts) {
+			if (entry.value->get_type_identifier() == p_property.class_name || entry.value->get_type_descriptor() == p_property.hint_string) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return fail("Unresolved struct layout in property metadata.");
+		}
 	}
 	return OK;
 }
@@ -2682,8 +2811,9 @@ Error ModuleVerifier::validate_operands_and_tables() {
 						}
 						break;
 					case GDScriptFunction::OPERAND_GLOBAL_INDEX:
-						if (value < 0 || GDScriptLanguage::get_singleton() == nullptr || value >= GDScriptLanguage::get_singleton()->get_global_array_size()) {
-							return fail("Invalid global-table operand in function '" + record.identity + "'.");
+						if (value < 0 || value >= record.global_names.size() || GDScriptLanguage::get_singleton() == nullptr ||
+								!GDScriptLanguage::get_singleton()->get_global_map().has(record.global_names[value])) {
+							return fail("Unresolved symbolic global operand in function '" + record.identity + "'.");
 						}
 						break;
 					case GDScriptFunction::OPERAND_TYPE_ID:
@@ -3628,10 +3758,15 @@ bool Internals::validate_record(const FunctionRecord &p_record, GDScriptFunction
 	if (!function_metadata_matches(p_record, p_function)) {
 		return fail("function signature metadata mismatch");
 	}
-	if (p_record.code != p_function->code) {
+	Vector<int> symbolic_code;
+	Vector<StringName> symbolic_names;
+	if (!make_symbolic_global_code(p_function, symbolic_code, symbolic_names)) {
+		return fail("could not symbolize runtime global operands");
+	}
+	if (p_record.code != symbolic_code) {
 		return fail("bytecode mismatch");
 	}
-	if (p_record.default_arguments != p_function->default_arguments || p_record.global_names != p_function->global_names) {
+	if (p_record.default_arguments != p_function->default_arguments || p_record.global_names != symbolic_names) {
 		return fail("default-argument or global-name table mismatch");
 	}
 	if (p_record.fingerprint != get_portable_function_fingerprint(p_record) || p_record.initial_line != p_function->_initial_line ||
@@ -3678,7 +3813,10 @@ void Internals::install_record(const FunctionRecord &p_record, GDScriptFunction 
 	p_function->_optimizing_jit_attempted.clear();
 #endif
 
-	p_function->code = p_record.code;
+	Vector<int> runtime_code;
+	String resolution_error;
+	ERR_FAIL_COND_MSG(!resolve_symbolic_global_code(p_record, runtime_code, &resolution_error), resolution_error);
+	p_function->code = runtime_code;
 	p_function->_code_ptr = p_function->code.ptrw();
 	p_function->_code_size = p_function->code.size();
 	p_function->default_arguments = p_record.default_arguments;
@@ -3938,6 +4076,29 @@ Error RuntimeBuilder::decode_property(const PropertyRecord &p_record, PropertyIn
 	if (p_record.type >= Variant::VARIANT_MAX || p_record.hint >= PROPERTY_HINT_MAX) {
 		return fail(ERR_INVALID_DATA, "Invalid property type or hint.");
 	}
+	if (p_record.type == Variant::OBJECT && !p_record.class_name.is_empty() && !ClassDB::class_exists(p_record.class_name)) {
+		if (!ScriptServer::is_global_class(p_record.class_name)) {
+			return fail(ERR_DOES_NOT_EXIST, "Could not resolve property class '" + String(p_record.class_name) + "'.");
+		}
+		const String script_path = ScriptServer::get_global_class_path(p_record.class_name);
+		Ref<Resource> resource = ResourceLoader::load(script_path, "Script");
+		Ref<Script> script = resource;
+		if (script.is_null() || script->get_global_name() != p_record.class_name) {
+			return fail(ERR_CANT_ACQUIRE_RESOURCE, "Could not load global property class '" + String(p_record.class_name) + "'.");
+		}
+	}
+	if (p_record.type == Variant::STRUCT) {
+		bool found = false;
+		for (const KeyValue<String, Ref<StructLayout>> &entry : layouts_by_identifier) {
+			if (entry.value->get_type_identifier() == p_record.class_name || entry.value->get_type_descriptor() == p_record.hint_string) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return fail(ERR_DOES_NOT_EXIST, "Could not resolve struct property layout '" + String(p_record.class_name) + "'.");
+		}
+	}
 	r_property = PropertyInfo(Variant::Type(p_record.type), p_record.name, PropertyHint(p_record.hint), p_record.hint_string, p_record.usage, p_record.class_name);
 	return OK;
 }
@@ -4000,7 +4161,7 @@ Error RuntimeBuilder::decode_data_type(const DataTypeRecord &p_record, GDScriptD
 			Ref<Resource> resource = ResourceLoader::load(p_record.script_path, "Script");
 			script_ref = resource;
 			script = script_ref.ptr();
-			if (script == nullptr) {
+			if (script == nullptr || (!p_record.script_class.is_empty() && script->get_global_name() != p_record.script_class)) {
 				return fail(ERR_CANT_ACQUIRE_RESOURCE, "Could not load script data type '" + p_record.script_path + "'.");
 			}
 		}
@@ -4017,9 +4178,18 @@ Error RuntimeBuilder::decode_data_type(const DataTypeRecord &p_record, GDScriptD
 			return fail(ERR_INVALID_DATA, "Invalid serialized struct data type.");
 		}
 		Error layout_error = OK;
-		r_type.struct_layout = StructLayout::from_dictionary(serialized_layout, &layout_error);
-		if (layout_error != OK || r_type.struct_layout.is_null()) {
+		Ref<StructLayout> decoded_layout = StructLayout::from_dictionary(serialized_layout, &layout_error);
+		if (layout_error != OK || decoded_layout.is_null()) {
 			return fail(ERR_INVALID_DATA, "Could not reconstruct a struct data type layout.");
+		}
+		const Ref<StructLayout> *module_layout = layouts_by_identifier.getptr(decoded_layout->get_type_identifier());
+		if (module_layout != nullptr) {
+			if (!decoded_layout->is_compatible(*module_layout)) {
+				return fail(ERR_INVALID_DATA, "Struct data type layout does not match the module layout descriptor.");
+			}
+			r_type.struct_layout = *module_layout;
+		} else {
+			r_type.struct_layout = decoded_layout;
 		}
 	}
 	for (const DataTypeRecord &element_record : p_record.container_element_types) {
@@ -4369,9 +4539,14 @@ Error RuntimeBuilder::validate_function_code(const FunctionRecord &p_record) {
 					break;
 				case GDScriptFunction::OPERAND_STRUCT_FIELD_INDEX:
 				case GDScriptFunction::OPERAND_STATIC_VARIABLE_INDEX:
-				case GDScriptFunction::OPERAND_GLOBAL_INDEX:
 					if (value < 0) {
 						return fail(ERR_INVALID_DATA, "Invalid index operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_GLOBAL_INDEX:
+					if (value < 0 || value >= p_record.global_names.size() || GDScriptLanguage::get_singleton() == nullptr ||
+							!GDScriptLanguage::get_singleton()->get_global_map().has(p_record.global_names[value])) {
+						return fail(ERR_INVALID_DATA, "Unresolved symbolic global operand in '" + p_record.identity + "'.");
 					}
 					break;
 				case GDScriptFunction::OPERAND_TYPE_ID:
@@ -4574,24 +4749,63 @@ Error RuntimeBuilder::resolve_function_relocations(const FunctionRecord &p_recor
 	return OK;
 }
 
-Error RuntimeBuilder::stage_functions() {
-	for (const FunctionRecord &record : module.functions) {
-		// The module-level verifier has already completed before shell creation.
-		// Keep this local structural check as a defensive assertion at the
-		// allocation boundary used by the runtime builder.
-		if (functions.has(record.identity) || validate_function_code(record) != OK) {
+Error RuntimeBuilder::resolve_function_symbols() {
+	resolved_functions.resize(module.functions.size());
+	for (int function_index = 0; function_index < module.functions.size(); function_index++) {
+		const FunctionRecord &record = module.functions[function_index];
+		if (function_records.has(record.identity) || validate_function_code(record) != OK) {
 			if (error.is_empty()) {
 				fail(ERR_INVALID_DATA, "Duplicate function identity '" + record.identity + "'.");
 			}
-			discard_functions();
 			return ERR_INVALID_DATA;
 		}
+		function_records.insert(record.identity, &record);
+		ResolvedFunction &resolved = resolved_functions.write[function_index];
+		for (const DataTypeRecord &type_record : record.argument_types) {
+			GDScriptDataType type;
+			if (decode_data_type(type_record, type) != OK) {
+				return ERR_INVALID_DATA;
+			}
+			resolved.argument_types.push_back(type);
+		}
+		if (decode_data_type(record.return_type, resolved.return_type) != OK || decode_method(record.method, resolved.method) != OK ||
+				decode_constant(record.rpc_config, resolved.rpc_config) != OK) {
+			return ERR_INVALID_DATA;
+		}
+		for (const NamedConstantRecord &constant : record.local_constants) {
+			if (constant.name.is_empty() || resolved.local_constants.has(constant.name)) {
+				return fail(ERR_INVALID_DATA, "Invalid local constant table in '" + record.identity + "'.");
+			}
+			Variant value;
+			if (decode_constant(constant.value, value) != OK) {
+				return ERR_INVALID_DATA;
+			}
+			resolved.local_constants.insert(constant.name, value);
+		}
+		for (const ConstantData &constant : record.constants) {
+			Variant value;
+			if (decode_constant(constant, value) != OK) {
+				return ERR_INVALID_DATA;
+			}
+			resolved.constants.push_back(value);
+		}
+		String global_error;
+		if (!Internals::resolve_symbolic_global_code(record, resolved.code, &global_error)) {
+			return fail(ERR_INVALID_DATA, global_error);
+		}
+	}
+	return OK;
+}
+
+Error RuntimeBuilder::stage_functions() {
+	for (const FunctionRecord &record : module.functions) {
 		GDScriptFunction *function = memnew(GDScriptFunction);
 		functions.insert(record.identity, function);
-		function_records.insert(record.identity, &record);
 	}
 
-	for (const FunctionRecord &record : module.functions) {
+	for (int function_index = 0; function_index < module.functions.size(); function_index++) {
+		const FunctionRecord &record = module.functions[function_index];
+		const ResolvedFunction &resolved = resolved_functions[function_index];
 		GDScriptFunction *function = *functions.getptr(record.identity);
 		function->name = record.name;
 		function->source = record.source;
@@ -4611,46 +4825,14 @@ Error RuntimeBuilder::stage_functions() {
 			function->_call_feedback_ptr = memnew_arr(SafeNumeric<uintptr_t>, function->_call_feedback_count);
 		}
 
-		for (const DataTypeRecord &type_record : record.argument_types) {
-			GDScriptDataType type;
-			if (decode_data_type(type_record, type) != OK) {
-				discard_functions();
-				return ERR_INVALID_DATA;
-			}
-			function->argument_types.push_back(type);
-		}
-		if (decode_data_type(record.return_type, function->return_type) != OK || decode_method(record.method, function->method_info) != OK) {
-			discard_functions();
-			return ERR_INVALID_DATA;
-		}
-		Variant rpc;
-		if (decode_constant(record.rpc_config, rpc) != OK) {
-			discard_functions();
-			return ERR_INVALID_DATA;
-		}
-		function->rpc_config = rpc;
-		for (const NamedConstantRecord &constant : record.local_constants) {
-			if (constant.name.is_empty() || function->constant_map.has(constant.name)) {
-				discard_functions();
-				return fail(ERR_INVALID_DATA, "Invalid local constant table in '" + record.identity + "'.");
-			}
-			Variant value;
-			if (decode_constant(constant.value, value) != OK) {
-				discard_functions();
-				return ERR_INVALID_DATA;
-			}
-			function->constant_map.insert(constant.name, value);
-		}
-		for (const ConstantData &constant : record.constants) {
-			Variant value;
-			if (decode_constant(constant, value) != OK) {
-				discard_functions();
-				return ERR_INVALID_DATA;
-			}
-			function->constants.push_back(value);
-		}
+		function->argument_types = resolved.argument_types;
+		function->return_type = resolved.return_type;
+		function->method_info = resolved.method;
+		function->rpc_config = resolved.rpc_config;
+		function->constant_map = resolved.local_constants;
+		function->constants = resolved.constants;
 		function->_constant_count = function->constants.size();
-		function->code = record.code;
+		function->code = resolved.code;
 		function->default_arguments = record.default_arguments;
 		function->global_names = record.global_names;
 		function->_global_names_count = function->global_names.size();
@@ -4953,6 +5135,13 @@ Error RuntimeBuilder::build(GDScript *p_script, const ParsedModule &p_module, bo
 	Error build_error = prepare_shell_graph(root, module, &classes, &error);
 	if (build_error == OK) {
 		build_error = stage_classes();
+	}
+	if (build_error == OK) {
+		// Resolve every serialized type, script/resource constant, method
+		// signature, RPC value, and process-local global operand before a VM
+		// function is allocated. Runtime objects are installed only after this
+		// complete module-wide symbolic pass succeeds.
+		build_error = resolve_function_symbols();
 	}
 	if (build_error == OK) {
 		build_error = stage_functions();

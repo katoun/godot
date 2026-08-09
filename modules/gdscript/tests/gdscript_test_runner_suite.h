@@ -34,10 +34,12 @@
 #include "../gdscript_compiled_module.h"
 #include "gdscript_test_runner.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
+#include "scene/main/node.h"
 #include "tests/test_macros.h"
 #include "tests/test_utils.h"
 
@@ -133,6 +135,30 @@ TEST_CASE("[Modules][GDScript] Opcode descriptors cover every bytecode instructi
 
 TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM bytecode") {
 	GDScriptLanguage::get_singleton()->init();
+	const StringName symbolic_autoload = SNAME("__PortableCompiledModuleAutoload");
+	const StringName relocated_autoload_slot = SNAME("__PortableCompiledModuleRelocatedSlot");
+	const String symbolic_autoload_setting = "autoload/" + String(symbolic_autoload);
+	Node *original_autoload = memnew(Node);
+	original_autoload->set_meta(SNAME("slot"), 17);
+	Node *relocated_autoload = memnew(Node);
+	relocated_autoload->set_meta(SNAME("slot"), 29);
+	struct AutoloadSettingGuard {
+		String setting;
+		StringName name;
+		StringName relocated_name;
+		Node *original = nullptr;
+		Node *relocated = nullptr;
+		~AutoloadSettingGuard() {
+			ProjectSettings::get_singleton()->set_setting(setting, Variant());
+			GDScriptLanguage::get_singleton()->add_global_constant(name, Variant());
+			GDScriptLanguage::get_singleton()->add_global_constant(relocated_name, Variant());
+			memdelete(original);
+			memdelete(relocated);
+		}
+	} autoload_guard{ symbolic_autoload_setting, symbolic_autoload, relocated_autoload_slot, original_autoload, relocated_autoload };
+	ProjectSettings::get_singleton()->set_setting(symbolic_autoload_setting, "*res://modules/gdscript/tests/scripts/lsp/local_variables.gd");
+	GDScriptLanguage::get_singleton()->add_global_constant(symbolic_autoload, original_autoload);
+	GDScriptLanguage::get_singleton()->add_global_constant(relocated_autoload_slot, relocated_autoload);
 	const String module_path = OS::get_singleton()->get_temp_path().path_join("portable_gdscript_module.gdm");
 	const String script_path = module_path.get_basename() + ".gd";
 	Ref<GDScript> gdscript = memnew(GDScript);
@@ -169,6 +195,8 @@ class Nested:
 @abstract class AbstractNested:
 	pass
 
+var nested_value: Nested
+
 static func scale(value: int = SCALE) -> int:
 	return value * SCALE
 
@@ -177,6 +205,15 @@ func count_values(...values: Array) -> int:
 
 func read_sample(sample: Sample) -> int:
 	return sample.value
+
+func read_nested(value: Nested) -> bool:
+	return value.enabled
+
+func make_offset(offset: int) -> Callable:
+	return func(value: int) -> int: return value + offset
+
+func autoload_value() -> int:
+	return int(__PortableCompiledModuleAutoload.get_meta("slot"))
 
 @rpc("any_peer", "call_remote", "reliable")
 func compute(value: int) -> String:
@@ -207,6 +244,15 @@ func compute(value: int) -> String:
 	CHECK_FALSE(module.is_empty());
 	String verifier_error;
 	CHECK_MESSAGE(GDScriptCompiledModule::verify(module, &verifier_error) == OK, verifier_error);
+	{
+		HashMap<StringName, int> &global_map = const_cast<HashMap<StringName, int> &>(GDScriptLanguage::get_singleton()->get_global_map());
+		const int original_index = global_map[symbolic_autoload];
+		global_map.erase(symbolic_autoload);
+		String unresolved_global_error;
+		CHECK(GDScriptCompiledModule::verify(module, &unresolved_global_error) == ERR_INVALID_DATA);
+		CHECK(unresolved_global_error.contains("symbolic global"));
+		global_map.insert(symbolic_autoload, original_index);
+	}
 	CHECK(summary.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
 	CHECK(summary.source_fingerprint == GDScriptCompiledModule::fingerprint_source(gdscript->get_source_code()));
 	CHECK(summary.skipped_functions == 0);
@@ -308,18 +354,42 @@ func compute(value: int) -> String:
 	direct_script->set_path(module_path.get_basename() + "_direct.gd");
 	direct_script->set_binary_tokens_source(tokens);
 	String direct_error;
-	REQUIRE_MESSAGE(GDScriptCompiledModule::prepare_shallow(direct_script.ptr(), module, &direct_error) == OK, direct_error);
-	REQUIRE_MESSAGE(GDScriptCompiledModule::build_runtime(direct_script.ptr(), module, true, &direct_error) == OK, direct_error);
-	CHECK(direct_script->is_valid());
-	CHECK(direct_script->is_tool());
-	CHECK(direct_script->get_subclasses().size() == 2);
-	CHECK(direct_script->get_struct_layouts().size() == 2);
-	const Variant *direct_amount_default = direct_script->get_member_default_values().getptr(SNAME("amount"));
-	REQUIRE(direct_amount_default != nullptr);
-	CHECK(*direct_amount_default == Variant(1));
-	Ref<RefCounted> direct_instance = memnew(RefCounted);
-	direct_instance->set_script(direct_script);
-	CHECK(String(direct_instance->call(SNAME("compute"), 5)) == "10");
+	Ref<RefCounted> direct_instance;
+	{
+		// Simulate another process assigning a different global-array index to
+		// the same autoload name. Portable bytecode must resolve the name at
+		// load time; copying the compiler's original numeric index returns 17.
+		HashMap<StringName, int> &global_map = const_cast<HashMap<StringName, int> &>(GDScriptLanguage::get_singleton()->get_global_map());
+		const int original_index = global_map[symbolic_autoload];
+		struct GlobalIndexGuard {
+			HashMap<StringName, int> &map;
+			StringName name;
+			int index;
+			~GlobalIndexGuard() { map[name] = index; }
+		} global_index_guard{ global_map, symbolic_autoload, original_index };
+		global_map[symbolic_autoload] = global_map[relocated_autoload_slot];
+
+		REQUIRE_MESSAGE(GDScriptCompiledModule::prepare_shallow(direct_script.ptr(), module, &direct_error) == OK, direct_error);
+		REQUIRE_MESSAGE(GDScriptCompiledModule::build_runtime(direct_script.ptr(), module, true, &direct_error) == OK, direct_error);
+		CHECK(direct_script->is_valid());
+		CHECK(direct_script->is_tool());
+		CHECK(direct_script->get_subclasses().size() == 2);
+		CHECK(direct_script->get_struct_layouts().size() == 2);
+		const Variant *direct_amount_default = direct_script->get_member_default_values().getptr(SNAME("amount"));
+		REQUIRE(direct_amount_default != nullptr);
+		CHECK(*direct_amount_default == Variant(1));
+		direct_instance = memnew(RefCounted);
+		direct_instance->set_script(direct_script);
+		CHECK(String(direct_instance->call(SNAME("compute"), 5)) == "10");
+		CHECK(int(direct_instance->call(SNAME("autoload_value"))) == 29);
+	}
+	Callable offset = direct_instance->call(SNAME("make_offset"), 4);
+	CHECK(int(offset.call(6)) == 10);
+	const Ref<GDScript> *direct_nested_script = direct_script->get_subclasses().getptr(SNAME("Nested"));
+	REQUIRE(direct_nested_script != nullptr);
+	Ref<RefCounted> direct_nested = memnew(RefCounted);
+	direct_nested->set_script(*direct_nested_script);
+	CHECK(bool(direct_instance->call(SNAME("read_nested"), direct_nested)));
 	CHECK(int(direct_instance->call(SNAME("count_values"), 1, 2, 3)) == 3);
 	direct_instance->set(SNAME("amount"), 9);
 	CHECK(int(direct_instance->get(SNAME("amount"))) == 9);
@@ -381,6 +451,8 @@ func compute(value: int) -> String:
 	modules.push_back(summary);
 	CHECK_FALSE(GDScriptCompiledModule::create_project_manifest(modules).is_empty());
 
+	offset = Callable();
+	direct_nested.unref();
 	instance.unref();
 	direct_instance.unref();
 	loaded_instance.unref();

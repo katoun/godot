@@ -75,7 +75,10 @@ public:
 	};
 
 	static constexpr uint32_t FORMAT_VERSION = 4;
-	static constexpr uint32_t BYTECODE_VERSION = 1;
+	// Version 2 stores OPCODE_STORE_GLOBAL operands as indices into the
+	// function's symbolic name table. They are relocated to the running
+	// language's global-array indices only after module verification.
+	static constexpr uint32_t BYTECODE_VERSION = 2;
 
 	static uint64_t fingerprint_bytes(const uint8_t *p_data, uint64_t p_size);
 	static uint64_t fingerprint_source(const String &p_source);
