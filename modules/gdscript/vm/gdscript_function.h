@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "gdscript_utility_functions.h"
+#include "../gdscript_utility_functions.h"
 
 #include "core/object/ref_counted.h"
 #include "core/object/script_language.h"

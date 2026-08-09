@@ -32,10 +32,10 @@
 
 #include "gdscript.h"
 #include "gdscript_cache.h"
-#include "gdscript_compiled_module.h"
+#include "compiled/gdscript_compiled_module.h"
 #include "gdscript_parser.h"
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-#include "gdscript_optimization_profile.h"
+#include "jit/gdscript_optimization_profile.h"
 #endif
 #include "gdscript_resource_format.h"
 #include "gdscript_tokenizer_buffer.h"

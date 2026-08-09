@@ -28,12 +28,12 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "gdscript.h"
+#include "../gdscript.h"
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-#include "gdscript_baseline_jit.h"
+#include "../jit/gdscript_baseline_jit.h"
 #endif
 #include "gdscript_function.h"
-#include "gdscript_lambda_callable.h"
+#include "../gdscript_lambda_callable.h"
 
 #include "core/object/class_db.h"
 #include "core/os/os.h"

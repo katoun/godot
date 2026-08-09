@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "gdscript_function.h"
+#include "vm/gdscript_function.h"
 
 #include "core/debugger/engine_debugger.h"
 #include "core/debugger/script_debugger.h"

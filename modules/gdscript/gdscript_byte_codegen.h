@@ -32,7 +32,7 @@
 
 #include "gdscript.h"
 #include "gdscript_codegen.h"
-#include "gdscript_function.h"
+#include "vm/gdscript_function.h"
 #include "gdscript_utility_functions.h"
 
 #include "core/templates/rb_map.h"

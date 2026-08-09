@@ -13,6 +13,14 @@ To access Godot's internal classes, GDScript uses [`ClassDB`](/core/object/class
 
 [Built-in GDScript methods](https://docs.godotengine.org/en/latest/classes/class_@gdscript.html#methods) are defined and exported by [`GDScriptUtilityFunctions`](gdscript_utility_functions.h), whereas [global scope methods](https://docs.godotengine.org/en/latest/classes/class_%2540globalscope.html) are registered in [`Variant::_register_variant_utility_functions()`](/core/variant/variant_utility.cpp).
 
+The runtime-oriented implementation is grouped by responsibility:
+
+- `vm/` owns executable functions, opcode metadata, interpreter dispatch, and disassembly.
+- `jit/` owns native value layouts, compact SSA optimization, SLJIT lowering, executable-code lifetime, and optimization profiles.
+- `compiled/` owns the portable `.gdm` format, metadata encoding, verification, dependency resolution, symbolic relocation, direct runtime construction, and editor-cache integration.
+
+Tokenizer, parser, analyzer, and compiler entry points remain at the module root because they form the established language front end and are shared directly by editor and language-server code.
+
 
 ## Compilation
 
@@ -83,7 +91,7 @@ A fundamental cyclic dependency problem occurs when the types of two different m
 
 ### Compiling (see [`GDScriptCompiler`](gdscript_compiler.h))
 
-Compiling is the final step in making a GDScript executable in the [virtual machine](gdscript_vm.h) (VM). The compiler takes a `GDScript` object and an AST, and uses another class, [`GDScriptByteCodeGenerator`](gdscript_byte_codegen.h), to generate bytecode corresponding to the class. In doing this, it creates the objects that the VM understands how to run, like [`GDScriptFunction`](gdscript_function.h), and completes a few extra tasks needed for compilation, such as populating runtime class member information.
+Compiling is the final step in making a GDScript executable in the [virtual machine](vm/gdscript_vm.cpp) (VM). The compiler takes a `GDScript` object and an AST, and uses another class, [`GDScriptByteCodeGenerator`](gdscript_byte_codegen.h), to generate bytecode corresponding to the class. In doing this, it creates the objects that the VM understands how to run, like [`GDScriptFunction`](vm/gdscript_function.h), and completes a few extra tasks needed for compilation, such as populating runtime class member information.
 
 Importantly, the compilation process of a class, specifically the `GDScriptCompiler::_compile_class()` method, _cannot_ depend on information obtained by calling `GDScriptCompiler::_compile_class()` on another class, for the same cyclic dependency reasons explained in the previous section.
 Any information that can only be obtained or populated during the compilation step, when `GDScript` objects become available, must be handled before `GDScriptCompiler::_compile_class()` is called. This process is centralized in `GDScriptCompiler::_prepare_compilation()` which works as the compile-time equivalent of `GDScriptAnalyzer::resolve_class_interface()`: it populates a `GDScript`'s "interface" exclusively with information from the analysis step, and without processing other external classes. This information may then be referenced by other classes without introducing problematic cycles.
@@ -100,7 +108,7 @@ Eligible functions are promoted after repeated calls to a compact optimizing tie
 
 ### Portable compiled modules
 
-[`GDScriptCompiledModule`](gdscript_compiled_module.h) defines the versioned `.gdm` container used by the editor cache and binary-script exports. It stores integer VM bytecode, constants, names, frame metadata, portable class metadata, and symbolic descriptions of evaluator, constructor, utility, `MethodBind`, and lambda tables. Class records cover inheritance and ownership, local/global/qualified names, icon and extensible script flags, typed indexed members, constant defaults, static variables, constants, signals, property accessors, RPC configuration, nested classes, lambda captures, and initializer bindings. Every owner-local method binding includes its static flag, complete GDScript parameter and return types, default-argument count, `MethodInfo`, and RPC configuration. Declared structs have explicit named field records, schema identifiers and fingerprints, nested-layout references, and field defaults. These records are generated exclusively from the runtime metadata retained by `GDScriptCompiler`; parser AST nodes are not serialized. Script and struct types are represented by stable paths, qualified names, and schema descriptors rather than addresses or native field offsets. Native addresses and target-specific JIT code are never written to the file. The header includes source, dependency, bytecode-format, and engine/Variant API fingerprints plus a payload checksum. The original binary-token stream is embedded as the initial fallback.
+[`GDScriptCompiledModule`](compiled/gdscript_compiled_module.h) defines the versioned `.gdm` container used by the editor cache and binary-script exports. It stores integer VM bytecode, constants, names, frame metadata, portable class metadata, and symbolic descriptions of evaluator, constructor, utility, `MethodBind`, and lambda tables. Class records cover inheritance and ownership, local/global/qualified names, icon and extensible script flags, typed indexed members, constant defaults, static variables, constants, signals, property accessors, RPC configuration, nested classes, lambda captures, and initializer bindings. Every owner-local method binding includes its static flag, complete GDScript parameter and return types, default-argument count, `MethodInfo`, and RPC configuration. Declared structs have explicit named field records, schema identifiers and fingerprints, nested-layout references, and field defaults. These records are generated exclusively from the runtime metadata retained by `GDScriptCompiler`; parser AST nodes are not serialized. Script and struct types are represented by stable paths, qualified names, and schema descriptors rather than addresses or native field offsets. Native addresses and target-specific JIT code are never written to the file. The header includes source, dependency, bytecode-format, and engine/Variant API fingerprints plus a payload checksum. The original binary-token stream is embedded as the initial fallback.
 
 An independent, fail-closed verifier decodes the entire instruction stream, validates control flow, frame and typed-operation constraints, resource limits, metadata graphs, struct schemas, dependencies, and every symbolic relocation before the direct runtime builder exposes a class or function. The parser/analyzer/compiler path remains the fallback and can still act as a bytecode oracle when direct construction is unavailable. A corrupt or stale module is discarded atomically and execution continues with bytecode compiled from its embedded tokens.
 
@@ -141,8 +149,8 @@ Tool scripts, declared with the `@tool` annotation on a GDScript file, run in th
 There are many other classes in the GDScript module. Here is a brief overview of some of them:
 
 - Declaration of GDScript warnings in [`GDScriptWarning`](gdscript_warning.h).
-- [`GDScriptFunction`](gdscript_function.h), which represents an executable GDScript function. The relevant file contains both static as well as runtime information.
-- The [virtual machine](gdscript_vm.cpp) is essentially defined as calling `GDScriptFunction::call()`.
+- [`GDScriptFunction`](vm/gdscript_function.h), which represents an executable GDScript function. The relevant file contains both static as well as runtime information.
+- The [virtual machine](vm/gdscript_vm.cpp) is essentially defined as calling `GDScriptFunction::call()`.
 - Editor-related functions can be found in parts of `GDScriptLanguage`, originally declared in [`gdscript.h`](gdscript.h) but defined in [`gdscript_editor.cpp`](gdscript_editor.cpp). Code highlighting can be found in [`GDScriptSyntaxHighlighter`](editor/gdscript_highlighter.h).
-- GDScript decompilation is found in [`gdscript_disassembler.cpp`](gdscript_disassembler.h), defined as `GDScriptFunction::disassemble()`.
+- GDScript decompilation is found in [`gdscript_disassembler.cpp`](vm/gdscript_disassembler.cpp), defined as `GDScriptFunction::disassemble()`.
 - Documentation generation from GDScript comments in [`GDScriptDocGen`](editor/gdscript_docgen.h)

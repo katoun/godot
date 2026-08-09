@@ -27,9 +27,12 @@ if env["gdscript_baseline_jit"] and jit_supported:
 
     env_sljit = env_gdscript.Clone()
     env_sljit.disable_warnings()
-    env_sljit.add_source_files(env.modules_sources, "gdscript_baseline_jit_sljit.c")
+    env_sljit.add_source_files(env.modules_sources, "./jit/gdscript_baseline_jit_sljit.c")
 
 env_gdscript.add_source_files(env.modules_sources, "*.cpp")
+env_gdscript.add_source_files(env.modules_sources, "./compiled/*.cpp")
+env_gdscript.add_source_files(env.modules_sources, "./jit/*.cpp")
+env_gdscript.add_source_files(env.modules_sources, "./vm/*.cpp")
 
 if env.editor_build:
     env_gdscript.add_source_files(env.modules_sources, "./editor/*.cpp")

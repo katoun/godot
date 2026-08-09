@@ -30,7 +30,7 @@
 
 #ifdef DEBUG_ENABLED
 
-#include "gdscript.h"
+#include "../gdscript.h"
 #include "gdscript_function.h"
 
 #include "core/object/method_bind.h"

@@ -30,7 +30,7 @@
 
 #include "gdscript_cache.h"
 
-#include "gdscript_compiled_module.h"
+#include "compiled/gdscript_compiled_module.h"
 
 #include "gdscript.h"
 #include "gdscript_analyzer.h"

@@ -31,8 +31,8 @@
 #include "gdscript_byte_codegen.h"
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-#include "gdscript_baseline_jit.h"
-#include "gdscript_optimization_profile.h"
+#include "jit/gdscript_baseline_jit.h"
+#include "jit/gdscript_optimization_profile.h"
 #endif
 
 #include "core/object/class_db.h"

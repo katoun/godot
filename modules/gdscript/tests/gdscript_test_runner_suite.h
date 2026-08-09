@@ -31,7 +31,7 @@
 #pragma once
 
 #include "../gdscript_cache.h"
-#include "../gdscript_compiled_module.h"
+#include "../compiled/gdscript_compiled_module.h"
 #include "../gdscript_resource_format.h"
 #include "gdscript_test_runner.h"
 
@@ -46,8 +46,8 @@
 #include "tests/test_utils.h"
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-#include "../gdscript_baseline_jit.h"
-#include "../gdscript_optimization_profile.h"
+#include "../jit/gdscript_baseline_jit.h"
+#include "../jit/gdscript_optimization_profile.h"
 #endif
 
 #ifdef TOOLS_ENABLED

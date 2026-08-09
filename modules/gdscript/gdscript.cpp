@@ -33,11 +33,11 @@
 #include "gdscript_analyzer.h"
 #include "gdscript_cache.h"
 #include "gdscript_compiler.h"
-#include "gdscript_compiled_module.h"
+#include "compiled/gdscript_compiled_module.h"
 #include "gdscript_parser.h"
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
-#include "gdscript_baseline_jit.h"
-#include "gdscript_optimization_profile.h"
+#include "jit/gdscript_baseline_jit.h"
+#include "jit/gdscript_optimization_profile.h"
 #endif
 #include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"

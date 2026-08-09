@@ -32,7 +32,7 @@
 
 #include "gdscript_analyzer.h"
 #include "gdscript_cache.h"
-#include "gdscript_compiled_module.h"
+#include "compiled/gdscript_compiled_module.h"
 #include "gdscript_parser.h"
 
 #include "core/io/file_access.h"
