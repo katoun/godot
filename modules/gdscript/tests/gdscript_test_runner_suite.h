@@ -35,6 +35,7 @@
 #include "../gdscript_resource_format.h"
 #include "gdscript_test_runner.h"
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
@@ -359,6 +360,7 @@ TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM 
 	GDScriptLanguage::get_singleton()->init();
 	const StringName symbolic_autoload = SNAME("__PortableCompiledModuleAutoload");
 	const StringName relocated_autoload_slot = SNAME("__PortableCompiledModuleRelocatedSlot");
+	const StringName symbolic_engine_singleton = SNAME("__PortableCompiledModuleEngineSingleton");
 	const String symbolic_autoload_setting = "autoload/" + String(symbolic_autoload);
 	Node *original_autoload = memnew(Node);
 	original_autoload->set_meta(SNAME("slot"), 17);
@@ -368,19 +370,24 @@ TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM 
 		String setting;
 		StringName name;
 		StringName relocated_name;
+		StringName engine_singleton_name;
 		Node *original = nullptr;
 		Node *relocated = nullptr;
 		~AutoloadSettingGuard() {
 			ProjectSettings::get_singleton()->set_setting(setting, Variant());
 			GDScriptLanguage::get_singleton()->add_global_constant(name, Variant());
 			GDScriptLanguage::get_singleton()->add_global_constant(relocated_name, Variant());
+			GDScriptLanguage::get_singleton()->add_global_constant(engine_singleton_name, Variant());
+			Engine::get_singleton()->remove_singleton(engine_singleton_name);
 			memdelete(original);
 			memdelete(relocated);
 		}
-	} autoload_guard{ symbolic_autoload_setting, symbolic_autoload, relocated_autoload_slot, original_autoload, relocated_autoload };
+	} autoload_guard{ symbolic_autoload_setting, symbolic_autoload, relocated_autoload_slot, symbolic_engine_singleton, original_autoload, relocated_autoload };
 	ProjectSettings::get_singleton()->set_setting(symbolic_autoload_setting, "*res://modules/gdscript/tests/scripts/lsp/local_variables.gd");
 	GDScriptLanguage::get_singleton()->add_global_constant(symbolic_autoload, original_autoload);
 	GDScriptLanguage::get_singleton()->add_global_constant(relocated_autoload_slot, relocated_autoload);
+	Engine::get_singleton()->add_singleton(Engine::Singleton(symbolic_engine_singleton, original_autoload));
+	GDScriptLanguage::get_singleton()->add_global_constant(symbolic_engine_singleton, original_autoload);
 	const String module_path = OS::get_singleton()->get_temp_path().path_join("portable_gdscript_module.gdm");
 	const String script_path = module_path.get_basename() + ".gd";
 	Ref<GDScript> gdscript = memnew(GDScript);
@@ -436,6 +443,9 @@ func make_offset(offset: int) -> Callable:
 
 func autoload_value() -> int:
 	return int(__PortableCompiledModuleAutoload.get_meta("slot"))
+
+func input_singleton() -> Variant:
+	return __PortableCompiledModuleEngineSingleton
 
 @rpc("any_peer", "call_remote", "reliable")
 func compute(value: int) -> String:
@@ -741,6 +751,7 @@ func compute(value: int) -> String:
 		direct_instance->set_script(direct_script);
 		CHECK(String(direct_instance->call(SNAME("compute"), 5)) == "10");
 		CHECK(int(direct_instance->call(SNAME("autoload_value"))) == 29);
+		CHECK(direct_instance->call(SNAME("input_singleton")) == GDScriptLanguage::get_singleton()->get_any_global_constant(symbolic_engine_singleton));
 	}
 	Callable offset = direct_instance->call(SNAME("make_offset"), 4);
 	CHECK(int(offset.call(6)) == 10);

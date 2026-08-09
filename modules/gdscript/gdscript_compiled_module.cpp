@@ -38,6 +38,7 @@
 #include "gdscript_baseline_jit.h"
 #endif
 
+#include "core/config/engine.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/marshalls.h"
@@ -75,6 +76,7 @@ enum ConstantKind : uint32_t {
 	CONSTANT_RESOURCE,
 	CONSTANT_GDSCRIPT,
 	CONSTANT_NATIVE_CLASS,
+	CONSTANT_ENGINE_SINGLETON,
 };
 
 enum ClassFlags : uint32_t {
@@ -684,7 +686,7 @@ void write_constant(Writer &p_writer, const ConstantData &p_constant) {
 ConstantData read_constant(Reader &p_reader) {
 	ConstantData constant;
 	constant.kind = ConstantKind(p_reader.u32());
-	if (constant.kind > CONSTANT_NATIVE_CLASS) {
+	if (constant.kind > CONSTANT_ENGINE_SINGLETON) {
 		p_reader.failed = true;
 	}
 	constant.encoded = p_reader.bytes();
@@ -1501,6 +1503,20 @@ bool encode_constant(const Variant &p_value, ConstantData &r_constant) {
 			r_constant.name = resource->get_path();
 			return !r_constant.name.is_empty();
 		}
+		if (object != nullptr && Engine::get_singleton() != nullptr) {
+			List<Engine::Singleton> singletons;
+			Engine::get_singleton()->get_singletons(&singletons);
+			for (const Engine::Singleton &singleton : singletons) {
+				if (singleton.ptr == object) {
+					r_constant.kind = CONSTANT_ENGINE_SINGLETON;
+					r_constant.name = singleton.name;
+					// Prefer the public singleton class name over a platform-specific
+					// implementation class (for example, a DisplayServer backend).
+					r_constant.owner = object->is_class(singleton.name) ? String(singleton.name) : object->get_class();
+					return true;
+				}
+			}
+		}
 		return false;
 	}
 	if (!is_pointer_free_variant(p_value)) {
@@ -1538,6 +1554,11 @@ bool constant_matches(const ConstantData &p_constant, const Variant &p_value) {
 		case CONSTANT_NATIVE_CLASS: {
 			GDScriptNativeClass *native_class = Object::cast_to<GDScriptNativeClass>(p_value.get_validated_object());
 			return native_class != nullptr && native_class->get_name() == p_constant.name;
+		}
+		case CONSTANT_ENGINE_SINGLETON: {
+			Object *object = p_value.get_validated_object();
+			return object != nullptr && Engine::get_singleton() != nullptr && Engine::get_singleton()->has_singleton(p_constant.name) &&
+					Engine::get_singleton()->get_singleton_object(p_constant.name) == object && object->is_class(p_constant.owner);
 		}
 	}
 	return false;
@@ -2798,6 +2819,17 @@ Error ModuleVerifier::verify_constant(const ConstantData &p_constant, Variant *r
 				return fail("Invalid native-class constant metadata.");
 			}
 			return OK;
+		case CONSTANT_ENGINE_SINGLETON: {
+			if (!p_constant.encoded.is_empty() || p_constant.name.is_empty() || p_constant.owner.is_empty() || Engine::get_singleton() == nullptr ||
+					!Engine::get_singleton()->has_singleton(p_constant.name)) {
+				return fail("Invalid engine-singleton constant metadata.");
+			}
+			Object *singleton = Engine::get_singleton()->get_singleton_object(p_constant.name);
+			if (singleton == nullptr || !singleton->is_class(p_constant.owner)) {
+				return fail("Engine singleton '" + p_constant.name + "' has an incompatible native class.");
+			}
+			return OK;
+		}
 	}
 	return fail("Unknown compiled constant kind.");
 }
@@ -3089,13 +3121,21 @@ Error ModuleVerifier::index_and_verify_metadata() {
 		for (const MethodBindingRecord &binding : record.methods) {
 			const FunctionRecord *const *function_ptr = functions.getptr(binding.identity);
 			if (binding.name.is_empty() || binding.identity.is_empty() || method_names.has(binding.name) || function_ptr == nullptr ||
-					binding.default_argument_count < 0 || binding.default_argument_count > binding.argument_types.size() ||
-					verify_method(binding.method) != OK || verify_data_type(binding.return_type) != OK || verify_constant(binding.rpc_config) != OK) {
-				return fail("Invalid method binding in class '" + record.identity + "'.");
+					binding.default_argument_count < 0 || binding.default_argument_count > binding.argument_types.size()) {
+				return fail("Invalid method binding '" + binding.name + "' in class '" + record.identity + "'.");
+			}
+			if (verify_method(binding.method) != OK) {
+				return fail("Invalid method binding '" + binding.name + "': " + error);
+			}
+			if (verify_data_type(binding.return_type) != OK) {
+				return fail("Invalid return type for method binding '" + binding.name + "': " + error);
+			}
+			if (verify_constant(binding.rpc_config) != OK) {
+				return fail("Invalid RPC metadata for method binding '" + binding.name + "': " + error);
 			}
 			for (const DataTypeRecord &argument : binding.argument_types) {
 				if (verify_data_type(argument) != OK) {
-					return ERR_INVALID_DATA;
+					return fail("Invalid argument type for method binding '" + binding.name + "': " + error);
 				}
 			}
 			Writer binding_signature;
@@ -4786,6 +4826,17 @@ Error RuntimeBuilder::decode_constant(const ConstantData &p_constant, Variant &r
 				return fail(ERR_INVALID_DATA, "Global '" + p_constant.name + "' is not a native class.");
 			}
 			r_value = native_value;
+			return OK;
+		}
+		case CONSTANT_ENGINE_SINGLETON: {
+			if (Engine::get_singleton() == nullptr || !Engine::get_singleton()->has_singleton(p_constant.name)) {
+				return fail(ERR_DOES_NOT_EXIST, "Could not resolve engine singleton '" + p_constant.name + "'.");
+			}
+			Object *singleton = Engine::get_singleton()->get_singleton_object(p_constant.name);
+			if (singleton == nullptr || !singleton->is_class(p_constant.owner)) {
+				return fail(ERR_INVALID_DATA, "Engine singleton '" + p_constant.name + "' has an incompatible native class.");
+			}
+			r_value = singleton;
 			return OK;
 		}
 	}
