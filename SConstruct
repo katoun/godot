@@ -717,78 +717,48 @@ cc_version_metadata1 = cc_version["metadata1"]
 if cc_version_major == -1:
     print_warning(
         "Couldn't detect compiler version, skipping version checks. "
-        "Build may fail if the compiler doesn't support C++17 fully."
+        "Build may fail if the compiler doesn't support C++20 fully."
     )
 elif methods.using_gcc(env):
-    if env.get("winrt"):
-        if cc_version_major < 11:
-            print_error(
-                "Detected GCC version older than 11, which does not fully support "
-                "C++20, or has bugs when compiling Godot. Supported versions are 12 "
-                "and later. Use a newer GCC version, or Clang 14 or later by passing "
-                '"use_llvm=yes" to the SCons command line, or disable WinRT support by '
-                'passing "winrt=no" to the SCons command line.'
-            )
-            Exit(255)
-    else:
-        if cc_version_major < 9:
-            print_error(
-                "Detected GCC version older than 9, which does not fully support "
-                "C++17, or has bugs when compiling Godot. Supported versions are 9 "
-                "and later. Use a newer GCC version, or Clang 6 or later by passing "
-                '"use_llvm=yes" to the SCons command line.'
-            )
-            Exit(255)
+    if cc_version_major < 12:
+        print_error(
+            "Detected GCC version older than 12, which does not fully support "
+            "C++20, or has bugs when compiling Godot. Supported versions are "
+            "GCC 12 and later. Use a newer GCC version, or Clang 16 or later "
+            'by passing "use_llvm=yes" to the SCons command line.'
+        )
+        Exit(255)
+
     if cc_version_metadata1 == "win32":
         print_error(
-            "Detected mingw version is not using posix threads. Only posix "
-            "version of mingw is supported. "
+            "Detected MinGW version is not using POSIX threads. Only the POSIX "
+            "version of MinGW is supported. "
             'Use "update-alternatives --config x86_64-w64-mingw32-g++" '
-            "to switch to posix threads."
+            "to switch to POSIX threads."
         )
         Exit(255)
 elif methods.using_clang(env):
-    # Apple LLVM versions differ from upstream LLVM version \o/, compare
-    # in https://en.wikipedia.org/wiki/Xcode#Toolchain_versions
+    # Apple LLVM versions differ from upstream LLVM versions.
     if methods.is_apple_clang(env):
         if cc_version_major < 16:
             print_error(
-                "Detected Apple Clang version older than 16, supported versions are Apple Clang 16 (Xcode 16) and later."
+                "Detected Apple Clang version older than 16. "
+                "Supported versions are Apple Clang 16 (Xcode 16) and later."
             )
             Exit(255)
     else:
-        if env.get("winrt"):
-            if cc_version_major < 13:
-                print_error(
-                    "Detected Clang version older than 13, which does not fully support "
-                    "C++20. Supported versions are Clang 14 and later, or disable WinRT "
-                    'support by passing "winrt=no" to the SCons command line.'
-                )
-                Exit(255)
-        else:
-            if cc_version_major < 6:
-                print_error(
-                    "Detected Clang version older than 6, which does not fully support "
-                    "C++17. Supported versions are Clang 6 and later."
-                )
-                Exit(255)
-            elif env["debug_paths_relative"] and cc_version_major < 10:
-                print_warning("Clang < 10 doesn't support -ffile-prefix-map, disabling `debug_paths_relative` option.")
-                env["debug_paths_relative"] = False
-
+        if cc_version_major < 16:
+            print_error(
+                "Detected Clang version older than 16, which does not fully "
+                "support C++20, or has bugs when compiling Godot. Supported "
+                "versions are Clang 16 and later."
+            )
+            Exit(255)
 elif env.msvc:
-    if cc_version_major == 16 and cc_version_minor < 11:
-        # Ensure latest minor build of Visual Studio 2019.
-        # https://github.com/godotengine/godot/pull/94995#issuecomment-2336464574
+    if cc_version_major < 17:
         print_error(
-            "Detected Visual Studio 2019 version older than 16.11, which has bugs "
-            "when compiling Godot. Use a newer VS2019 version, or VS2022+."
-        )
-        Exit(255)
-    elif cc_version_major < 16:
-        print_error(
-            "Detected Visual Studio 2017 or earlier, which is unsupported in Godot. "
-            "Supported versions are Visual Studio 2019 and later."
+            "Detected Visual Studio 2019 or earlier, which is unsupported. "
+            "Supported versions are Visual Studio 2022 and later."
         )
         Exit(255)
 
@@ -906,19 +876,18 @@ if env["lto"] != "none":
     print("Using LTO: " + env["lto"])
 
 # Set our C and C++ standard requirements.
-# C++17 is required as we need guaranteed copy elision as per GH-36436.
+# C++20 is required.
 # Prepending to make it possible to override.
 # This needs to come after `configure`, otherwise we don't have env.msvc.
 if not env.msvc:
     # Specifying GNU extensions support explicitly, which are supported by
-    # both GCC and Clang. Both currently default to gnu17 and gnu++17.
+    # both GCC and Clang. Both currently default to gnu17 and gnu++.
     env.Prepend(CFLAGS=["-std=gnu17"])
-    env.Prepend(CXXFLAGS=["-std=gnu++17"])
+    env.Prepend(CXXFLAGS=["-std=gnu++20"])
 else:
-    # MSVC started offering C standard support with Visual Studio 2019 16.8, which covers all
-    # of our supported Visual Studio versions.
+# MSVC started offering C standard support with Visual Studio 2019 16.8.
     env.Prepend(CFLAGS=["/std:c17"])
-    env.Prepend(CXXFLAGS=["/std:c++17"])
+    env.Prepend(CXXFLAGS=["/std:c++20"])
     # MSVC is non-conforming with the C++ standard by default, so we enable more conformance.
     # Note that this is still not complete conformance, as certain Windows-related headers
     # don't compile under complete conformance.
