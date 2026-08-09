@@ -821,6 +821,56 @@ Error GDScript::reload(bool p_keep_state) {
 
 	_invalidate_function_call_caches();
 	valid = false;
+
+	// A valid portable module contains everything needed to rebuild the runtime
+	// class graph. Try that path before allocating parser/analyzer/compiler
+	// state; any incompatibility leaves the previous graph intact and falls
+	// through to the normal front end and binary-token fallback below.
+	if (!compiled_module.is_empty()) {
+		String module_error;
+		if (GDScriptCompiledModule::build_runtime(this, compiled_module, p_keep_state, &module_error) == OK) {
+			can_run = ScriptServer::is_scripting_enabled() || is_tool();
+			bool has_static_data = false;
+			Vector<GDScript *> class_queue;
+			class_queue.push_back(this);
+			for (int i = 0; i < class_queue.size(); i++) {
+				has_static_data = has_static_data || !class_queue[i]->static_variables_indices.is_empty();
+				for (const KeyValue<StringName, Ref<GDScript>> &subclass : class_queue[i]->subclasses) {
+					class_queue.push_back(subclass.value.ptr());
+				}
+			}
+			GDScriptCache::remove_static_script(fully_qualified_name);
+			if (has_static_data && !static_unload) {
+				GDScriptCache::add_static_script(Ref<GDScript>(this));
+			}
+			if (can_run) {
+				Error static_error = _static_init();
+				if (static_error != OK) {
+					reloading = false;
+					return static_error;
+				}
+			}
+#ifdef TOOLS_ENABLED
+			if (can_run && p_keep_state) {
+				_restore_old_static_data();
+			}
+			if (p_keep_state) {
+				update_exports();
+			}
+#endif
+			const String cache_path = path.is_empty() ? get_path() : path;
+			if (!cache_path.is_empty()) {
+				const Error finish_error = GDScriptCache::finish_compiling(cache_path);
+				if (finish_error != OK) {
+					print_verbose("A dependency failed while finishing direct compiled-module load for '" + cache_path + "'.");
+				}
+			}
+			reloading = false;
+			return OK;
+		}
+		print_verbose("Could not build compiled GDScript module directly for '" + get_script_path() + "': " + module_error + ". Falling back to the GDScript front end.");
+	}
+
 	GDScriptParser parser;
 	Error err;
 	if (!binary_tokens.is_empty()) {
@@ -875,10 +925,9 @@ Error GDScript::reload(bool p_keep_state) {
 		}
 	}
 
-	// Compiled modules are installed only after the regular front end has
-	// produced the complete class and lambda graph. This first format revision
-	// uses that graph as a verification oracle and falls back to it atomically
-	// if a fingerprint or relocation does not match.
+	// If the direct builder declined the module, retain the former
+	// compiler-produced graph as a verification oracle and install any portable
+	// bytecode it can prove equivalent to that graph.
 	if (!compiled_module.is_empty()) {
 		String module_error;
 		if (GDScriptCompiledModule::apply(this, compiled_module, &module_error) != OK) {

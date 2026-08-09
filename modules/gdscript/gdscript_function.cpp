@@ -341,7 +341,15 @@ void GDScriptFunction::_maybe_compile_optimizing_jit() {
 #endif
 
 GDScriptFunction::~GDScriptFunction() {
-	get_script()->member_functions.erase(name);
+	// Compiled-module reloads stage replacement functions before committing.
+	// A staged function may consequently share a script and name with a live
+	// function, so it must not erase an entry that points somewhere else.
+	if (get_script() != nullptr) {
+		GDScriptFunction **member = get_script()->member_functions.getptr(name);
+		if (member != nullptr && *member == this) {
+			get_script()->member_functions.erase(name);
+		}
+	}
 
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 	if (_baseline_jit != nullptr) {

@@ -46,6 +46,7 @@ class GDScript;
 class GDScriptCompiledModule;
 namespace GDScriptCompiledModuleImplementation {
 class Internals;
+class RuntimeBuilder;
 }
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 class GDScriptBaselineJIT;
@@ -422,6 +423,7 @@ private:
 	friend class GDScriptByteCodeGenerator;
 	friend class GDScriptCompiledModule;
 	friend class GDScriptCompiledModuleImplementation::Internals;
+	friend class GDScriptCompiledModuleImplementation::RuntimeBuilder;
 	friend class GDScriptLanguage;
 #ifdef GDSCRIPT_BASELINE_JIT_ENABLED
 	friend class GDScriptBaselineJIT;

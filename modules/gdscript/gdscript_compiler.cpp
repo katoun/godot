@@ -2821,6 +2821,7 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 
 	p_script->tool = parser->is_tool();
 	p_script->_is_abstract = p_class->is_abstract;
+	p_script->static_unload = p_class->annotated_static_unload;
 
 	if (p_script->local_name != StringName()) {
 		if (GDScriptAnalyzer::class_exists(p_script->local_name)) {
@@ -3391,7 +3392,8 @@ Error GDScriptCompiler::compile(const GDScriptParser *p_parser, GDScript *p_scri
 	_get_function_ptr_replacements(func_ptr_replacements, old_lambda_info, &new_lambda_info);
 	main_script->_recurse_replace_function_ptrs(func_ptr_replacements);
 
-	if (has_static_data && !root->annotated_static_unload) {
+	GDScriptCache::remove_static_script(main_script->fully_qualified_name);
+	if (has_static_data && !main_script->static_unload) {
 		GDScriptCache::add_static_script(p_script);
 	}
 

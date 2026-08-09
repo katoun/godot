@@ -210,6 +210,9 @@ func compute(value: int) -> String:
 	GDScriptCompiledModule::Summary changed_flag_summary;
 	REQUIRE(create_changed_metadata_summary(metadata_source.replace("@tool\n", ""), changed_flag_summary));
 	CHECK(get_root_metadata_fingerprint(changed_flag_summary) != root_metadata_fingerprint);
+	GDScriptCompiledModule::Summary changed_static_unload_summary;
+	REQUIRE(create_changed_metadata_summary(metadata_source.replace("@tool\n", "@tool\n@static_unload\n"), changed_static_unload_summary));
+	CHECK(get_root_metadata_fingerprint(changed_static_unload_summary) != root_metadata_fingerprint);
 	GDScriptCompiledModule::Summary changed_icon_summary;
 	REQUIRE(create_changed_metadata_summary(metadata_source.replace("portable_compiled_module.svg", "portable_compiled_module_alt.svg"), changed_icon_summary));
 	CHECK(get_root_metadata_fingerprint(changed_icon_summary) != root_metadata_fingerprint);
@@ -222,6 +225,31 @@ func compute(value: int) -> String:
 	CHECK(fallback == tokens);
 	CHECK(source_fingerprint == summary.source_fingerprint);
 	CHECK(GDScriptCompiledModule::apply(gdscript.ptr(), module) == OK);
+
+	// Reconstruct a second runtime graph using only the portable records. No
+	// parser, analyzer, compiler, or freshly compiled verification oracle is
+	// available on this object.
+	Ref<GDScript> direct_script = memnew(GDScript);
+	direct_script->set_path(module_path.get_basename() + "_direct.gd");
+	direct_script->set_binary_tokens_source(tokens);
+	String direct_error;
+	REQUIRE_MESSAGE(GDScriptCompiledModule::prepare_shallow(direct_script.ptr(), module, &direct_error) == OK, direct_error);
+	REQUIRE_MESSAGE(GDScriptCompiledModule::build_runtime(direct_script.ptr(), module, true, &direct_error) == OK, direct_error);
+	CHECK(direct_script->is_valid());
+	CHECK(direct_script->is_tool());
+	CHECK(direct_script->get_subclasses().size() == 2);
+	CHECK(direct_script->get_struct_layouts().size() == 2);
+	const Variant *direct_amount_default = direct_script->get_member_default_values().getptr(SNAME("amount"));
+	REQUIRE(direct_amount_default != nullptr);
+	CHECK(*direct_amount_default == Variant(1));
+	Ref<RefCounted> direct_instance = memnew(RefCounted);
+	direct_instance->set_script(direct_script);
+	CHECK(String(direct_instance->call(SNAME("compute"), 5)) == "10");
+	direct_instance->set(SNAME("amount"), 9);
+	CHECK(int(direct_instance->get(SNAME("amount"))) == 9);
+	direct_script->set_compiled_module_source(module);
+	REQUIRE(direct_script->reload(true) == OK);
+	CHECK(int(direct_instance->get(SNAME("amount"))) == 9);
 
 	Ref<RefCounted> instance = memnew(RefCounted);
 	instance->set_script(gdscript);
@@ -278,8 +306,10 @@ func compute(value: int) -> String:
 	CHECK_FALSE(GDScriptCompiledModule::create_project_manifest(modules).is_empty());
 
 	instance.unref();
+	direct_instance.unref();
 	loaded_instance.unref();
 	gdscript->clear();
+	direct_script->clear();
 	loaded_module->clear();
 	wrong_path_script->clear();
 	changed_script->clear();
@@ -287,8 +317,10 @@ func compute(value: int) -> String:
 	GDScriptCache::remove_script(module_path);
 	GDScriptCache::remove_script(script_path);
 	GDScriptCache::remove_script(module_path.get_basename() + "_other.gd");
+	GDScriptCache::remove_script(module_path.get_basename() + "_direct.gd");
 	GDScriptCache::remove_script(cached_script_path);
 	gdscript.unref();
+	direct_script.unref();
 	loaded_module.unref();
 	wrong_path_script.unref();
 	changed_script.unref();

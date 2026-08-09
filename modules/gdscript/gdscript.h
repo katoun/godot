@@ -60,6 +60,7 @@ class GDScript : public Script {
 	bool valid = false;
 	bool reloading = false;
 	bool _is_abstract = false;
+	bool static_unload = false;
 
 	struct MemberInfo {
 		int index = 0;
@@ -75,6 +76,7 @@ class GDScript : public Script {
 	friend class GDScriptCompiler;
 	friend class GDScriptCompiledModule;
 	friend class GDScriptCompiledModuleImplementation::Internals;
+	friend class GDScriptCompiledModuleImplementation::RuntimeBuilder;
 	friend class GDScriptDocGen;
 	friend class GDScriptLambdaCallable;
 	friend class GDScriptLambdaSelfCallable;

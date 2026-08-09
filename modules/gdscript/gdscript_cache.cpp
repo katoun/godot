@@ -359,9 +359,19 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 		return Ref<GDScript>(); // Returns null and does not cache when the script fails to load.
 	}
 
-	Ref<GDScriptParserRef> parser_ref = get_parser(p_path, GDScriptParserRef::PARSED, r_error);
-	if (r_error == OK) {
-		GDScriptCompiler::make_scripts(script.ptr(), parser_ref->get_parser()->get_tree(), true);
+	bool module_shells_ready = false;
+	if (!script->get_compiled_module_source().is_empty()) {
+		String module_error;
+		module_shells_ready = GDScriptCompiledModule::prepare_shallow(script.ptr(), script->get_compiled_module_source(), &module_error) == OK;
+		if (!module_shells_ready) {
+			print_verbose("Could not prepare compiled GDScript module shells for '" + p_path + "': " + module_error);
+		}
+	}
+	if (!module_shells_ready) {
+		Ref<GDScriptParserRef> parser_ref = get_parser(p_path, GDScriptParserRef::PARSED, r_error);
+		if (r_error == OK) {
+			GDScriptCompiler::make_scripts(script.ptr(), parser_ref->get_parser()->get_tree(), true);
+		}
 	}
 
 	singleton->shallow_gdscript_cache[p_path] = script;
