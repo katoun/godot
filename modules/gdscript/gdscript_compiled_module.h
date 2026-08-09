@@ -83,6 +83,9 @@ public:
 
 	static Error create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary = nullptr);
 	static Error extract_fallback(const Vector<uint8_t> &p_module, Vector<uint8_t> &r_fallback_tokens, uint64_t *r_source_fingerprint = nullptr, String *r_error = nullptr);
+	// Performs pointer-free structural, semantic, control-flow, type, and
+	// symbolic-relocation validation without constructing runtime script objects.
+	static Error verify(const Vector<uint8_t> &p_module, String *r_error = nullptr);
 	// Creates only the nested GDScript resource graph. This lets cyclic
 	// dependencies resolve class identities before either module is fully
 	// loaded, without invoking the parser for a valid module.

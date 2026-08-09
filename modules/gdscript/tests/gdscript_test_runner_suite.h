@@ -172,6 +172,9 @@ class Nested:
 static func scale(value: int = SCALE) -> int:
 	return value * SCALE
 
+func count_values(...values: Array) -> int:
+	return values.size()
+
 func read_sample(sample: Sample) -> int:
 	return sample.value
 
@@ -202,6 +205,8 @@ func compute(value: int) -> String:
 	GDScriptCompiledModule::Summary summary;
 	REQUIRE(GDScriptCompiledModule::create(gdscript.ptr(), tokens, module, &summary) == OK);
 	CHECK_FALSE(module.is_empty());
+	String verifier_error;
+	CHECK_MESSAGE(GDScriptCompiledModule::verify(module, &verifier_error) == OK, verifier_error);
 	CHECK(summary.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
 	CHECK(summary.source_fingerprint == GDScriptCompiledModule::fingerprint_source(gdscript->get_source_code()));
 	CHECK(summary.skipped_functions == 0);
@@ -258,6 +263,44 @@ func compute(value: int) -> String:
 	CHECK(source_fingerprint == summary.source_fingerprint);
 	CHECK(GDScriptCompiledModule::apply(gdscript.ptr(), module) == OK);
 
+	// Forge a checksum-valid module with a stale builtin API hash. The
+	// independent verifier must reject it before shallow construction mutates
+	// even the target script shell. Fallback extraction deliberately remains a
+	// structural operation so older token-based loading can still recover.
+	auto read_u32_le = [](const Vector<uint8_t> &p_bytes, int p_offset) {
+		return uint32_t(p_bytes[p_offset]) | (uint32_t(p_bytes[p_offset + 1]) << 8) | (uint32_t(p_bytes[p_offset + 2]) << 16) |
+				(uint32_t(p_bytes[p_offset + 3]) << 24);
+	};
+	auto write_u64_le = [](Vector<uint8_t> &r_bytes, int p_offset, uint64_t p_value) {
+		for (int byte = 0; byte < 8; byte++) {
+			r_bytes.write[p_offset + byte] = uint8_t(p_value >> (byte * 8));
+		}
+	};
+	Vector<uint8_t> stale_api_module = module;
+	const uint32_t to_upper_hash = Variant::get_builtin_method_hash(Variant::STRING, SNAME("to_upper"));
+	int api_hash_offset = -1;
+	for (int offset = 40; offset + 4 <= stale_api_module.size(); offset++) {
+		if (read_u32_le(stale_api_module, offset) == to_upper_hash) {
+			REQUIRE(api_hash_offset == -1);
+			api_hash_offset = offset;
+		}
+	}
+	REQUIRE(api_hash_offset >= 40);
+	stale_api_module.write[api_hash_offset] ^= 1;
+	write_u64_le(stale_api_module, 28, GDScriptCompiledModule::fingerprint_bytes(stale_api_module.ptr() + 40, stale_api_module.size() - 40));
+	String stale_api_error;
+	CHECK(GDScriptCompiledModule::verify(stale_api_module, &stale_api_error) == ERR_INVALID_DATA);
+	CHECK(stale_api_error.contains("API hash"));
+	CHECK(GDScriptCompiledModule::extract_fallback(stale_api_module, fallback) == OK);
+	CHECK(fallback == tokens);
+	Ref<GDScript> rejected_script = memnew(GDScript);
+	const String rejected_path = "res://__unverified_module_must_not_mutate.gd";
+	rejected_script->set_path(rejected_path);
+	rejected_script->set_binary_tokens_source(tokens);
+	CHECK(GDScriptCompiledModule::prepare_shallow(rejected_script.ptr(), stale_api_module, &stale_api_error) == ERR_INVALID_DATA);
+	CHECK(rejected_script->get_path() == rejected_path);
+	CHECK(rejected_script->get_subclasses().is_empty());
+
 	// Reconstruct a second runtime graph using only the portable records. No
 	// parser, analyzer, compiler, or freshly compiled verification oracle is
 	// available on this object.
@@ -277,6 +320,7 @@ func compute(value: int) -> String:
 	Ref<RefCounted> direct_instance = memnew(RefCounted);
 	direct_instance->set_script(direct_script);
 	CHECK(String(direct_instance->call(SNAME("compute"), 5)) == "10");
+	CHECK(int(direct_instance->call(SNAME("count_values"), 1, 2, 3)) == 3);
 	direct_instance->set(SNAME("amount"), 9);
 	CHECK(int(direct_instance->get(SNAME("amount"))) == 9);
 	direct_script->set_compiled_module_source(module);
@@ -346,6 +390,7 @@ func compute(value: int) -> String:
 	wrong_path_script->clear();
 	changed_script->clear();
 	cached_script->clear();
+	rejected_script->clear();
 	GDScriptCache::remove_script(module_path);
 	GDScriptCache::remove_script(script_path);
 	GDScriptCache::remove_script(module_path.get_basename() + "_other.gd");
@@ -357,6 +402,7 @@ func compute(value: int) -> String:
 	wrong_path_script.unref();
 	changed_script.unref();
 	cached_script.unref();
+	rejected_script.unref();
 	CHECK(DirAccess::remove_absolute(module_path) == OK);
 }
 
