@@ -43,6 +43,9 @@ public:
 	struct Dependency {
 		String path;
 		uint64_t source_fingerprint = 0;
+		uint64_t module_fingerprint = 0;
+		uint64_t schema_fingerprint = 0;
+		uint64_t engine_api_fingerprint = 0;
 
 		bool operator<(const Dependency &p_other) const { return path < p_other.path; }
 	};
@@ -65,6 +68,9 @@ public:
 	struct Summary {
 		String path;
 		uint64_t source_fingerprint = 0;
+		uint64_t module_fingerprint = 0;
+		uint64_t schema_fingerprint = 0;
+		uint64_t dependency_fingerprint = 0;
 		uint64_t engine_api_fingerprint = 0;
 		Vector<Dependency> dependencies;
 		Vector<ClassSummary> classes;
@@ -74,7 +80,7 @@ public:
 		bool operator<(const Summary &p_other) const { return path < p_other.path; }
 	};
 
-	static constexpr uint32_t FORMAT_VERSION = 4;
+	static constexpr uint32_t FORMAT_VERSION = 5;
 	// Version 2 stores OPCODE_STORE_GLOBAL operands as indices into the
 	// function's symbolic name table. They are relocated to the running
 	// language's global-array indices only after module verification.
@@ -86,8 +92,10 @@ public:
 
 	static Error create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary = nullptr);
 	static Error extract_fallback(const Vector<uint8_t> &p_module, Vector<uint8_t> &r_fallback_tokens, uint64_t *r_source_fingerprint = nullptr, String *r_error = nullptr);
+	static Error get_dependencies(const Vector<uint8_t> &p_module, Vector<Dependency> &r_dependencies, String *r_error = nullptr);
 	// Performs pointer-free structural, semantic, control-flow, type, and
-	// symbolic-relocation validation without constructing runtime script objects.
+	// symbolic-relocation validation. The deterministic module registry also
+	// validates the complete dependency closure and handles metadata cycles.
 	static Error verify(const Vector<uint8_t> &p_module, String *r_error = nullptr);
 	// Creates only the nested GDScript resource graph. This lets cyclic
 	// dependencies resolve class identities before either module is fully

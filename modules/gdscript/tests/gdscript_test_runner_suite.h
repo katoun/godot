@@ -255,6 +255,9 @@ func compute(value: int) -> String:
 	}
 	CHECK(summary.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
 	CHECK(summary.source_fingerprint == GDScriptCompiledModule::fingerprint_source(gdscript->get_source_code()));
+	CHECK(summary.module_fingerprint != 0);
+	CHECK(summary.schema_fingerprint != 0);
+	CHECK(summary.dependency_fingerprint != 0);
 	CHECK(summary.skipped_functions == 0);
 	CHECK(summary.classes.size() == 3);
 	for (const GDScriptCompiledModule::ClassSummary &script_class : summary.classes) {
@@ -476,6 +479,134 @@ func compute(value: int) -> String:
 	cached_script.unref();
 	rejected_script.unref();
 	CHECK(DirAccess::remove_absolute(module_path) == OK);
+}
+
+TEST_CASE("[Modules][GDScript] Compiled module registry resolves cycles and transitively invalidates dependencies") {
+	GDScriptLanguage::get_singleton()->init();
+	const String temporary_directory = OS::get_singleton()->get_temp_path();
+	const String leaf_path = temporary_directory.path_join("portable_module_dependency_leaf.gd");
+	const String middle_path = temporary_directory.path_join("portable_module_dependency_middle.gd");
+	const String root_path = temporary_directory.path_join("portable_module_dependency_root.gd");
+	const String cycle_a_path = temporary_directory.path_join("portable_module_dependency_cycle_a.gd");
+	const String cycle_b_path = temporary_directory.path_join("portable_module_dependency_cycle_b.gd");
+	struct DependencyFileGuard {
+		Vector<String> paths;
+		~DependencyFileGuard() {
+			for (const String &path : paths) {
+				Ref<GDScript> script = GDScriptCache::get_cached_script(path);
+				if (script.is_valid()) {
+					script->clear();
+				}
+				GDScriptCache::remove_script(path);
+				const String cache_path = GDScriptCompiledModule::get_editor_cache_path(path);
+				if (FileAccess::exists(cache_path)) {
+					DirAccess::remove_absolute(cache_path);
+				}
+				if (FileAccess::exists(path)) {
+					DirAccess::remove_absolute(path);
+				}
+			}
+		}
+	} dependency_file_guard{ { leaf_path, middle_path, root_path, cycle_a_path, cycle_b_path } };
+
+	auto write_source = [](const String &p_path, const String &p_source) {
+		Error error = OK;
+		Ref<FileAccess> file = FileAccess::open(p_path, FileAccess::WRITE, &error);
+		if (file.is_null() || error != OK) {
+			return false;
+		}
+		file->store_string(p_source);
+		return file->get_error() == OK;
+	};
+	const String leaf_source = "extends RefCounted\nstruct Payload:\n\tvar value: int = 1\nfunc leaf_value() -> int:\n\treturn 1\n";
+	const String middle_source = "extends \"" + leaf_path + "\"\nfunc middle_value() -> int:\n\treturn leaf_value() + 1\n";
+	const String root_source = "extends \"" + middle_path + "\"\nfunc root_value() -> int:\n\treturn middle_value() + 1\n";
+	REQUIRE(write_source(leaf_path, leaf_source));
+	REQUIRE(write_source(middle_path, middle_source));
+	REQUIRE(write_source(root_path, root_source));
+
+	Error load_error = OK;
+	Ref<GDScript> root_script = GDScriptCache::get_full_script(root_path, load_error);
+	REQUIRE_MESSAGE(load_error == OK, "Could not load transitive dependency test scripts.");
+	REQUIRE(root_script.is_valid());
+	Ref<GDScript> middle_script = GDScriptCache::get_cached_script(middle_path);
+	Ref<GDScript> leaf_script = GDScriptCache::get_cached_script(leaf_path);
+	REQUIRE(middle_script.is_valid());
+	REQUIRE(leaf_script.is_valid());
+
+	auto save_cache = [](const Ref<GDScript> &p_script) {
+		Vector<uint8_t> module;
+		const Error error = GDScriptCompiledModule::save_editor_cache(p_script.ptr(), p_script->get_as_binary_tokens(), &module);
+		if (error == OK) {
+			p_script->set_compiled_module_source(module);
+		}
+		return error;
+	};
+	REQUIRE(save_cache(leaf_script) == OK);
+	REQUIRE(save_cache(middle_script) == OK);
+	Vector<uint8_t> root_module;
+	GDScriptCompiledModule::Summary root_summary;
+	REQUIRE(GDScriptCompiledModule::create(root_script.ptr(), root_script->get_as_binary_tokens(), root_module, &root_summary) == OK);
+	REQUIRE(save_cache(root_script) == OK);
+	CHECK(root_summary.module_fingerprint != 0);
+	CHECK(root_summary.schema_fingerprint != 0);
+	CHECK(root_summary.dependency_fingerprint != 0);
+	REQUIRE(root_summary.dependencies.size() == 2);
+	CHECK(root_summary.dependencies[0].path == leaf_path);
+	CHECK(root_summary.dependencies[1].path == middle_path);
+	for (const GDScriptCompiledModule::Dependency &dependency : root_summary.dependencies) {
+		CHECK(dependency.source_fingerprint != 0);
+		CHECK(dependency.module_fingerprint != 0);
+		CHECK(dependency.schema_fingerprint != 0);
+		CHECK(dependency.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
+	}
+	Vector<GDScriptCompiledModule::Dependency> serialized_dependencies;
+	REQUIRE(GDScriptCompiledModule::get_dependencies(root_module, serialized_dependencies) == OK);
+	REQUIRE(serialized_dependencies.size() == root_summary.dependencies.size());
+	for (int dependency_index = 0; dependency_index < serialized_dependencies.size(); dependency_index++) {
+		CHECK(serialized_dependencies[dependency_index].path == root_summary.dependencies[dependency_index].path);
+		CHECK(serialized_dependencies[dependency_index].module_fingerprint == root_summary.dependencies[dependency_index].module_fingerprint);
+	}
+	String registry_error;
+	CHECK_MESSAGE(GDScriptCompiledModule::verify(root_module, &registry_error) == OK, registry_error);
+	Ref<GDScript> direct_root = memnew(GDScript);
+	direct_root->set_path(root_path + ".direct");
+	direct_root->set_binary_tokens_source(root_script->get_as_binary_tokens());
+	REQUIRE_MESSAGE(GDScriptCompiledModule::prepare_shallow(direct_root.ptr(), root_module, &registry_error) == OK, registry_error);
+	REQUIRE_MESSAGE(GDScriptCompiledModule::build_runtime(direct_root.ptr(), root_module, false, &registry_error) == OK, registry_error);
+	Ref<RefCounted> direct_root_instance = memnew(RefCounted);
+	direct_root_instance->set_script(direct_root);
+	CHECK(int(direct_root_instance->call(SNAME("root_value"))) == 3);
+	direct_root_instance.unref();
+	direct_root->clear();
+	Vector<uint8_t> loaded_root_cache;
+	CHECK(GDScriptCompiledModule::load_editor_cache(root_path, root_source, loaded_root_cache) == OK);
+
+	const String changed_leaf_source = leaf_source.replace("var value: int = 1", "var value: String = \"changed\"");
+	REQUIRE(write_source(leaf_path, changed_leaf_source));
+	CHECK(GDScriptCompiledModule::load_editor_cache(root_path, root_source, loaded_root_cache) == ERR_INVALID_DATA);
+	REQUIRE(write_source(leaf_path, leaf_source));
+
+	const String cycle_a_source = "extends RefCounted\nconst Peer = preload(\"" + cycle_b_path + "\")\nfunc value_a() -> int:\n\treturn 1\n";
+	const String cycle_b_source = "extends RefCounted\nconst Peer = preload(\"" + cycle_a_path + "\")\nfunc value_b() -> int:\n\treturn 2\n";
+	REQUIRE(write_source(cycle_a_path, cycle_a_source));
+	REQUIRE(write_source(cycle_b_path, cycle_b_source));
+	Ref<GDScript> cycle_a = GDScriptCache::get_full_script(cycle_a_path, load_error);
+	REQUIRE_MESSAGE(load_error == OK, "Could not load mutually dependent script A.");
+	REQUIRE(cycle_a.is_valid());
+	Ref<GDScript> cycle_b = GDScriptCache::get_cached_script(cycle_b_path);
+	REQUIRE(cycle_b.is_valid());
+	REQUIRE(save_cache(cycle_b) == OK);
+	REQUIRE(save_cache(cycle_a) == OK);
+	Vector<uint8_t> cycle_module;
+	GDScriptCompiledModule::Summary cycle_summary;
+	REQUIRE(GDScriptCompiledModule::create(cycle_a.ptr(), cycle_a->get_as_binary_tokens(), cycle_module, &cycle_summary) == OK);
+	REQUIRE(cycle_summary.dependencies.size() == 1);
+	CHECK(cycle_summary.dependencies[0].path == cycle_b_path);
+	CHECK_MESSAGE(GDScriptCompiledModule::verify(cycle_module, &registry_error) == OK, registry_error);
+	Vector<GDScriptCompiledModule::Summary> ordered_summaries{ root_summary, cycle_summary };
+	Vector<GDScriptCompiledModule::Summary> reversed_summaries{ cycle_summary, root_summary };
+	CHECK(GDScriptCompiledModule::create_project_manifest(ordered_summaries) == GDScriptCompiledModule::create_project_manifest(reversed_summaries));
 }
 
 TEST_CASE("[Modules][GDScript] Struct expressions use specialized VM instructions") {

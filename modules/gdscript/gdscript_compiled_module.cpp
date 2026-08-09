@@ -338,6 +338,8 @@ struct ClassRecord {
 	String implicit_initializer;
 	String implicit_ready;
 	String static_initializer;
+
+	bool operator<(const ClassRecord &p_other) const { return identity < p_other.identity; }
 };
 
 struct Symbol {
@@ -375,11 +377,16 @@ struct FunctionRecord {
 	Vector<StringName> global_names;
 	Vector<Pair<int, Variant::Type>> temporary_slots;
 	Vector<Vector<Symbol>> relocations;
+
+	bool operator<(const FunctionRecord &p_other) const { return identity < p_other.identity; }
 };
 
 struct ParsedModule {
 	String path;
 	uint64_t source_fingerprint = 0;
+	uint64_t module_fingerprint = 0;
+	uint64_t schema_fingerprint = 0;
+	uint64_t dependency_fingerprint = 0;
 	uint64_t engine_api_fingerprint = 0;
 	Vector<uint8_t> fallback_tokens;
 	Vector<GDScriptCompiledModule::Dependency> dependencies;
@@ -394,9 +401,12 @@ public:
 	static void collect_functions(GDScript *p_script, const String &p_class_identity, HashMap<GDScriptFunction *, String> &r_identities, Vector<GDScriptFunction *> &r_functions);
 	static void collect_classes(GDScript *p_script, const String &p_identity, HashMap<GDScript *, String> &r_identities, Vector<GDScript *> &r_classes);
 	static uint64_t dependency_source_fingerprint(GDScript *p_script);
-	static void add_script_dependency(GDScript *p_root, GDScript *p_dependency, HashMap<String, uint64_t> &r_dependencies);
-	static void collect_dependencies_from_function(GDScript *p_root, GDScriptFunction *p_function, HashMap<String, uint64_t> &r_dependencies, HashSet<GDScriptFunction *> &r_visited);
-	static void collect_dependencies_from_script(GDScript *p_root, GDScript *p_script, HashMap<String, uint64_t> &r_dependencies);
+	static void add_script_dependency(GDScript *p_root, GDScript *p_dependency, HashMap<String, GDScript *> &r_dependencies);
+	static void collect_dependency_from_data_type(GDScript *p_root, const GDScriptDataType &p_type, HashMap<String, GDScript *> &r_dependencies);
+	static void collect_dependencies_from_function(GDScript *p_root, GDScriptFunction *p_function, HashMap<String, GDScript *> &r_dependencies, HashSet<GDScriptFunction *> &r_visited);
+	static void collect_dependencies_from_script(GDScript *p_root, GDScript *p_script, HashMap<String, GDScript *> &r_dependencies);
+	static void collect_dependency_closure(GDScript *p_root, GDScript *p_script, HashMap<String, GDScript *> &r_dependencies, HashSet<String> &r_visited);
+	static bool make_local_records(GDScript *p_script, Vector<ClassRecord> &r_classes, Vector<FunctionRecord> &r_functions, int *r_skipped_functions = nullptr);
 	static bool make_function_metadata(GDScriptFunction *p_function, FunctionRecord &r_record);
 	static bool make_symbolic_global_code(const GDScriptFunction *p_function, Vector<int> &r_code, Vector<StringName> &r_names);
 	static bool resolve_symbolic_global_code(const FunctionRecord &p_record, Vector<int> &r_code, String *r_error = nullptr);
@@ -1122,12 +1132,18 @@ Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, Stri
 
 	Reader payload(payload_data, payload_size);
 	r_module.path = payload.string();
+	r_module.module_fingerprint = payload.u64();
+	r_module.schema_fingerprint = payload.u64();
+	r_module.dependency_fingerprint = payload.u64();
 	r_module.fallback_tokens = payload.bytes();
 	const uint32_t dependency_count = payload.count(MAX_MODULE_CLASSES);
 	r_module.dependencies.resize(dependency_count);
 	for (uint32_t i = 0; i < dependency_count; i++) {
 		r_module.dependencies.write[i].path = payload.string();
 		r_module.dependencies.write[i].source_fingerprint = payload.u64();
+		r_module.dependencies.write[i].module_fingerprint = payload.u64();
+		r_module.dependencies.write[i].schema_fingerprint = payload.u64();
+		r_module.dependencies.write[i].engine_api_fingerprint = payload.u64();
 	}
 	const uint32_t class_count = payload.count(MAX_MODULE_CLASSES);
 	r_module.classes.resize(class_count);
@@ -1425,6 +1441,42 @@ uint32_t get_portable_function_fingerprint(const FunctionRecord &p_record) {
 	write_data_type(serialized, p_record.return_type);
 	const uint64_t fingerprint = GDScriptCompiledModule::fingerprint_bytes(serialized.data.ptr(), serialized.data.size());
 	return uint32_t(fingerprint) ^ uint32_t(fingerprint >> 32);
+}
+
+uint64_t get_schema_fingerprint(const Vector<ClassRecord> &p_classes) {
+	Writer serialized;
+	serialized.u32(p_classes.size());
+	for (const ClassRecord &record : p_classes) {
+		write_class(serialized, record);
+	}
+	return GDScriptCompiledModule::fingerprint_bytes(serialized.data.ptr(), serialized.data.size());
+}
+
+uint64_t get_local_module_fingerprint(const Vector<ClassRecord> &p_classes, const Vector<FunctionRecord> &p_functions) {
+	Writer serialized;
+	serialized.u32(p_classes.size());
+	for (const ClassRecord &record : p_classes) {
+		write_class(serialized, record);
+	}
+	serialized.u32(p_functions.size());
+	for (const FunctionRecord &record : p_functions) {
+		write_function(serialized, record);
+	}
+	return GDScriptCompiledModule::fingerprint_bytes(serialized.data.ptr(), serialized.data.size());
+}
+
+uint64_t get_dependency_fingerprint(Vector<GDScriptCompiledModule::Dependency> p_dependencies) {
+	p_dependencies.sort();
+	Writer serialized;
+	serialized.u32(p_dependencies.size());
+	for (const GDScriptCompiledModule::Dependency &dependency : p_dependencies) {
+		serialized.string(dependency.path);
+		serialized.u64(dependency.source_fingerprint);
+		serialized.u64(dependency.module_fingerprint);
+		serialized.u64(dependency.schema_fingerprint);
+		serialized.u64(dependency.engine_api_fingerprint);
+	}
+	return GDScriptCompiledModule::fingerprint_bytes(serialized.data.ptr(), serialized.data.size());
 }
 
 template <typename T>
@@ -1924,7 +1976,7 @@ uint64_t Internals::dependency_source_fingerprint(GDScript *p_script) {
 	return GDScriptCompiledModule::fingerprint_source(FileAccess::get_file_as_string(path));
 }
 
-void Internals::add_script_dependency(GDScript *p_root, GDScript *p_dependency, HashMap<String, uint64_t> &r_dependencies) {
+void Internals::add_script_dependency(GDScript *p_root, GDScript *p_dependency, HashMap<String, GDScript *> &r_dependencies) {
 	if (p_dependency == nullptr || p_dependency == p_root) {
 		return;
 	}
@@ -1932,11 +1984,22 @@ void Internals::add_script_dependency(GDScript *p_root, GDScript *p_dependency, 
 	if (path.is_empty() || path == GDScript::canonicalize_path(p_root->get_script_path())) {
 		return;
 	}
-	r_dependencies.insert(path, dependency_source_fingerprint(p_dependency));
+	r_dependencies.insert(path, p_dependency);
+}
+
+void Internals::collect_dependency_from_data_type(GDScript *p_root, const GDScriptDataType &p_type, HashMap<String, GDScript *> &r_dependencies) {
+	Script *script = p_type.script_type;
+	if (script == nullptr && p_type.script_type_ref.is_valid()) {
+		script = p_type.script_type_ref.ptr();
+	}
+	add_script_dependency(p_root, Object::cast_to<GDScript>(script), r_dependencies);
+	for (const GDScriptDataType &element_type : p_type.container_element_types) {
+		collect_dependency_from_data_type(p_root, element_type, r_dependencies);
+	}
 }
 
 void Internals::collect_dependencies_from_function(GDScript *p_root, GDScriptFunction *p_function,
-		HashMap<String, uint64_t> &r_dependencies, HashSet<GDScriptFunction *> &r_visited) {
+		HashMap<String, GDScript *> &r_dependencies, HashSet<GDScriptFunction *> &r_visited) {
 	if (p_function == nullptr || r_visited.has(p_function)) {
 		return;
 	}
@@ -1946,28 +2009,115 @@ void Internals::collect_dependencies_from_function(GDScript *p_root, GDScriptFun
 			add_script_dependency(p_root, Object::cast_to<GDScript>(constant.get_validated_object()), r_dependencies);
 		}
 	}
+	for (const Variant &default_argument : p_function->method_info.default_arguments) {
+		if (default_argument.get_type() == Variant::OBJECT) {
+			add_script_dependency(p_root, Object::cast_to<GDScript>(default_argument.get_validated_object()), r_dependencies);
+		}
+	}
+	for (const GDScriptDataType &argument_type : p_function->argument_types) {
+		collect_dependency_from_data_type(p_root, argument_type, r_dependencies);
+	}
+	collect_dependency_from_data_type(p_root, p_function->return_type, r_dependencies);
 	for (GDScriptFunction *lambda : p_function->lambdas) {
 		collect_dependencies_from_function(p_root, lambda, r_dependencies, r_visited);
 	}
 }
 
-void Internals::collect_dependencies_from_script(GDScript *p_root, GDScript *p_script, HashMap<String, uint64_t> &r_dependencies) {
+void Internals::collect_dependencies_from_script(GDScript *p_root, GDScript *p_script, HashMap<String, GDScript *> &r_dependencies) {
 	add_script_dependency(p_root, p_script->base.ptr(), r_dependencies);
+	for (const KeyValue<StringName, GDScript::MemberInfo> &entry : p_script->member_indices) {
+		collect_dependency_from_data_type(p_root, entry.value.data_type, r_dependencies);
+	}
+	for (const KeyValue<StringName, GDScript::MemberInfo> &entry : p_script->static_variables_indices) {
+		collect_dependency_from_data_type(p_root, entry.value.data_type, r_dependencies);
+	}
 	for (const KeyValue<StringName, Variant> &entry : p_script->constants) {
 		if (entry.value.get_type() == Variant::OBJECT) {
 			add_script_dependency(p_root, Object::cast_to<GDScript>(entry.value.get_validated_object()), r_dependencies);
+		}
+	}
+	for (const KeyValue<StringName, Variant> &entry : p_script->member_default_values) {
+		if (entry.value.get_type() == Variant::OBJECT) {
+			add_script_dependency(p_root, Object::cast_to<GDScript>(entry.value.get_validated_object()), r_dependencies);
+		}
+	}
+	for (const KeyValue<StringName, Ref<StructLayout>> &entry : p_script->struct_layouts) {
+		for (int field_index = 0; field_index < entry.value->get_field_count(); field_index++) {
+			const Variant default_value = entry.value->get_default_value(field_index);
+			if (default_value.get_type() == Variant::OBJECT) {
+				add_script_dependency(p_root, Object::cast_to<GDScript>(default_value.get_validated_object()), r_dependencies);
+			}
 		}
 	}
 	HashSet<GDScriptFunction *> visited;
 	for (const KeyValue<StringName, GDScriptFunction *> &entry : p_script->member_functions) {
 		collect_dependencies_from_function(p_root, entry.value, r_dependencies, visited);
 	}
+	collect_dependencies_from_function(p_root, p_script->initializer, r_dependencies, visited);
 	collect_dependencies_from_function(p_root, p_script->implicit_initializer, r_dependencies, visited);
 	collect_dependencies_from_function(p_root, p_script->implicit_ready, r_dependencies, visited);
 	collect_dependencies_from_function(p_root, p_script->static_initializer, r_dependencies, visited);
 	for (const KeyValue<StringName, Ref<GDScript>> &entry : p_script->subclasses) {
 		collect_dependencies_from_script(p_root, entry.value.ptr(), r_dependencies);
 	}
+}
+
+void Internals::collect_dependency_closure(GDScript *p_root, GDScript *p_script, HashMap<String, GDScript *> &r_dependencies, HashSet<String> &r_visited) {
+	if (p_script == nullptr) {
+		return;
+	}
+	const String path = GDScript::canonicalize_path(p_script->get_script_path());
+	if (path.is_empty() || r_visited.has(path)) {
+		return;
+	}
+	r_visited.insert(path);
+
+	HashMap<String, GDScript *> direct_dependencies;
+	collect_dependencies_from_script(p_script, p_script, direct_dependencies);
+	Vector<String> paths;
+	for (const KeyValue<String, GDScript *> &entry : direct_dependencies) {
+		paths.push_back(entry.key);
+	}
+	paths.sort();
+	const String root_path = GDScript::canonicalize_path(p_root->get_script_path());
+	for (const String &dependency_path : paths) {
+		GDScript *dependency = *direct_dependencies.getptr(dependency_path);
+		if (dependency_path != root_path) {
+			r_dependencies.insert(dependency_path, dependency);
+		}
+		collect_dependency_closure(p_root, dependency, r_dependencies, r_visited);
+	}
+}
+
+bool Internals::make_local_records(GDScript *p_script, Vector<ClassRecord> &r_classes, Vector<FunctionRecord> &r_functions, int *r_skipped_functions) {
+	HashMap<GDScriptFunction *, String> function_identities;
+	Vector<GDScriptFunction *> functions;
+	collect_functions(p_script, "root", function_identities, functions);
+	HashMap<GDScript *, String> class_identities;
+	Vector<GDScript *> classes;
+	collect_classes(p_script, "root", class_identities, classes);
+	for (GDScript *script_class : classes) {
+		ClassRecord record;
+		if (!make_class_record(script_class, *class_identities.getptr(script_class), class_identities, function_identities, record)) {
+			return false;
+		}
+		r_classes.push_back(record);
+	}
+	int skipped = 0;
+	for (GDScriptFunction *function : functions) {
+		FunctionRecord record;
+		if (make_record(function, *function_identities.getptr(function), function_identities, record)) {
+			r_functions.push_back(record);
+		} else {
+			skipped++;
+		}
+	}
+	r_classes.sort();
+	r_functions.sort();
+	if (r_skipped_functions != nullptr) {
+		*r_skipped_functions = skipped;
+	}
+	return true;
 }
 
 bool Internals::make_symbolic_global_code(const GDScriptFunction *p_function, Vector<int> &r_code, Vector<StringName> &r_names) {
@@ -2100,25 +2250,184 @@ bool Internals::make_record(GDScriptFunction *p_function, const String &p_identi
 	return make_relocations(p_function, p_identities, r_record.relocations);
 }
 
-bool validate_dependency(const GDScriptCompiledModule::Dependency &p_dependency) {
-	const String remapped = ResourceLoader::path_remap(p_dependency.path);
-	if (!FileAccess::exists(remapped)) {
-		return false;
+class ModuleRegistry {
+public:
+	enum State : uint8_t {
+		STATE_UNLOADED,
+		STATE_LOADING_METADATA,
+		STATE_RESOLVING,
+		STATE_VERIFIED,
+		STATE_READY,
+	};
+
+private:
+	struct Entry {
+		State state = STATE_UNLOADED;
+		ParsedModule module;
+	};
+
+	HashMap<String, Entry> entries;
+	String error;
+
+	Error fail(const String &p_message) {
+		error = p_message;
+		return ERR_INVALID_DATA;
 	}
-	if (remapped.get_extension() == "gdm") {
-		ParsedModule dependency_module;
-		if (parse_module(FileAccess::get_file_as_bytes(remapped), dependency_module, nullptr) != OK) {
-			return false;
+
+	bool metadata_matches(const GDScriptCompiledModule::Dependency &p_expected, const ParsedModule &p_actual) const {
+		return p_actual.path == p_expected.path && p_actual.source_fingerprint == p_expected.source_fingerprint &&
+				p_actual.module_fingerprint == p_expected.module_fingerprint && p_actual.schema_fingerprint == p_expected.schema_fingerprint &&
+				p_actual.engine_api_fingerprint == p_expected.engine_api_fingerprint;
+	}
+
+	Error register_module(const String &p_path, const Vector<uint8_t> &p_bytes, const GDScriptCompiledModule::Dependency *p_expected = nullptr) {
+		const String path = GDScript::canonicalize_path(p_path);
+		Entry *existing = entries.getptr(path);
+		if (existing != nullptr) {
+			if (p_expected != nullptr && !metadata_matches(*p_expected, existing->module)) {
+				return fail("Dependency metadata changed while resolving '" + path + "'.");
+			}
+			return OK;
 		}
-		return dependency_module.source_fingerprint == p_dependency.source_fingerprint;
+
+		Entry loading;
+		loading.state = STATE_LOADING_METADATA;
+		entries.insert(path, loading);
+		Entry *entry = entries.getptr(path);
+		String parse_error;
+		if (parse_module(p_bytes, entry->module, &parse_error) != OK || entry->module.path != path) {
+			entries.erase(path);
+			return fail("Could not load dependency metadata for '" + path + "': " + parse_error);
+		}
+		if (p_expected != nullptr && !metadata_matches(*p_expected, entry->module)) {
+			entries.erase(path);
+			return fail("Source, module, API, or schema fingerprint mismatch for dependency '" + path + "'.");
+		}
+		return OK;
 	}
-	if (remapped.get_extension() == "gd") {
-		return GDScriptCompiledModule::fingerprint_source(FileAccess::get_file_as_string(remapped)) == p_dependency.source_fingerprint;
+
+	Error validate_source_dependency(const GDScriptCompiledModule::Dependency &p_dependency, const String &p_remapped) {
+		Ref<GDScript> cached = GDScriptCache::get_cached_script(p_dependency.path);
+		uint64_t source_fingerprint = 0;
+		if (FileAccess::exists(p_remapped)) {
+			source_fingerprint = GDScriptCompiledModule::fingerprint_source(FileAccess::get_file_as_string(p_remapped));
+		} else if (cached.is_valid() && !cached->get_source_code().is_empty()) {
+			source_fingerprint = GDScriptCompiledModule::fingerprint_source(cached->get_source_code());
+		}
+		if (source_fingerprint != p_dependency.source_fingerprint || p_dependency.engine_api_fingerprint != GDScriptCompiledModule::get_engine_api_fingerprint()) {
+			return fail("Source or engine API fingerprint mismatch for dependency '" + p_dependency.path + "'.");
+		}
+
+		Vector<uint8_t> module_bytes;
+		if (cached.is_valid()) {
+			module_bytes = cached->get_compiled_module_source();
+		}
+#ifdef TOOLS_ENABLED
+		if (module_bytes.is_empty()) {
+			const String cache_path = GDScriptCompiledModule::get_editor_cache_path(p_dependency.path);
+			if (FileAccess::exists(cache_path)) {
+				module_bytes = FileAccess::get_file_as_bytes(cache_path);
+			}
+		}
+#endif
+		if (!module_bytes.is_empty()) {
+			Error register_error = register_module(p_dependency.path, module_bytes, &p_dependency);
+			return register_error == OK ? resolve_entry(p_dependency.path) : register_error;
+		}
+
+		if (cached.is_valid() && cached->is_valid()) {
+			Vector<ClassRecord> classes;
+			Vector<FunctionRecord> functions;
+			if (!Internals::make_local_records(cached.ptr(), classes, functions) ||
+					get_local_module_fingerprint(classes, functions) != p_dependency.module_fingerprint ||
+					get_schema_fingerprint(classes) != p_dependency.schema_fingerprint) {
+				return fail("Runtime metadata fingerprint mismatch for dependency '" + p_dependency.path + "'.");
+			}
+			return OK;
+		}
+		return fail("No compiled metadata is available for dependency '" + p_dependency.path + "'.");
 	}
-	// A legacy .gdc has no source fingerprint. It remains a valid fallback,
-	// but cannot satisfy a compiled-module dependency.
-	return false;
-}
+
+	Error validate_dependency(const GDScriptCompiledModule::Dependency &p_dependency) {
+		if (p_dependency.engine_api_fingerprint != GDScriptCompiledModule::get_engine_api_fingerprint()) {
+			return fail("Engine API fingerprint mismatch for dependency '" + p_dependency.path + "'.");
+		}
+		Entry *registered = entries.getptr(p_dependency.path);
+		if (registered != nullptr) {
+			if (!metadata_matches(p_dependency, registered->module)) {
+				return fail("Registered metadata fingerprint mismatch for dependency '" + p_dependency.path + "'.");
+			}
+			return resolve_entry(p_dependency.path);
+		}
+		const String remapped = ResourceLoader::path_remap(p_dependency.path);
+		if (remapped.get_extension().to_lower() == "gdm") {
+			if (!FileAccess::exists(remapped)) {
+				return fail("Compiled dependency does not exist: '" + p_dependency.path + "'.");
+			}
+			Error register_error = register_module(p_dependency.path, FileAccess::get_file_as_bytes(remapped), &p_dependency);
+			return register_error == OK ? resolve_entry(p_dependency.path) : register_error;
+		}
+		if (remapped.get_extension().to_lower() == "gd") {
+			return validate_source_dependency(p_dependency, remapped);
+		}
+		return fail("Dependency '" + p_dependency.path + "' has no verifiable source or compiled module.");
+	}
+
+	Error resolve_entry(const String &p_path) {
+		Entry *entry = entries.getptr(p_path);
+		if (entry == nullptr) {
+			return fail("Module registry lost metadata for '" + p_path + "'.");
+		}
+		if (entry->state == STATE_RESOLVING) {
+			// A back-edge into the resolving set is a valid dependency cycle. Its
+			// local fingerprints were compared before following this edge.
+			return OK;
+		}
+		if (entry->state >= STATE_VERIFIED) {
+			return OK;
+		}
+		if (entry->state != STATE_LOADING_METADATA) {
+			return fail("Invalid module registry transition for '" + p_path + "'.");
+		}
+		entry->state = STATE_RESOLVING;
+		const ParsedModule module = entry->module;
+		if (module.engine_api_fingerprint != GDScriptCompiledModule::get_engine_api_fingerprint()) {
+			return fail("Engine API fingerprint mismatch for module '" + p_path + "'.");
+		}
+		String verification_error;
+		if (ModuleVerifier(module).verify(&verification_error) != OK) {
+			return fail("Module verification failed for '" + p_path + "': " + verification_error);
+		}
+		for (const GDScriptCompiledModule::Dependency &dependency : module.dependencies) {
+			if (validate_dependency(dependency) != OK) {
+				return ERR_INVALID_DATA;
+			}
+		}
+		entry = entries.getptr(p_path);
+		entry->state = STATE_VERIFIED;
+		return OK;
+	}
+
+public:
+	Error verify_graph(const ParsedModule &p_root, String *r_error) {
+		Entry root;
+		root.state = STATE_LOADING_METADATA;
+		root.module = p_root;
+		entries.insert(p_root.path, root);
+		Error result = resolve_entry(p_root.path);
+		if (result == OK) {
+			for (KeyValue<String, Entry> &entry : entries) {
+				if (entry.value.state == STATE_VERIFIED) {
+					entry.value.state = STATE_READY;
+				}
+			}
+		}
+		if (result != OK && r_error != nullptr) {
+			*r_error = error.is_empty() ? String("Compiled module dependency resolution failed.") : error;
+		}
+		return result;
+	}
+};
 
 bool validate_constructor_symbol(const Symbol &p_symbol) {
 	if (p_symbol.x < 0 || p_symbol.x >= Variant::VARIANT_MAX || p_symbol.y < 0 || p_symbol.y >= Variant::get_constructor_count(Variant::Type(p_symbol.x))) {
@@ -2345,7 +2654,8 @@ Error ModuleVerifier::verify_layout(const String &p_identifier, int p_depth) {
 }
 
 Error ModuleVerifier::index_and_verify_metadata() {
-	if (module.path.is_empty() || module.path != GDScript::canonicalize_path(module.path) || module.source_fingerprint == 0 || module.engine_api_fingerprint == 0 ||
+	if (module.path.is_empty() || module.path != GDScript::canonicalize_path(module.path) || module.source_fingerprint == 0 || module.module_fingerprint == 0 ||
+			module.schema_fingerprint == 0 || module.dependency_fingerprint == 0 || module.engine_api_fingerprint == 0 ||
 			module.fallback_tokens.is_empty() || module.classes.is_empty() || module.classes.size() > int(MAX_MODULE_CLASSES) || module.functions.size() > int(MAX_MODULE_FUNCTIONS)) {
 		return fail("Compiled module exceeds class/function limits or has no root class.");
 	}
@@ -2354,13 +2664,17 @@ Error ModuleVerifier::index_and_verify_metadata() {
 	}
 	const String module_path = GDScript::canonicalize_path(module.path);
 	HashSet<String> dependency_paths;
+	String previous_dependency;
 	for (const GDScriptCompiledModule::Dependency &dependency : module.dependencies) {
 		const String canonical_dependency = GDScript::canonicalize_path(dependency.path);
 		if (dependency.path.is_empty() || dependency.path != canonical_dependency || canonical_dependency == module_path ||
-				dependency.source_fingerprint == 0 || dependency_paths.has(canonical_dependency)) {
+				dependency.source_fingerprint == 0 || dependency.module_fingerprint == 0 || dependency.schema_fingerprint == 0 ||
+				dependency.engine_api_fingerprint == 0 || dependency_paths.has(canonical_dependency) ||
+				(!previous_dependency.is_empty() && previous_dependency >= canonical_dependency)) {
 			return fail("Invalid or duplicate compiled-module dependency.");
 		}
 		dependency_paths.insert(canonical_dependency);
+		previous_dependency = canonical_dependency;
 	}
 
 	const ClassRecord *root_record = nullptr;
@@ -3602,6 +3916,11 @@ Error ModuleVerifier::validate_final_limits() {
 		if (record.fingerprint != get_portable_function_fingerprint(record)) {
 			return fail("Portable function fingerprint mismatch for '" + record.identity + "'.");
 		}
+	}
+	if (module.schema_fingerprint != get_schema_fingerprint(module.classes) ||
+			module.module_fingerprint != get_local_module_fingerprint(module.classes, module.functions) ||
+			module.dependency_fingerprint != get_dependency_fingerprint(module.dependencies)) {
+		return fail("Compiled module metadata, schema, or dependency fingerprint mismatch.");
 	}
 	return OK;
 }
@@ -5248,48 +5567,44 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 	ERR_FAIL_NULL_V(p_script, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_fallback_tokens.is_empty(), ERR_INVALID_PARAMETER);
 
-	HashMap<GDScriptFunction *, String> identities;
-	Vector<GDScriptFunction *> functions;
-	Internals::collect_functions(p_script, "root", identities, functions);
-	HashMap<GDScript *, String> class_identities;
-	Vector<GDScript *> classes;
-	Internals::collect_classes(p_script, "root", class_identities, classes);
 	Vector<ClassRecord> class_records;
-	for (GDScript *script_class : classes) {
-		ClassRecord record;
-		if (!Internals::make_class_record(script_class, *class_identities.getptr(script_class), class_identities, identities, record)) {
-			return ERR_UNAVAILABLE;
-		}
-		class_records.push_back(record);
-	}
-
 	Vector<FunctionRecord> records;
 	int skipped_functions = 0;
-	for (GDScriptFunction *function : functions) {
-		FunctionRecord record;
-		if (Internals::make_record(function, *identities.getptr(function), identities, record)) {
-			records.push_back(record);
-		} else {
-			skipped_functions++;
-		}
+	if (!Internals::make_local_records(p_script, class_records, records, &skipped_functions)) {
+		return ERR_UNAVAILABLE;
 	}
 
-	HashMap<String, uint64_t> dependency_map;
-	Internals::collect_dependencies_from_script(p_script, p_script, dependency_map);
+	HashMap<String, GDScript *> dependency_map;
+	HashSet<String> visited_dependencies;
+	Internals::collect_dependency_closure(p_script, p_script, dependency_map, visited_dependencies);
 	Vector<Dependency> dependencies;
-	for (const KeyValue<String, uint64_t> &entry : dependency_map) {
+	for (const KeyValue<String, GDScript *> &entry : dependency_map) {
 		Dependency dependency;
 		dependency.path = entry.key;
-		dependency.source_fingerprint = entry.value;
+		dependency.source_fingerprint = Internals::dependency_source_fingerprint(entry.value);
+		Vector<ClassRecord> dependency_classes;
+		Vector<FunctionRecord> dependency_functions;
+		if (dependency.source_fingerprint == 0 || !Internals::make_local_records(entry.value, dependency_classes, dependency_functions)) {
+			return ERR_UNAVAILABLE;
+		}
+		dependency.module_fingerprint = get_local_module_fingerprint(dependency_classes, dependency_functions);
+		dependency.schema_fingerprint = get_schema_fingerprint(dependency_classes);
+		dependency.engine_api_fingerprint = get_engine_api_fingerprint();
 		dependencies.push_back(dependency);
 	}
 	dependencies.sort();
 
 	const uint64_t source_fingerprint = fingerprint_source(p_script->source);
+	const uint64_t module_fingerprint = get_local_module_fingerprint(class_records, records);
+	const uint64_t schema_fingerprint = get_schema_fingerprint(class_records);
+	const uint64_t dependency_fingerprint = get_dependency_fingerprint(dependencies);
 	const uint64_t engine_api_fingerprint = get_engine_api_fingerprint();
 	ParsedModule candidate;
 	candidate.path = GDScript::canonicalize_path(p_script->get_script_path());
 	candidate.source_fingerprint = source_fingerprint;
+	candidate.module_fingerprint = module_fingerprint;
+	candidate.schema_fingerprint = schema_fingerprint;
+	candidate.dependency_fingerprint = dependency_fingerprint;
 	candidate.engine_api_fingerprint = engine_api_fingerprint;
 	candidate.fallback_tokens = p_fallback_tokens;
 	candidate.dependencies = dependencies;
@@ -5305,11 +5620,17 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 	}
 	Writer payload;
 	payload.string(candidate.path);
+	payload.u64(module_fingerprint);
+	payload.u64(schema_fingerprint);
+	payload.u64(dependency_fingerprint);
 	payload.bytes(p_fallback_tokens);
 	payload.u32(dependencies.size());
 	for (const Dependency &dependency : dependencies) {
 		payload.string(dependency.path);
 		payload.u64(dependency.source_fingerprint);
+		payload.u64(dependency.module_fingerprint);
+		payload.u64(dependency.schema_fingerprint);
+		payload.u64(dependency.engine_api_fingerprint);
 	}
 	payload.u32(class_records.size());
 	for (const ClassRecord &record : class_records) {
@@ -5337,6 +5658,9 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 		*r_summary = Summary();
 		r_summary->path = GDScript::canonicalize_path(p_script->get_script_path());
 		r_summary->source_fingerprint = source_fingerprint;
+		r_summary->module_fingerprint = module_fingerprint;
+		r_summary->schema_fingerprint = schema_fingerprint;
+		r_summary->dependency_fingerprint = dependency_fingerprint;
 		r_summary->engine_api_fingerprint = engine_api_fingerprint;
 		r_summary->dependencies = dependencies;
 		r_summary->skipped_functions = skipped_functions;
@@ -5374,6 +5698,16 @@ Error GDScriptCompiledModule::extract_fallback(const Vector<uint8_t> &p_module, 
 	return OK;
 }
 
+Error GDScriptCompiledModule::get_dependencies(const Vector<uint8_t> &p_module, Vector<Dependency> &r_dependencies, String *r_error) {
+	ParsedModule module;
+	const Error error = parse_module(p_module, module, r_error);
+	if (error != OK) {
+		return error;
+	}
+	r_dependencies = module.dependencies;
+	return OK;
+}
+
 Error GDScriptCompiledModule::verify(const Vector<uint8_t> &p_module, String *r_error) {
 	ParsedModule module;
 	const Error parse_error = parse_module(p_module, module, r_error);
@@ -5386,8 +5720,8 @@ Error GDScriptCompiledModule::verify(const Vector<uint8_t> &p_module, String *r_
 		}
 		return ERR_INVALID_DATA;
 	}
-	ModuleVerifier verifier(module);
-	return verifier.verify(r_error);
+	ModuleRegistry registry;
+	return registry.verify_graph(module, r_error);
 }
 
 Error GDScriptCompiledModule::prepare_shallow(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error) {
@@ -5410,8 +5744,8 @@ Error GDScriptCompiledModule::prepare_shallow(GDScript *p_script, const Vector<u
 		}
 		return ERR_INVALID_DATA;
 	}
-	ModuleVerifier verifier(module);
-	if (verifier.verify(r_error) != OK) {
+	ModuleRegistry registry;
+	if (registry.verify_graph(module, r_error) != OK) {
 		return ERR_INVALID_DATA;
 	}
 	return RuntimeBuilder::prepare_shell_graph(p_script, module, nullptr, r_error);
@@ -5437,17 +5771,9 @@ Error GDScriptCompiledModule::build_runtime(GDScript *p_script, const Vector<uin
 		}
 		return ERR_INVALID_DATA;
 	}
-	ModuleVerifier verifier(module);
-	if (verifier.verify(r_error) != OK) {
+	ModuleRegistry registry;
+	if (registry.verify_graph(module, r_error) != OK) {
 		return ERR_INVALID_DATA;
-	}
-	for (const Dependency &dependency : module.dependencies) {
-		if (!validate_dependency(dependency)) {
-			if (r_error != nullptr) {
-				*r_error = "Dependency fingerprint mismatch for '" + dependency.path + "'.";
-			}
-			return ERR_INVALID_DATA;
-		}
 	}
 	RuntimeBuilder builder;
 	return builder.build(p_script, module, p_keep_state, r_error);
@@ -5473,17 +5799,9 @@ Error GDScriptCompiledModule::apply(GDScript *p_script, const Vector<uint8_t> &p
 		}
 		return ERR_INVALID_DATA;
 	}
-	ModuleVerifier verifier(module);
-	if (verifier.verify(r_error) != OK) {
+	ModuleRegistry registry;
+	if (registry.verify_graph(module, r_error) != OK) {
 		return ERR_INVALID_DATA;
-	}
-	for (const Dependency &dependency : module.dependencies) {
-		if (!validate_dependency(dependency)) {
-			if (r_error != nullptr) {
-				*r_error = "Dependency fingerprint mismatch for '" + dependency.path + "'.";
-			}
-			return ERR_INVALID_DATA;
-		}
 	}
 
 	HashMap<GDScriptFunction *, String> identities;
@@ -5547,8 +5865,9 @@ Error GDScriptCompiledModule::load_editor_cache(const String &p_script_path, con
 	}
 	Vector<uint8_t> module_bytes = FileAccess::get_file_as_bytes(cache_path);
 	ParsedModule module;
+	ModuleRegistry registry;
 	if (parse_module(module_bytes, module, nullptr) != OK || module.engine_api_fingerprint != get_engine_api_fingerprint() ||
-			module.source_fingerprint != fingerprint_source(p_source) || ModuleVerifier(module).verify(nullptr) != OK) {
+			module.source_fingerprint != fingerprint_source(p_source) || registry.verify_graph(module, nullptr) != OK) {
 		return ERR_INVALID_DATA;
 	}
 	r_module = module_bytes;
@@ -5590,12 +5909,18 @@ Vector<uint8_t> GDScriptCompiledModule::create_project_manifest(Vector<Summary> 
 		module.functions.sort();
 		payload.string(module.path);
 		payload.u64(module.source_fingerprint);
+		payload.u64(module.module_fingerprint);
+		payload.u64(module.schema_fingerprint);
+		payload.u64(module.dependency_fingerprint);
 		payload.u64(module.engine_api_fingerprint);
 		payload.u32(uint32_t(module.skipped_functions));
 		payload.u32(module.dependencies.size());
 		for (const Dependency &dependency : module.dependencies) {
 			payload.string(dependency.path);
 			payload.u64(dependency.source_fingerprint);
+			payload.u64(dependency.module_fingerprint);
+			payload.u64(dependency.schema_fingerprint);
+			payload.u64(dependency.engine_api_fingerprint);
 		}
 		payload.u32(module.classes.size());
 		for (const ClassSummary &script_class : module.classes) {
@@ -5611,7 +5936,7 @@ Vector<uint8_t> GDScriptCompiledModule::create_project_manifest(Vector<Summary> 
 	}
 	Writer manifest;
 	manifest.u32(MANIFEST_MAGIC);
-	manifest.u32(1);
+	manifest.u32(2);
 	manifest.u64(fingerprint_bytes(payload.data.ptr(), payload.data.size()));
 	manifest.u32(payload.data.size());
 	const int header_size = manifest.data.size();

@@ -75,16 +75,12 @@ String ResourceFormatLoaderGDScript::get_resource_type(const String &p_path) con
 
 void ResourceFormatLoaderGDScript::get_dependencies(const String &p_path, List<String> *p_dependencies, bool p_add_types) {
 	if (p_path.get_extension() == "gdm") {
-		Vector<uint8_t> fallback_tokens;
-		if (GDScriptCompiledModule::extract_fallback(FileAccess::get_file_as_bytes(p_path), fallback_tokens) != OK) {
+		Vector<GDScriptCompiledModule::Dependency> dependencies;
+		if (GDScriptCompiledModule::get_dependencies(FileAccess::get_file_as_bytes(p_path), dependencies) != OK) {
 			return;
 		}
-		GDScriptParser parser;
-		if (parser.parse_binary(fallback_tokens, p_path) != OK) {
-			return;
-		}
-		for (const String &dependency : parser.get_dependencies()) {
-			p_dependencies->push_back(dependency);
+		for (const GDScriptCompiledModule::Dependency &dependency : dependencies) {
+			p_dependencies->push_back(dependency.path);
 		}
 		return;
 	}
