@@ -417,7 +417,7 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 		function->_lambdas_count = 0;
 	}
 
-	if (GDScriptLanguage::get_singleton()->should_track_locals()) {
+	if (should_track_debug_locals()) {
 		function->stack_debug = stack_debug;
 	}
 	function->_stack_size = GDScriptFunction::FIXED_ADDRESSES_MAX + max_locals + temporaries.size();
@@ -435,6 +435,9 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 #endif
 
 #ifdef DEBUG_ENABLED
+	if (function->profile.signature.is_empty()) {
+		function->profile.signature = String(function->source) + "::" + itos(function->_initial_line) + "::" + String(function->name);
+	}
 	function->operator_names = operator_names;
 	function->setter_names = setter_names;
 	function->getter_names = getter_names;
@@ -2211,9 +2214,14 @@ void GDScriptByteCodeGenerator::write_breakpoint() {
 	append_opcode(GDScriptFunction::OPCODE_BREAKPOINT);
 }
 
-void GDScriptByteCodeGenerator::write_newline(int p_line) {
+void GDScriptByteCodeGenerator::write_newline(int p_line, int p_column) {
 	if (GDScriptLanguage::get_singleton()->should_track_call_stack()) {
 		// Add newline for debugger and stack tracking if enabled in the project settings.
+		GDScriptFunction::SourcePosition position;
+		position.code_offset = opcodes.size();
+		position.line = p_line;
+		position.column = p_column;
+		function->source_positions.push_back(position);
 		append_opcode(GDScriptFunction::OPCODE_LINE);
 		append(p_line);
 		current_line = p_line;

@@ -242,8 +242,16 @@ func compute(value: int) -> String:
 	GDScriptCompiledModule::Summary summary;
 	REQUIRE(GDScriptCompiledModule::create(gdscript.ptr(), tokens, module, &summary) == OK);
 	CHECK_FALSE(module.is_empty());
+	CHECK(summary.has_debug_info);
+	Vector<uint8_t> stripped_module;
+	GDScriptCompiledModule::Summary stripped_summary;
+	REQUIRE(GDScriptCompiledModule::create(gdscript.ptr(), tokens, stripped_module, &stripped_summary,
+			GDScriptCompiledModule::DEBUG_INFO_STRIPPED) == OK);
+	CHECK_FALSE(stripped_summary.has_debug_info);
+	CHECK(stripped_module.size() < module.size());
 	String verifier_error;
 	CHECK_MESSAGE(GDScriptCompiledModule::verify(module, &verifier_error) == OK, verifier_error);
+	CHECK_MESSAGE(GDScriptCompiledModule::verify(stripped_module, &verifier_error) == OK, verifier_error);
 	{
 		HashMap<StringName, int> &global_map = const_cast<HashMap<StringName, int> &>(GDScriptLanguage::get_singleton()->get_global_map());
 		const int original_index = global_map[symbolic_autoload];
@@ -378,6 +386,31 @@ func compute(value: int) -> String:
 		CHECK(direct_script->is_tool());
 		CHECK(direct_script->get_subclasses().size() == 2);
 		CHECK(direct_script->get_struct_layouts().size() == 2);
+		CHECK(direct_script->get_member_line(SNAME("compute")) == gdscript->get_member_line(SNAME("compute")));
+		CHECK(direct_script->get_member_line(SNAME("compute")) > 0);
+		const GDScriptFunction *const *original_compute_ptr = gdscript->get_member_functions().getptr(SNAME("compute"));
+		const GDScriptFunction *const *direct_compute_ptr = direct_script->get_member_functions().getptr(SNAME("compute"));
+		REQUIRE(original_compute_ptr != nullptr);
+		REQUIRE(direct_compute_ptr != nullptr);
+		const GDScriptFunction *original_compute = *original_compute_ptr;
+		const GDScriptFunction *direct_compute = *direct_compute_ptr;
+		CHECK(direct_compute->get_name() == SNAME("compute"));
+		CHECK(direct_compute->get_source() == GDScript::canonicalize_path(script_path));
+		CHECK(direct_compute->get_debug_profile_identifier() == original_compute->get_debug_profile_identifier());
+		CHECK_FALSE(direct_compute->get_debug_source_positions().is_empty());
+		bool has_column = false;
+		for (const GDScriptFunction::SourcePosition &position : direct_compute->get_debug_source_positions()) {
+			has_column = has_column || position.column > 0;
+		}
+		CHECK(has_column);
+		bool has_value_local = false;
+		bool has_text_local = false;
+		for (const GDScriptFunction::StackDebug &local : direct_compute->get_debug_stack_entries()) {
+			has_value_local = has_value_local || (local.added && local.identifier == SNAME("value"));
+			has_text_local = has_text_local || (local.added && local.identifier == SNAME("text"));
+		}
+		CHECK(has_value_local);
+		CHECK(has_text_local);
 		const Variant *direct_amount_default = direct_script->get_member_default_values().getptr(SNAME("amount"));
 		REQUIRE(direct_amount_default != nullptr);
 		CHECK(*direct_amount_default == Variant(1));
@@ -396,9 +429,22 @@ func compute(value: int) -> String:
 	CHECK(int(direct_instance->call(SNAME("count_values"), 1, 2, 3)) == 3);
 	direct_instance->set(SNAME("amount"), 9);
 	CHECK(int(direct_instance->get(SNAME("amount"))) == 9);
+	Ref<GDScript> stripped_direct_script = memnew(GDScript);
+	stripped_direct_script->set_path(module_path.get_basename() + "_stripped_direct.gd");
+	stripped_direct_script->set_binary_tokens_source(tokens);
+	REQUIRE_MESSAGE(GDScriptCompiledModule::build_runtime(stripped_direct_script.ptr(), stripped_module, false, &direct_error) == OK, direct_error);
+	const GDScriptFunction *const *stripped_compute_ptr = stripped_direct_script->get_member_functions().getptr(SNAME("compute"));
+	REQUIRE(stripped_compute_ptr != nullptr);
+	const GDScriptFunction *stripped_compute = *stripped_compute_ptr;
+	CHECK(stripped_compute->get_debug_source_positions().is_empty());
+	CHECK(stripped_compute->get_debug_stack_entries().is_empty());
+	Ref<RefCounted> stripped_instance = memnew(RefCounted);
+	stripped_instance->set_script(stripped_direct_script);
+	CHECK(String(stripped_instance->call(SNAME("compute"), 3)) == "6");
 	direct_script->set_compiled_module_source(module);
 	REQUIRE(direct_script->reload(true) == OK);
 	CHECK(int(direct_instance->get(SNAME("amount"))) == 9);
+	CHECK(direct_script->get_compiled_module_fallback_reason().is_empty());
 
 	Ref<RefCounted> instance = memnew(RefCounted);
 	instance->set_script(gdscript);
@@ -431,6 +477,13 @@ func compute(value: int) -> String:
 	Vector<uint8_t> corrupt = module;
 	corrupt.write[corrupt.size() - 1] ^= 0x80;
 	CHECK(GDScriptCompiledModule::extract_fallback(corrupt, fallback) == ERR_FILE_CORRUPT);
+	Ref<GDScript> fallback_script = memnew(GDScript);
+	fallback_script->set_path(module_path.get_basename() + "_fallback.gd");
+	fallback_script->set_binary_tokens_source(tokens);
+	fallback_script->set_compiled_module_source(corrupt);
+	REQUIRE(fallback_script->reload() == OK);
+	CHECK(fallback_script->get_compiled_module_fallback_reason().contains("verification failed"));
+	CHECK(fallback_script->get_compiled_module_fallback_reason().contains("checksum mismatch"));
 
 	Ref<GDScript> changed_script = memnew(GDScript);
 	changed_script->set_source_code("extends RefCounted\nfunc compute(value: int) -> String:\n\treturn str(value + 1)\n");
@@ -447,7 +500,9 @@ func compute(value: int) -> String:
 	Vector<uint8_t> cached_module;
 	CHECK(GDScriptCompiledModule::load_editor_cache(cached_script_path, cached_script->get_source_code(), cached_module) == OK);
 	CHECK_FALSE(cached_module.is_empty());
-	CHECK(GDScriptCompiledModule::load_editor_cache(cached_script_path, cached_script->get_source_code() + "\n# stale", cached_module) == ERR_INVALID_DATA);
+	String cache_invalidation_error;
+	CHECK(GDScriptCompiledModule::load_editor_cache(cached_script_path, cached_script->get_source_code() + "\n# stale", cached_module, &cache_invalidation_error) == ERR_INVALID_DATA);
+	CHECK(cache_invalidation_error.contains("source fingerprint changed"));
 	CHECK(DirAccess::remove_absolute(GDScriptCompiledModule::get_editor_cache_path(cached_script_path)) == OK);
 
 	Vector<GDScriptCompiledModule::Summary> modules;
@@ -455,6 +510,9 @@ func compute(value: int) -> String:
 	CHECK_FALSE(GDScriptCompiledModule::create_project_manifest(modules).is_empty());
 
 	offset = Callable();
+	stripped_instance.unref();
+	stripped_direct_script->clear();
+	stripped_direct_script.unref();
 	direct_nested.unref();
 	instance.unref();
 	direct_instance.unref();
@@ -466,10 +524,13 @@ func compute(value: int) -> String:
 	changed_script->clear();
 	cached_script->clear();
 	rejected_script->clear();
+	fallback_script->clear();
 	GDScriptCache::remove_script(module_path);
 	GDScriptCache::remove_script(script_path);
 	GDScriptCache::remove_script(module_path.get_basename() + "_other.gd");
 	GDScriptCache::remove_script(module_path.get_basename() + "_direct.gd");
+	GDScriptCache::remove_script(module_path.get_basename() + "_stripped_direct.gd");
+	GDScriptCache::remove_script(module_path.get_basename() + "_fallback.gd");
 	GDScriptCache::remove_script(cached_script_path);
 	gdscript.unref();
 	direct_script.unref();
@@ -478,6 +539,7 @@ func compute(value: int) -> String:
 	changed_script.unref();
 	cached_script.unref();
 	rejected_script.unref();
+	fallback_script.unref();
 	CHECK(DirAccess::remove_absolute(module_path) == OK);
 }
 

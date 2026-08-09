@@ -456,6 +456,7 @@ void GDScript::set_source_code(const String &p_code) {
 	source = p_code;
 	binary_tokens.clear();
 	compiled_module.clear();
+	compiled_module_fallback_reason.clear();
 #ifdef TOOLS_ENABLED
 	source_changed_cache = true;
 #endif
@@ -829,6 +830,7 @@ Error GDScript::reload(bool p_keep_state) {
 	if (!compiled_module.is_empty()) {
 		String module_error;
 		if (GDScriptCompiledModule::build_runtime(this, compiled_module, p_keep_state, &module_error) == OK) {
+			compiled_module_fallback_reason.clear();
 			can_run = ScriptServer::is_scripting_enabled() || is_tool();
 			bool has_static_data = false;
 			Vector<GDScript *> class_queue;
@@ -868,7 +870,8 @@ Error GDScript::reload(bool p_keep_state) {
 			reloading = false;
 			return OK;
 		}
-		print_verbose("Could not build compiled GDScript module directly for '" + get_script_path() + "': " + module_error + ". Falling back to the GDScript front end.");
+		compiled_module_fallback_reason = "Direct runtime build failed: " + module_error;
+		print_verbose("Could not build compiled GDScript module directly for '" + get_script_path() + "': " + compiled_module_fallback_reason + ". Falling back to the GDScript front end.");
 	}
 
 	GDScriptParser parser;
@@ -931,7 +934,8 @@ Error GDScript::reload(bool p_keep_state) {
 	if (!compiled_module.is_empty()) {
 		String module_error;
 		if (GDScriptCompiledModule::apply(this, compiled_module, &module_error) != OK) {
-			print_verbose("Discarding compiled GDScript module for '" + get_script_path() + "': " + module_error);
+			compiled_module_fallback_reason = "Fresh-compile verification failed: " + module_error;
+			print_verbose("Discarding compiled GDScript module for '" + get_script_path() + "': " + compiled_module_fallback_reason);
 			compiled_module.clear();
 		}
 	}
@@ -1232,8 +1236,11 @@ Error GDScript::load_source_code(const String &p_path) {
 	}
 
 	source = s;
+	binary_tokens.clear();
+	compiled_module.clear();
 	path = p_path;
 	path_valid = true;
+	compiled_module_fallback_reason.clear();
 #ifdef TOOLS_ENABLED
 	source_changed_cache = true;
 	set_edited(false);
@@ -1245,6 +1252,7 @@ Error GDScript::load_source_code(const String &p_path) {
 void GDScript::set_binary_tokens_source(const Vector<uint8_t> &p_binary_tokens) {
 	binary_tokens = p_binary_tokens;
 	compiled_module.clear();
+	compiled_module_fallback_reason.clear();
 }
 
 const Vector<uint8_t> &GDScript::get_binary_tokens_source() const {
@@ -1258,6 +1266,7 @@ Vector<uint8_t> GDScript::get_as_binary_tokens() const {
 
 void GDScript::set_compiled_module_source(const Vector<uint8_t> &p_compiled_module) {
 	compiled_module = p_compiled_module;
+	compiled_module_fallback_reason.clear();
 }
 
 const Vector<uint8_t> &GDScript::get_compiled_module_source() const {

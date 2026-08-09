@@ -334,6 +334,14 @@ public:
 		StringName identifier;
 	};
 
+	// Portable source locations are kept separate from OPCODE_LINE so columns
+	// and editor-only information can be stripped without rewriting bytecode.
+	struct SourcePosition {
+		int code_offset = 0;
+		int line = 0;
+		int column = 0;
+	};
+
 private:
 	friend class GDScript;
 	friend class GDScriptCompiler;
@@ -391,6 +399,7 @@ private:
 	mutable Variant nil;
 	TightLocalVector<Pair<int, Variant::Type>> temporary_slots;
 	List<StackDebug> stack_debug;
+	Vector<SourcePosition> source_positions;
 
 	Vector<int> code;
 	Vector<int> default_arguments;
@@ -543,6 +552,15 @@ public:
 	int get_optimizing_jit_scalar_replaced_math_value_count() const;
 	String get_optimization_profile_key() const;
 	uint32_t get_optimization_fingerprint() const;
+	const Vector<SourcePosition> &get_debug_source_positions() const { return source_positions; }
+	const List<StackDebug> &get_debug_stack_entries() const { return stack_debug; }
+	StringName get_debug_profile_identifier() const {
+#ifdef DEBUG_ENABLED
+		return profile.signature;
+#else
+		return StringName();
+#endif
+	}
 
 	Variant get_constant(int p_idx) const;
 	StringName get_global_name(int p_idx) const;

@@ -313,6 +313,26 @@ struct LambdaRecord {
 	bool use_self = false;
 };
 
+struct DebugMemberRecord {
+	String name;
+	int32_t line = 0;
+
+	bool operator<(const DebugMemberRecord &p_other) const { return name < p_other.name; }
+};
+
+struct DebugSourcePositionRecord {
+	int32_t code_offset = 0;
+	int32_t line = 0;
+	int32_t column = 0;
+};
+
+struct DebugLocalRecord {
+	int32_t line = 0;
+	int32_t slot = 0;
+	bool added = false;
+	String name;
+};
+
 struct ClassRecord {
 	String identity;
 	String owner_identity;
@@ -338,6 +358,7 @@ struct ClassRecord {
 	String implicit_initializer;
 	String implicit_ready;
 	String static_initializer;
+	Vector<DebugMemberRecord> debug_members;
 
 	bool operator<(const ClassRecord &p_other) const { return identity < p_other.identity; }
 };
@@ -377,6 +398,9 @@ struct FunctionRecord {
 	Vector<StringName> global_names;
 	Vector<Pair<int, Variant::Type>> temporary_slots;
 	Vector<Vector<Symbol>> relocations;
+	String debug_profile_identifier;
+	Vector<DebugSourcePositionRecord> debug_source_positions;
+	Vector<DebugLocalRecord> debug_locals;
 
 	bool operator<(const FunctionRecord &p_other) const { return identity < p_other.identity; }
 };
@@ -392,6 +416,7 @@ struct ParsedModule {
 	Vector<GDScriptCompiledModule::Dependency> dependencies;
 	Vector<ClassRecord> classes;
 	Vector<FunctionRecord> functions;
+	bool has_debug_info = false;
 };
 
 class Internals {
@@ -462,6 +487,7 @@ class ModuleVerifier {
 	Error validate_typed_constraints();
 	Error validate_operations();
 	Error validate_relocations();
+	Error validate_debug_metadata();
 	Error validate_final_limits();
 
 public:
@@ -1100,6 +1126,120 @@ FunctionRecord read_function(Reader &p_reader) {
 	return record;
 }
 
+Vector<uint8_t> write_debug_section(const Vector<ClassRecord> &p_classes, const Vector<FunctionRecord> &p_functions) {
+	Writer debug;
+	debug.u32(GDScriptCompiledModule::DEBUG_INFO_VERSION);
+	debug.u32(p_classes.size());
+	for (const ClassRecord &script_class : p_classes) {
+		debug.string(script_class.identity);
+		debug.u32(script_class.debug_members.size());
+		for (const DebugMemberRecord &member : script_class.debug_members) {
+			debug.string(member.name);
+			debug.u32(uint32_t(member.line));
+		}
+	}
+	debug.u32(p_functions.size());
+	for (const FunctionRecord &function : p_functions) {
+		debug.string(function.identity);
+		debug.string(function.debug_profile_identifier);
+		debug.u32(function.debug_source_positions.size());
+		for (const DebugSourcePositionRecord &position : function.debug_source_positions) {
+			debug.u32(uint32_t(position.code_offset));
+			debug.u32(uint32_t(position.line));
+			debug.u32(uint32_t(position.column));
+		}
+		debug.u32(function.debug_locals.size());
+		for (const DebugLocalRecord &local : function.debug_locals) {
+			debug.u32(uint32_t(local.line));
+			debug.u32(uint32_t(local.slot));
+			debug.u32(local.added ? 1 : 0);
+			debug.string(local.name);
+		}
+	}
+	return debug.data;
+}
+
+bool read_debug_section(const Vector<uint8_t> &p_data, ParsedModule &r_module) {
+	if (p_data.is_empty()) {
+		return true;
+	}
+	Reader debug(p_data.ptr(), p_data.size());
+	if (debug.u32() != GDScriptCompiledModule::DEBUG_INFO_VERSION) {
+		return false;
+	}
+	HashMap<String, int> classes;
+	for (int i = 0; i < r_module.classes.size(); i++) {
+		classes.insert(r_module.classes[i].identity, i);
+	}
+	HashSet<String> decoded_classes;
+	const uint32_t class_count = debug.count(MAX_MODULE_CLASSES);
+	if (class_count != uint32_t(r_module.classes.size())) {
+		return false;
+	}
+	for (uint32_t i = 0; i < class_count; i++) {
+		const String identity = debug.string();
+		const int *class_index = classes.getptr(identity);
+		if (class_index == nullptr || decoded_classes.has(identity)) {
+			return false;
+		}
+		decoded_classes.insert(identity);
+		ClassRecord &script_class = r_module.classes.write[*class_index];
+		const uint32_t member_count = debug.count();
+		script_class.debug_members.resize(member_count);
+		for (uint32_t member_index = 0; member_index < member_count; member_index++) {
+			DebugMemberRecord &member = script_class.debug_members.write[member_index];
+			member.name = debug.string();
+			member.line = int32_t(debug.u32());
+		}
+	}
+
+	HashMap<String, int> functions;
+	for (int i = 0; i < r_module.functions.size(); i++) {
+		functions.insert(r_module.functions[i].identity, i);
+	}
+	HashSet<String> decoded_functions;
+	const uint32_t function_count = debug.count(MAX_MODULE_FUNCTIONS);
+	if (function_count != uint32_t(r_module.functions.size())) {
+		return false;
+	}
+	for (uint32_t i = 0; i < function_count; i++) {
+		const String identity = debug.string();
+		const int *function_index = functions.getptr(identity);
+		if (function_index == nullptr || decoded_functions.has(identity)) {
+			return false;
+		}
+		decoded_functions.insert(identity);
+		FunctionRecord &function = r_module.functions.write[*function_index];
+		function.debug_profile_identifier = debug.string();
+		const uint32_t position_count = debug.count(MAX_FUNCTION_CODE_WORDS);
+		function.debug_source_positions.resize(position_count);
+		for (uint32_t position_index = 0; position_index < position_count; position_index++) {
+			DebugSourcePositionRecord &position = function.debug_source_positions.write[position_index];
+			position.code_offset = int32_t(debug.u32());
+			position.line = int32_t(debug.u32());
+			position.column = int32_t(debug.u32());
+		}
+		const uint32_t local_count = debug.count();
+		function.debug_locals.resize(local_count);
+		for (uint32_t local_index = 0; local_index < local_count; local_index++) {
+			DebugLocalRecord &local = function.debug_locals.write[local_index];
+			local.line = int32_t(debug.u32());
+			local.slot = int32_t(debug.u32());
+			const uint32_t added = debug.u32();
+			if (added > 1) {
+				debug.failed = true;
+			}
+			local.added = added != 0;
+			local.name = debug.string();
+		}
+	}
+	if (debug.failed || debug.offset != debug.size) {
+		return false;
+	}
+	r_module.has_debug_info = true;
+	return true;
+}
+
 Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, String *r_error) {
 	auto fail = [&](const String &p_message) {
 		if (r_error != nullptr) {
@@ -1154,6 +1294,10 @@ Error parse_module(const Vector<uint8_t> &p_module, ParsedModule &r_module, Stri
 	r_module.functions.resize(function_count);
 	for (uint32_t i = 0; i < function_count; i++) {
 		r_module.functions.write[i] = read_function(payload);
+	}
+	const Vector<uint8_t> debug_section = payload.bytes();
+	if (!read_debug_section(debug_section, r_module)) {
+		return fail("Malformed or unsupported compiled GDScript debug section.");
 	}
 	if (payload.failed || payload.offset != payload.size || r_module.fallback_tokens.is_empty() || r_module.classes.is_empty()) {
 		return fail("Malformed compiled GDScript module payload.");
@@ -1747,6 +1891,16 @@ bool Internals::make_class_record(GDScript *p_script, const String &p_identity, 
 	r_record.icon_path = p_script->simplified_icon_path;
 	r_record.flags = (p_script->tool ? uint32_t(CLASS_FLAG_TOOL) : 0) | (p_script->_is_abstract ? uint32_t(CLASS_FLAG_ABSTRACT) : 0) |
 			(p_script->static_unload ? uint32_t(CLASS_FLAG_STATIC_UNLOAD) : 0);
+#ifdef TOOLS_ENABLED
+	Vector<StringName> debug_member_names;
+	for (const KeyValue<StringName, int> &member : p_script->member_lines) {
+		debug_member_names.push_back(member.key);
+	}
+	debug_member_names.sort();
+	for (const StringName &name : debug_member_names) {
+		r_record.debug_members.push_back({ String(name), p_script->member_lines[name] });
+	}
+#endif
 	if (p_script->_owner != nullptr) {
 		const String *owner_identity = p_class_identities.getptr(p_script->_owner);
 		if (owner_identity == nullptr) {
@@ -2229,6 +2383,18 @@ bool Internals::make_record(GDScriptFunction *p_function, const String &p_identi
 	r_record.call_feedback_count = p_function->_call_feedback_count;
 	r_record.is_static = p_function->_static;
 	r_record.profile_guided = GDScriptOptimizationProfile::has_hint(p_function->get_optimization_profile_key(), runtime_fingerprint);
+	for (const GDScriptFunction::SourcePosition &position : p_function->source_positions) {
+		r_record.debug_source_positions.push_back({ position.code_offset, position.line, position.column });
+	}
+	for (const GDScriptFunction::StackDebug &local : p_function->stack_debug) {
+		r_record.debug_locals.push_back({ local.line, local.pos, local.added, String(local.identifier) });
+	}
+#ifdef DEBUG_ENABLED
+	r_record.debug_profile_identifier = p_function->profile.signature;
+#endif
+	if (r_record.debug_profile_identifier.is_empty()) {
+		r_record.debug_profile_identifier = r_record.source + "::" + itos(r_record.initial_line) + "::" + String(r_record.name);
+	}
 	r_record.default_arguments = p_function->default_arguments;
 	if (!make_symbolic_global_code(p_function, r_record.code, r_record.global_names)) {
 		return false;
@@ -3901,6 +4067,77 @@ Error ModuleVerifier::validate_relocations() {
 	return OK;
 }
 
+Error ModuleVerifier::validate_debug_metadata() {
+	if (!module.has_debug_info) {
+		for (const ClassRecord &script_class : module.classes) {
+			if (!script_class.debug_members.is_empty()) {
+				return fail("Stripped module contains class debug metadata.");
+			}
+		}
+		for (const FunctionRecord &function : module.functions) {
+			if (!function.debug_profile_identifier.is_empty() || !function.debug_source_positions.is_empty() || !function.debug_locals.is_empty()) {
+				return fail("Stripped module contains function debug metadata.");
+			}
+		}
+		return OK;
+	}
+
+	for (const ClassRecord &script_class : module.classes) {
+		HashSet<String> member_names;
+		for (const DebugMemberRecord &member : script_class.debug_members) {
+			if (member.name.is_empty() || member.line <= 0 || member_names.has(member.name)) {
+				return fail("Invalid editor member location in class '" + script_class.identity + "'.");
+			}
+			member_names.insert(member.name);
+		}
+		if (add_metadata_entries(script_class.debug_members.size(), "class debug table") != OK) {
+			return ERR_INVALID_DATA;
+		}
+	}
+
+	for (int function_index = 0; function_index < module.functions.size(); function_index++) {
+		const FunctionRecord &function = module.functions[function_index];
+		const FunctionInfo &info = function_info[function_index];
+		if (function.debug_profile_identifier.is_empty()) {
+			return fail("Missing profiler identifier for function '" + function.identity + "'.");
+		}
+		int previous_offset = -1;
+		for (const DebugSourcePositionRecord &position : function.debug_source_positions) {
+			if (position.code_offset <= previous_offset || position.code_offset < 0 || position.code_offset + 1 >= function.code.size() ||
+					!info.boundaries[position.code_offset] || function.code[position.code_offset] != GDScriptFunction::OPCODE_LINE ||
+					function.code[position.code_offset + 1] != position.line || position.line <= 0 || position.column < 0) {
+				return fail("Invalid source line/column table in function '" + function.identity + "'.");
+			}
+			previous_offset = position.code_offset;
+		}
+
+		HashMap<String, Vector<int>> live_locals;
+		int previous_line = -1;
+		for (const DebugLocalRecord &local : function.debug_locals) {
+			if (local.name.is_empty() || local.line < previous_line || local.line < 0 || local.slot < GDScriptFunction::FIXED_ADDRESSES_MAX || local.slot >= function.stack_size) {
+				return fail("Invalid local-variable debug table in function '" + function.identity + "'.");
+			}
+			previous_line = local.line;
+			if (local.added) {
+				live_locals[local.name].push_back(local.slot);
+			} else {
+				Vector<int> *slots = live_locals.getptr(local.name);
+				if (slots == nullptr || slots->is_empty() || (*slots)[slots->size() - 1] != local.slot) {
+					return fail("Unbalanced local-variable lifetime in function '" + function.identity + "'.");
+				}
+				slots->remove_at(slots->size() - 1);
+				if (slots->is_empty()) {
+					live_locals.erase(local.name);
+				}
+			}
+		}
+		if (add_metadata_entries(function.debug_source_positions.size() + function.debug_locals.size() + 1, "function debug table") != OK) {
+			return ERR_INVALID_DATA;
+		}
+	}
+	return OK;
+}
+
 Error ModuleVerifier::validate_final_limits() {
 	if (metadata_entries > MAX_TOTAL_METADATA_ENTRIES || constant_bytes > MAX_TOTAL_CONSTANT_BYTES || total_code_words > MAX_TOTAL_CODE_WORDS ||
 			function_info.size() != module.functions.size()) {
@@ -3950,6 +4187,9 @@ Error ModuleVerifier::verify(String *r_error) {
 	}
 	if (result == OK) {
 		result = validate_relocations();
+	}
+	if (result == OK) {
+		result = validate_debug_metadata();
 	}
 	if (result == OK) {
 		result = validate_final_limits();
@@ -4142,6 +4382,24 @@ void Internals::install_record(const FunctionRecord &p_record, GDScriptFunction 
 	p_function->_default_arg_ptr = p_function->default_arguments.is_empty() ? nullptr : p_function->default_arguments.ptr();
 	p_function->global_names = p_record.global_names;
 	p_function->_global_names_ptr = p_function->global_names.is_empty() ? nullptr : p_function->global_names.ptr();
+	if (!p_record.debug_profile_identifier.is_empty()) {
+		p_function->source_positions.clear();
+		for (const DebugSourcePositionRecord &position : p_record.debug_source_positions) {
+			p_function->source_positions.push_back({ position.code_offset, position.line, position.column });
+		}
+		p_function->stack_debug.clear();
+		for (const DebugLocalRecord &local : p_record.debug_locals) {
+			GDScriptFunction::StackDebug entry;
+			entry.line = local.line;
+			entry.pos = local.slot;
+			entry.added = local.added;
+			entry.identifier = local.name;
+			p_function->stack_debug.push_back(entry);
+		}
+#ifdef DEBUG_ENABLED
+		p_function->profile.signature = p_record.debug_profile_identifier;
+#endif
+	}
 
 	for (int i = 0; i < p_record.relocations[RELOC_OPERATOR].size(); i++) {
 		const Symbol &s = p_record.relocations[RELOC_OPERATOR][i];
@@ -5399,6 +5657,12 @@ void RuntimeBuilder::commit(bool p_keep_state) {
 		script->global_name = staged.record->global_name;
 		script->fully_qualified_name = staged.record->fully_qualified_name;
 		script->simplified_icon_path = staged.record->icon_path;
+#ifdef TOOLS_ENABLED
+		script->member_lines.clear();
+		for (const DebugMemberRecord &member : staged.record->debug_members) {
+			script->member_lines.insert(member.name, member.line);
+		}
+#endif
 		for (const KeyValue<StringName, Ref<GDScript>> &entry : old_subclasses) {
 			if (!script->subclasses.has(entry.key) || script->subclasses[entry.key] != entry.value) {
 				entry.value->_owner = nullptr;
@@ -5563,9 +5827,11 @@ uint64_t GDScriptCompiledModule::get_engine_api_fingerprint() {
 	return (uint64_t(mixed) << 32) | tail;
 }
 
-Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary) {
+Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary,
+		DebugInfoMode p_debug_info) {
 	ERR_FAIL_NULL_V(p_script, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_fallback_tokens.is_empty(), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_debug_info != DEBUG_INFO_FULL && p_debug_info != DEBUG_INFO_STRIPPED, ERR_INVALID_PARAMETER);
 
 	Vector<ClassRecord> class_records;
 	Vector<FunctionRecord> records;
@@ -5610,6 +5876,17 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 	candidate.dependencies = dependencies;
 	candidate.classes = class_records;
 	candidate.functions = records;
+	candidate.has_debug_info = p_debug_info == DEBUG_INFO_FULL;
+	if (!candidate.has_debug_info) {
+		for (ClassRecord &record : candidate.classes) {
+			record.debug_members.clear();
+		}
+		for (FunctionRecord &record : candidate.functions) {
+			record.debug_profile_identifier.clear();
+			record.debug_source_positions.clear();
+			record.debug_locals.clear();
+		}
+	}
 	String candidate_error;
 	if (ModuleVerifier(candidate).verify(&candidate_error) != OK) {
 		// Keep export/cache creation fail-closed as well. The caller already has
@@ -5632,14 +5909,15 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 		payload.u64(dependency.schema_fingerprint);
 		payload.u64(dependency.engine_api_fingerprint);
 	}
-	payload.u32(class_records.size());
-	for (const ClassRecord &record : class_records) {
+	payload.u32(candidate.classes.size());
+	for (const ClassRecord &record : candidate.classes) {
 		write_class(payload, record);
 	}
-	payload.u32(records.size());
-	for (const FunctionRecord &record : records) {
+	payload.u32(candidate.functions.size());
+	for (const FunctionRecord &record : candidate.functions) {
 		write_function(payload, record);
 	}
+	payload.bytes(candidate.has_debug_info ? write_debug_section(candidate.classes, candidate.functions) : Vector<uint8_t>());
 
 	Writer module;
 	module.u32(MODULE_MAGIC);
@@ -5664,6 +5942,7 @@ Error GDScriptCompiledModule::create(GDScript *p_script, const Vector<uint8_t> &
 		r_summary->engine_api_fingerprint = engine_api_fingerprint;
 		r_summary->dependencies = dependencies;
 		r_summary->skipped_functions = skipped_functions;
+		r_summary->has_debug_info = candidate.has_debug_info;
 		for (const ClassRecord &record : class_records) {
 			Writer metadata;
 			write_class(metadata, record);
@@ -5858,19 +6137,37 @@ String GDScriptCompiledModule::get_editor_cache_path(const String &p_script_path
 	return "res://.godot/gdscript_compiled/" + key.sha256_text() + ".gdm";
 }
 
-Error GDScriptCompiledModule::load_editor_cache(const String &p_script_path, const String &p_source, Vector<uint8_t> &r_module) {
+Error GDScriptCompiledModule::load_editor_cache(const String &p_script_path, const String &p_source, Vector<uint8_t> &r_module, String *r_error) {
+	auto fail = [&](Error p_error, const String &p_message) {
+		if (r_error != nullptr) {
+			*r_error = p_message;
+		}
+		return p_error;
+	};
 	const String cache_path = get_editor_cache_path(p_script_path);
 	if (!FileAccess::exists(cache_path)) {
-		return ERR_FILE_NOT_FOUND;
+		return fail(ERR_FILE_NOT_FOUND, "No compiled editor-cache module exists.");
 	}
 	Vector<uint8_t> module_bytes = FileAccess::get_file_as_bytes(cache_path);
 	ParsedModule module;
 	ModuleRegistry registry;
-	if (parse_module(module_bytes, module, nullptr) != OK || module.engine_api_fingerprint != get_engine_api_fingerprint() ||
-			module.source_fingerprint != fingerprint_source(p_source) || registry.verify_graph(module, nullptr) != OK) {
-		return ERR_INVALID_DATA;
+	String detail;
+	if (parse_module(module_bytes, module, &detail) != OK) {
+		return fail(ERR_INVALID_DATA, "Editor-cache module parsing failed: " + detail);
+	}
+	if (module.engine_api_fingerprint != get_engine_api_fingerprint()) {
+		return fail(ERR_INVALID_DATA, "Editor-cache engine API fingerprint changed.");
+	}
+	if (module.source_fingerprint != fingerprint_source(p_source)) {
+		return fail(ERR_INVALID_DATA, "Editor-cache source fingerprint changed.");
+	}
+	if (registry.verify_graph(module, &detail) != OK) {
+		return fail(ERR_INVALID_DATA, "Editor-cache dependency verification failed: " + detail);
 	}
 	r_module = module_bytes;
+	if (r_error != nullptr) {
+		r_error->clear();
+	}
 	return OK;
 }
 
@@ -5914,6 +6211,7 @@ Vector<uint8_t> GDScriptCompiledModule::create_project_manifest(Vector<Summary> 
 		payload.u64(module.dependency_fingerprint);
 		payload.u64(module.engine_api_fingerprint);
 		payload.u32(uint32_t(module.skipped_functions));
+		payload.u32(module.has_debug_info ? 1 : 0);
 		payload.u32(module.dependencies.size());
 		for (const Dependency &dependency : module.dependencies) {
 			payload.string(dependency.path);
@@ -5936,7 +6234,7 @@ Vector<uint8_t> GDScriptCompiledModule::create_project_manifest(Vector<Summary> 
 	}
 	Writer manifest;
 	manifest.u32(MANIFEST_MAGIC);
-	manifest.u32(2);
+	manifest.u32(3);
 	manifest.u64(fingerprint_bytes(payload.data.ptr(), payload.data.size()));
 	manifest.u32(payload.data.size());
 	const int header_size = manifest.data.size();

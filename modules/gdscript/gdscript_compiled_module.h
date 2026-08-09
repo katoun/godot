@@ -76,11 +76,13 @@ public:
 		Vector<ClassSummary> classes;
 		Vector<FunctionSummary> functions;
 		int skipped_functions = 0;
+		bool has_debug_info = false;
 
 		bool operator<(const Summary &p_other) const { return path < p_other.path; }
 	};
 
-	static constexpr uint32_t FORMAT_VERSION = 5;
+	static constexpr uint32_t FORMAT_VERSION = 6;
+	static constexpr uint32_t DEBUG_INFO_VERSION = 1;
 	// Version 2 stores OPCODE_STORE_GLOBAL operands as indices into the
 	// function's symbolic name table. They are relocated to the running
 	// language's global-array indices only after module verification.
@@ -90,7 +92,13 @@ public:
 	static uint64_t fingerprint_source(const String &p_source);
 	static uint64_t get_engine_api_fingerprint();
 
-	static Error create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary = nullptr);
+	enum DebugInfoMode {
+		DEBUG_INFO_FULL,
+		DEBUG_INFO_STRIPPED,
+	};
+
+	static Error create(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> &r_module, Summary *r_summary = nullptr,
+			DebugInfoMode p_debug_info = DEBUG_INFO_FULL);
 	static Error extract_fallback(const Vector<uint8_t> &p_module, Vector<uint8_t> &r_fallback_tokens, uint64_t *r_source_fingerprint = nullptr, String *r_error = nullptr);
 	static Error get_dependencies(const Vector<uint8_t> &p_module, Vector<Dependency> &r_dependencies, String *r_error = nullptr);
 	// Performs pointer-free structural, semantic, control-flow, type, and
@@ -107,7 +115,7 @@ public:
 	static Error apply(GDScript *p_script, const Vector<uint8_t> &p_module, String *r_error = nullptr);
 
 	static String get_editor_cache_path(const String &p_script_path);
-	static Error load_editor_cache(const String &p_script_path, const String &p_source, Vector<uint8_t> &r_module);
+	static Error load_editor_cache(const String &p_script_path, const String &p_source, Vector<uint8_t> &r_module, String *r_error = nullptr);
 	static Error save_editor_cache(GDScript *p_script, const Vector<uint8_t> &p_fallback_tokens, Vector<uint8_t> *r_module = nullptr);
 
 	// The export manifest is the output of the first whole-project pass. It

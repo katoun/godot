@@ -164,12 +164,22 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 
 	List<List<int>> current_breaks_to_patch;
 
+	_FORCE_INLINE_ bool should_track_debug_locals() const {
+#ifdef TOOLS_ENABLED
+		// Editor-created modules must retain locals even when no debug session is
+		// active yet; the same module may be used after the debugger starts.
+		return true;
+#else
+		return GDScriptLanguage::get_singleton()->should_track_locals();
+#endif
+	}
+
 	void add_stack_identifier(const StringName &p_id, int p_stackpos) {
 		if (locals.size() > max_locals) {
 			max_locals = locals.size();
 		}
 		stack_identifiers[p_id] = p_stackpos;
-		if (GDScriptLanguage::get_singleton()->should_track_locals()) {
+		if (should_track_debug_locals()) {
 			block_identifiers[p_id] = p_stackpos;
 			GDScriptFunction::StackDebug sd;
 			sd.added = true;
@@ -183,7 +193,7 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	void push_stack_identifiers() {
 		stack_identifiers_counts.push_back(locals.size());
 		stack_id_stack.push_back(stack_identifiers);
-		if (GDScriptLanguage::get_singleton()->should_track_locals()) {
+		if (should_track_debug_locals()) {
 			RBMap<StringName, int> block_ids(block_identifiers);
 			block_identifier_stack.push_back(block_ids);
 			block_identifiers.clear();
@@ -204,7 +214,7 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 			dirty_locals.insert(i + GDScriptFunction::FIXED_ADDRESSES_MAX);
 		}
 		locals.resize(current_locals);
-		if (GDScriptLanguage::get_singleton()->should_track_locals()) {
+		if (should_track_debug_locals()) {
 			for (const KeyValue<StringName, int> &E : block_identifiers) {
 				GDScriptFunction::StackDebug sd;
 				sd.added = false;
@@ -566,7 +576,7 @@ public:
 	virtual void write_break() override;
 	virtual void write_continue() override;
 	virtual void write_breakpoint() override;
-	virtual void write_newline(int p_line) override;
+	virtual void write_newline(int p_line, int p_column = 0) override;
 	virtual void write_return(const Address &p_return_value, bool p_use_conversion) override;
 	virtual void write_assert(const Address &p_test, const Address &p_message) override;
 

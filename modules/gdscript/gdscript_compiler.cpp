@@ -1963,7 +1963,7 @@ Error GDScriptCompiler::_parse_block(CodeGen &codegen, const GDScriptParser::Sui
 	for (int i = 0; i < p_block->statements.size(); i++) {
 		const GDScriptParser::Node *s = p_block->statements[i];
 
-		gen->write_newline(s->start_line);
+		gen->write_newline(s->start_line, s->start_column);
 
 		switch (s->type) {
 			case GDScriptParser::Node::MATCH: {
@@ -2011,7 +2011,7 @@ Error GDScriptCompiler::_parse_block(CodeGen &codegen, const GDScriptParser::Sui
 					// Add locals in block before patterns, so temporaries don't use the stack address for binds.
 					List<GDScriptCodeGenerator::Address> branch_locals = _add_block_locals(codegen, branch->block);
 
-					gen->write_newline(branch->start_line);
+					gen->write_newline(branch->start_line, branch->start_column);
 
 					// For each pattern in branch.
 					GDScriptCodeGenerator::Address pattern_result = codegen.add_temporary();
@@ -2441,7 +2441,7 @@ GDScriptFunction *GDScriptCompiler::_parse_function(Error &r_error, GDScript *p_
 
 			GDScriptDataType field_type = _gdtype_from_datatype(field->get_datatype(), codegen.script);
 			if (field_type.has_type()) {
-				codegen.generator->write_newline(field->start_line);
+				codegen.generator->write_newline(field->start_line, field->start_column);
 
 				GDScriptCodeGenerator::Address dst_address(GDScriptCodeGenerator::Address::MEMBER, codegen.script->member_indices[field->identifier->name].index, field_type);
 
@@ -2477,7 +2477,7 @@ GDScriptFunction *GDScriptCompiler::_parse_function(Error &r_error, GDScript *p_
 			}
 
 			if (field->initializer) {
-				codegen.generator->write_newline(field->initializer->start_line);
+				codegen.generator->write_newline(field->initializer->start_line, field->initializer->start_column);
 
 				GDScriptCodeGenerator::Address src_address = _parse_expression(codegen, r_error, field->initializer, false, true);
 				if (r_error) {
@@ -2632,7 +2632,7 @@ GDScriptFunction *GDScriptCompiler::_make_static_initializer(Error &r_error, GDS
 
 		GDScriptDataType field_type = _gdtype_from_datatype(field->get_datatype(), codegen.script);
 		if (field_type.has_type()) {
-			codegen.generator->write_newline(field->start_line);
+			codegen.generator->write_newline(field->start_line, field->start_column);
 
 			if (field_type.builtin_type == Variant::STRUCT && field_type.struct_layout.is_valid()) {
 				GDScriptCodeGenerator::Address temp = codegen.add_temporary(field_type);
@@ -2671,7 +2671,7 @@ GDScriptFunction *GDScriptCompiler::_make_static_initializer(Error &r_error, GDS
 		}
 
 		if (field->initializer) {
-			codegen.generator->write_newline(field->initializer->start_line);
+			codegen.generator->write_newline(field->initializer->start_line, field->initializer->start_column);
 
 			GDScriptCodeGenerator::Address src_address = _parse_expression(codegen, r_error, field->initializer, false, true);
 			if (r_error) {
@@ -2697,7 +2697,7 @@ GDScriptFunction *GDScriptCompiler::_make_static_initializer(Error &r_error, GDS
 	}
 
 	if (p_script->has_method(GDScriptLanguage::get_singleton()->strings._static_init)) {
-		codegen.generator->write_newline(p_class->start_line);
+		codegen.generator->write_newline(p_class->start_line, p_class->start_column);
 		codegen.generator->write_call(GDScriptCodeGenerator::Address(), class_addr, GDScriptLanguage::get_singleton()->strings._static_init, Vector<GDScriptCodeGenerator::Address>());
 	}
 

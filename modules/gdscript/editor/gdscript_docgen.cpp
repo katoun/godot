@@ -348,6 +348,7 @@ String GDScriptDocGen::docvalue_from_expression(const GDP::ExpressionNode *p_exp
 
 void GDScriptDocGen::_generate_docs(GDScript *p_script, const GDP::ClassNode *p_class) {
 	p_script->_clear_doc();
+	p_script->member_lines.clear();
 
 	DocData::ClassDoc &doc = p_script->doc;
 

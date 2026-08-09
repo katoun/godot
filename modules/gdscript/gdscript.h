@@ -179,6 +179,7 @@ private:
 	String source;
 	Vector<uint8_t> binary_tokens;
 	Vector<uint8_t> compiled_module;
+	String compiled_module_fallback_reason;
 	String path;
 	bool path_valid = false; // False if using default path.
 	StringName local_name; // Inner class identifier or `class_name`.
@@ -312,6 +313,8 @@ public:
 	Vector<uint8_t> get_as_binary_tokens() const;
 	void set_compiled_module_source(const Vector<uint8_t> &p_compiled_module);
 	const Vector<uint8_t> &get_compiled_module_source() const;
+	void set_compiled_module_fallback_reason(const String &p_reason) { compiled_module_fallback_reason = p_reason; }
+	const String &get_compiled_module_fallback_reason() const { return compiled_module_fallback_reason; }
 
 	bool get_property_default_value(const StringName &p_property, Variant &r_value) const override;
 

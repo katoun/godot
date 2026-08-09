@@ -348,8 +348,13 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 #ifdef TOOLS_ENABLED
 		if (r_error == OK) {
 			Vector<uint8_t> cached_module;
-			if (GDScriptCompiledModule::load_editor_cache(p_path, script->get_source_code(), cached_module) == OK) {
+			String cache_error;
+			const Error cache_result = GDScriptCompiledModule::load_editor_cache(p_path, script->get_source_code(), cached_module, &cache_error);
+			if (cache_result == OK) {
 				script->set_compiled_module_source(cached_module);
+			} else if (cache_result != ERR_FILE_NOT_FOUND) {
+				script->set_compiled_module_fallback_reason(cache_error);
+				print_verbose("Compiled GDScript editor cache for '" + p_path + "' was invalidated: " + cache_error);
 			}
 		}
 #endif
@@ -364,6 +369,7 @@ Ref<GDScript> GDScriptCache::get_shallow_script(const String &p_path, Error &r_e
 		String module_error;
 		module_shells_ready = GDScriptCompiledModule::prepare_shallow(script.ptr(), script->get_compiled_module_source(), &module_error) == OK;
 		if (!module_shells_ready) {
+			script->set_compiled_module_fallback_reason("Shallow class preparation failed: " + module_error);
 			print_verbose("Could not prepare compiled GDScript module shells for '" + p_path + "': " + module_error);
 		}
 	}
@@ -431,8 +437,13 @@ Ref<GDScript> GDScriptCache::get_full_script(const String &p_path, Error &r_erro
 			}
 #ifdef TOOLS_ENABLED
 			Vector<uint8_t> cached_module;
-			if (GDScriptCompiledModule::load_editor_cache(p_path, script->get_source_code(), cached_module) == OK) {
+			String cache_error;
+			const Error cache_result = GDScriptCompiledModule::load_editor_cache(p_path, script->get_source_code(), cached_module, &cache_error);
+			if (cache_result == OK) {
 				script->set_compiled_module_source(cached_module);
+			} else if (cache_result != ERR_FILE_NOT_FOUND) {
+				script->set_compiled_module_fallback_reason(cache_error);
+				print_verbose("Compiled GDScript editor cache for '" + p_path + "' was invalidated: " + cache_error);
 			}
 #endif
 		}

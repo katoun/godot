@@ -91,6 +91,7 @@ class GDScriptExportPlugin : public EditorExportPlugin {
 
 	static constexpr EditorExportPreset::ScriptExportMode DEFAULT_SCRIPT_MODE = EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED;
 	EditorExportPreset::ScriptExportMode script_mode = DEFAULT_SCRIPT_MODE;
+	bool include_debug_info = false;
 	Vector<GDScriptCompiledModule::Summary> module_summaries;
 	HashMap<String, Vector<uint8_t>> compiled_modules;
 
@@ -136,7 +137,10 @@ class GDScriptExportPlugin : public EditorExportPlugin {
 			}
 			Vector<uint8_t> module;
 			GDScriptCompiledModule::Summary summary;
-			if (GDScriptCompiledModule::create(script.ptr(), tokens, module, &summary) == OK && !module.is_empty()) {
+			const GDScriptCompiledModule::DebugInfoMode debug_mode = include_debug_info ?
+					GDScriptCompiledModule::DEBUG_INFO_FULL :
+					GDScriptCompiledModule::DEBUG_INFO_STRIPPED;
+			if (GDScriptCompiledModule::create(script.ptr(), tokens, module, &summary, debug_mode) == OK && !module.is_empty()) {
 				compiled_modules.insert(path, module);
 				module_summaries.push_back(summary);
 			}
@@ -149,6 +153,7 @@ class GDScriptExportPlugin : public EditorExportPlugin {
 protected:
 	virtual void _export_begin(const HashSet<String> &p_features, bool p_debug, const String &p_path, int p_flags) override {
 		script_mode = DEFAULT_SCRIPT_MODE;
+		include_debug_info = p_debug;
 		module_summaries.clear();
 		compiled_modules.clear();
 
