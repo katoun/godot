@@ -105,18 +105,28 @@ TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM 
 	const String script_path = module_path.get_basename() + ".gd";
 	Ref<GDScript> gdscript = memnew(GDScript);
 	gdscript->set_path(script_path);
-	gdscript->set_source_code(R"(
+	const String metadata_source = R"(
 @tool
+@icon("res://portable_compiled_module.svg")
 extends RefCounted
 
 signal computed(value: int)
 
 const SCALE := 2
-var amount: int = 1
+var amount: int = 1:
+	set(value):
+		amount = value
+	get:
+		return amount
 static var calls: int = 0
 
+struct Coordinates:
+	var x: float = 1.5
+	var tint: Color = Color(0.25, 0.5, 0.75, 1.0)
+
 struct Sample:
-	var value: int
+	var value: int = 3
+	var coordinates: Coordinates
 
 class Nested:
 	var enabled: bool = true
@@ -124,17 +134,35 @@ class Nested:
 	func state() -> bool:
 		return enabled
 
+@abstract class AbstractNested:
+	pass
+
+static func scale(value: int = SCALE) -> int:
+	return value * SCALE
+
 func read_sample(sample: Sample) -> int:
 	return sample.value
 
 @rpc("any_peer", "call_remote", "reliable")
 func compute(value: int) -> String:
 	calls += 1
-	var text: String = str(value * SCALE)
+	var text: String = str(scale(value))
 	set_meta("compiled_module_result", text)
 	return text.to_upper()
-)");
+)";
+	gdscript->set_source_code(metadata_source);
 	REQUIRE(gdscript->reload() == OK);
+	const Variant *amount_default = gdscript->get_member_default_values().getptr(SNAME("amount"));
+	const Variant *calls_default = gdscript->get_member_default_values().getptr(SNAME("calls"));
+	REQUIRE(amount_default != nullptr);
+	REQUIRE(calls_default != nullptr);
+	CHECK(*amount_default == Variant(1));
+	CHECK(*calls_default == Variant(0));
+	CHECK(gdscript->get_struct_layouts().size() == 2);
+	const Ref<StructLayout> *sample_layout = gdscript->get_struct_layouts().getptr(SNAME("Sample"));
+	REQUIRE(sample_layout != nullptr);
+	CHECK((*sample_layout)->get_field_count() == 2);
+	CHECK((*sample_layout)->get_default_value(0) == Variant(3));
 
 	const Vector<uint8_t> tokens = gdscript->get_as_binary_tokens();
 	REQUIRE_FALSE(tokens.is_empty());
@@ -145,12 +173,48 @@ func compute(value: int) -> String:
 	CHECK(summary.engine_api_fingerprint == GDScriptCompiledModule::get_engine_api_fingerprint());
 	CHECK(summary.source_fingerprint == GDScriptCompiledModule::fingerprint_source(gdscript->get_source_code()));
 	CHECK(summary.skipped_functions == 0);
-	CHECK(summary.classes.size() == 2);
+	CHECK(summary.classes.size() == 3);
 	for (const GDScriptCompiledModule::ClassSummary &script_class : summary.classes) {
 		CHECK_FALSE(script_class.identity.is_empty());
 		CHECK(script_class.metadata_fingerprint != 0);
 	}
 	CHECK_FALSE(summary.functions.is_empty());
+	auto get_root_metadata_fingerprint = [](const GDScriptCompiledModule::Summary &p_summary) {
+		for (const GDScriptCompiledModule::ClassSummary &script_class : p_summary.classes) {
+			if (script_class.identity == "root") {
+				return script_class.metadata_fingerprint;
+			}
+		}
+		return uint64_t(0);
+	};
+	const uint64_t root_metadata_fingerprint = get_root_metadata_fingerprint(summary);
+	REQUIRE(root_metadata_fingerprint != 0);
+
+	auto create_changed_metadata_summary = [&](const String &p_source, GDScriptCompiledModule::Summary &r_changed_summary) {
+		gdscript->set_source_code(p_source);
+		if (gdscript->reload() != OK) {
+			return false;
+		}
+		Vector<uint8_t> changed_module;
+		return GDScriptCompiledModule::create(gdscript.ptr(), gdscript->get_as_binary_tokens(), changed_module, &r_changed_summary) == OK;
+	};
+	GDScriptCompiledModule::Summary changed_default_summary;
+	REQUIRE(create_changed_metadata_summary(metadata_source.replace("var amount: int = 1", "var amount: int = 2"), changed_default_summary));
+	CHECK(get_root_metadata_fingerprint(changed_default_summary) != root_metadata_fingerprint);
+	GDScriptCompiledModule::Summary changed_struct_summary;
+	REQUIRE(create_changed_metadata_summary(metadata_source.replace("var value: int = 3", "var value: int = 4"), changed_struct_summary));
+	CHECK(get_root_metadata_fingerprint(changed_struct_summary) != root_metadata_fingerprint);
+	GDScriptCompiledModule::Summary changed_method_summary;
+	REQUIRE(create_changed_metadata_summary(metadata_source.replace("static func scale", "func scale"), changed_method_summary));
+	CHECK(get_root_metadata_fingerprint(changed_method_summary) != root_metadata_fingerprint);
+	GDScriptCompiledModule::Summary changed_flag_summary;
+	REQUIRE(create_changed_metadata_summary(metadata_source.replace("@tool\n", ""), changed_flag_summary));
+	CHECK(get_root_metadata_fingerprint(changed_flag_summary) != root_metadata_fingerprint);
+	GDScriptCompiledModule::Summary changed_icon_summary;
+	REQUIRE(create_changed_metadata_summary(metadata_source.replace("portable_compiled_module.svg", "portable_compiled_module_alt.svg"), changed_icon_summary));
+	CHECK(get_root_metadata_fingerprint(changed_icon_summary) != root_metadata_fingerprint);
+	gdscript->set_source_code(metadata_source);
+	REQUIRE(gdscript->reload() == OK);
 
 	Vector<uint8_t> fallback;
 	uint64_t source_fingerprint = 0;

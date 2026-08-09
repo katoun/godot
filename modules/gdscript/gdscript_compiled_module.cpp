@@ -59,6 +59,12 @@ enum ConstantKind : uint32_t {
 	CONSTANT_NATIVE_CLASS,
 };
 
+enum ClassFlags : uint32_t {
+	CLASS_FLAG_TOOL = 1 << 0,
+	CLASS_FLAG_ABSTRACT = 1 << 1,
+	CLASS_FLAG_MASK = CLASS_FLAG_TOOL | CLASS_FLAG_ABSTRACT,
+};
+
 enum RelocationTable : uint32_t {
 	RELOC_OPERATOR,
 	RELOC_SETTER,
@@ -226,6 +232,8 @@ struct MemberRecord {
 	String setter;
 	String getter;
 	bool own_member = false;
+	bool has_default_value = false;
+	ConstantData default_value;
 	DataTypeRecord data_type;
 	PropertyRecord property;
 };
@@ -233,6 +241,32 @@ struct MemberRecord {
 struct BindingRecord {
 	String name;
 	String identity;
+};
+
+struct MethodBindingRecord {
+	String name;
+	String identity;
+	bool is_static = false;
+	int32_t default_argument_count = 0;
+	Vector<DataTypeRecord> argument_types;
+	DataTypeRecord return_type;
+	MethodRecord method;
+	ConstantData rpc_config;
+};
+
+struct StructFieldRecord {
+	String name;
+	uint32_t type = Variant::NIL;
+	String nested_layout;
+	ConstantData default_value;
+};
+
+struct StructLayoutRecord {
+	String name;
+	String type_identifier;
+	uint32_t schema_version = 0;
+	uint64_t schema_fingerprint = 0;
+	Vector<StructFieldRecord> fields;
 };
 
 struct SignalRecord {
@@ -256,12 +290,13 @@ struct ClassRecord {
 	String native_base;
 	String script_base_path;
 	String script_base_class;
-	bool tool = false;
-	bool abstract = false;
+	String icon_path;
+	uint32_t flags = 0;
 	Vector<MemberRecord> members;
 	Vector<MemberRecord> static_members;
+	Vector<StructLayoutRecord> struct_layouts;
 	Vector<NamedConstantRecord> constants;
-	Vector<BindingRecord> functions;
+	Vector<MethodBindingRecord> methods;
 	Vector<BindingRecord> subclasses;
 	Vector<SignalRecord> signals;
 	Vector<LambdaRecord> lambdas;
@@ -496,6 +531,10 @@ void write_member(Writer &p_writer, const MemberRecord &p_member) {
 	p_writer.string(p_member.setter);
 	p_writer.string(p_member.getter);
 	p_writer.u32(p_member.own_member ? 1 : 0);
+	p_writer.u32(p_member.has_default_value ? 1 : 0);
+	if (p_member.has_default_value) {
+		write_constant(p_writer, p_member.default_value);
+	}
 	write_data_type(p_writer, p_member.data_type);
 	write_property(p_writer, p_member.property);
 }
@@ -507,10 +546,15 @@ MemberRecord read_member(Reader &p_reader) {
 	member.setter = p_reader.string();
 	member.getter = p_reader.string();
 	const uint32_t own_member = p_reader.u32();
-	if (own_member > 1) {
+	const uint32_t has_default_value = p_reader.u32();
+	if (member.index < 0 || own_member > 1 || has_default_value > 1) {
 		p_reader.failed = true;
 	}
 	member.own_member = own_member != 0;
+	member.has_default_value = has_default_value != 0;
+	if (member.has_default_value) {
+		member.default_value = read_constant(p_reader);
+	}
 	member.data_type = read_data_type(p_reader);
 	member.property = read_property(p_reader);
 	return member;
@@ -528,6 +572,76 @@ BindingRecord read_binding(Reader &p_reader) {
 	return binding;
 }
 
+void write_method_binding(Writer &p_writer, const MethodBindingRecord &p_method) {
+	p_writer.string(p_method.name);
+	p_writer.string(p_method.identity);
+	p_writer.u32(p_method.is_static ? 1 : 0);
+	p_writer.u32(uint32_t(p_method.default_argument_count));
+	p_writer.u32(p_method.argument_types.size());
+	for (const DataTypeRecord &argument_type : p_method.argument_types) {
+		write_data_type(p_writer, argument_type);
+	}
+	write_data_type(p_writer, p_method.return_type);
+	write_method(p_writer, p_method.method);
+	write_constant(p_writer, p_method.rpc_config);
+}
+
+MethodBindingRecord read_method_binding(Reader &p_reader) {
+	MethodBindingRecord method;
+	method.name = p_reader.string();
+	method.identity = p_reader.string();
+	const uint32_t is_static = p_reader.u32();
+	method.default_argument_count = int32_t(p_reader.u32());
+	if (is_static > 1 || method.default_argument_count < 0) {
+		p_reader.failed = true;
+	}
+	method.is_static = is_static != 0;
+	const uint32_t argument_count = p_reader.count();
+	method.argument_types.resize(argument_count);
+	for (uint32_t i = 0; i < argument_count; i++) {
+		method.argument_types.write[i] = read_data_type(p_reader);
+	}
+	method.return_type = read_data_type(p_reader);
+	method.method = read_method(p_reader);
+	method.rpc_config = read_constant(p_reader);
+	return method;
+}
+
+void write_struct_layout(Writer &p_writer, const StructLayoutRecord &p_layout) {
+	p_writer.string(p_layout.name);
+	p_writer.string(p_layout.type_identifier);
+	p_writer.u32(p_layout.schema_version);
+	p_writer.u64(p_layout.schema_fingerprint);
+	p_writer.u32(p_layout.fields.size());
+	for (const StructFieldRecord &field : p_layout.fields) {
+		p_writer.string(field.name);
+		p_writer.u32(field.type);
+		p_writer.string(field.nested_layout);
+		write_constant(p_writer, field.default_value);
+	}
+}
+
+StructLayoutRecord read_struct_layout(Reader &p_reader) {
+	StructLayoutRecord layout;
+	layout.name = p_reader.string();
+	layout.type_identifier = p_reader.string();
+	layout.schema_version = p_reader.u32();
+	layout.schema_fingerprint = p_reader.u64();
+	const uint32_t field_count = p_reader.count();
+	layout.fields.resize(field_count);
+	for (uint32_t i = 0; i < field_count; i++) {
+		StructFieldRecord &field = layout.fields.write[i];
+		field.name = p_reader.string();
+		field.type = p_reader.u32();
+		field.nested_layout = p_reader.string();
+		field.default_value = read_constant(p_reader);
+		if (field.type >= Variant::VARIANT_MAX || (field.type == Variant::STRUCT) != !field.nested_layout.is_empty()) {
+			p_reader.failed = true;
+		}
+	}
+	return layout;
+}
+
 void write_class(Writer &p_writer, const ClassRecord &p_class) {
 	p_writer.string(p_class.identity);
 	p_writer.string(p_class.owner_identity);
@@ -538,8 +652,8 @@ void write_class(Writer &p_writer, const ClassRecord &p_class) {
 	p_writer.string(p_class.native_base);
 	p_writer.string(p_class.script_base_path);
 	p_writer.string(p_class.script_base_class);
-	p_writer.u32(p_class.tool ? 1 : 0);
-	p_writer.u32(p_class.abstract ? 1 : 0);
+	p_writer.string(p_class.icon_path);
+	p_writer.u32(p_class.flags);
 
 	p_writer.u32(p_class.members.size());
 	for (const MemberRecord &member : p_class.members) {
@@ -549,13 +663,17 @@ void write_class(Writer &p_writer, const ClassRecord &p_class) {
 	for (const MemberRecord &member : p_class.static_members) {
 		write_member(p_writer, member);
 	}
+	p_writer.u32(p_class.struct_layouts.size());
+	for (const StructLayoutRecord &layout : p_class.struct_layouts) {
+		write_struct_layout(p_writer, layout);
+	}
 	p_writer.u32(p_class.constants.size());
 	for (const NamedConstantRecord &constant : p_class.constants) {
 		write_named_constant(p_writer, constant);
 	}
-	p_writer.u32(p_class.functions.size());
-	for (const BindingRecord &function : p_class.functions) {
-		write_binding(p_writer, function);
+	p_writer.u32(p_class.methods.size());
+	for (const MethodBindingRecord &method : p_class.methods) {
+		write_method_binding(p_writer, method);
 	}
 	p_writer.u32(p_class.subclasses.size());
 	for (const BindingRecord &subclass : p_class.subclasses) {
@@ -590,13 +708,11 @@ ClassRecord read_class(Reader &p_reader) {
 	script_class.native_base = p_reader.string();
 	script_class.script_base_path = p_reader.string();
 	script_class.script_base_class = p_reader.string();
-	const uint32_t tool = p_reader.u32();
-	const uint32_t abstract = p_reader.u32();
-	if (tool > 1 || abstract > 1) {
+	script_class.icon_path = p_reader.string();
+	script_class.flags = p_reader.u32();
+	if ((script_class.flags & ~CLASS_FLAG_MASK) != 0) {
 		p_reader.failed = true;
 	}
-	script_class.tool = tool != 0;
-	script_class.abstract = abstract != 0;
 
 	uint32_t count = p_reader.count();
 	script_class.members.resize(count);
@@ -609,14 +725,19 @@ ClassRecord read_class(Reader &p_reader) {
 		script_class.static_members.write[i] = read_member(p_reader);
 	}
 	count = p_reader.count();
+	script_class.struct_layouts.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		script_class.struct_layouts.write[i] = read_struct_layout(p_reader);
+	}
+	count = p_reader.count();
 	script_class.constants.resize(count);
 	for (uint32_t i = 0; i < count; i++) {
 		script_class.constants.write[i] = read_named_constant(p_reader);
 	}
 	count = p_reader.count();
-	script_class.functions.resize(count);
+	script_class.methods.resize(count);
 	for (uint32_t i = 0; i < count; i++) {
-		script_class.functions.write[i] = read_binding(p_reader);
+		script_class.methods.write[i] = read_method_binding(p_reader);
 	}
 	count = p_reader.count();
 	script_class.subclasses.resize(count);
@@ -1397,8 +1518,8 @@ bool Internals::make_class_record(GDScript *p_script, const String &p_identity, 
 	r_record.local_name = p_script->local_name;
 	r_record.global_name = p_script->global_name;
 	r_record.fully_qualified_name = canonicalize_qualified_script_name(p_script->fully_qualified_name);
-	r_record.tool = p_script->tool;
-	r_record.abstract = p_script->_is_abstract;
+	r_record.icon_path = p_script->simplified_icon_path;
+	r_record.flags = (p_script->tool ? uint32_t(CLASS_FLAG_TOOL) : 0) | (p_script->_is_abstract ? uint32_t(CLASS_FLAG_ABSTRACT) : 0);
 	if (p_script->_owner != nullptr) {
 		const String *owner_identity = p_class_identities.getptr(p_script->_owner);
 		if (owner_identity == nullptr) {
@@ -1424,6 +1545,15 @@ bool Internals::make_class_record(GDScript *p_script, const String &p_identity, 
 		r_member.getter = p_member.getter;
 		r_member.own_member = p_own;
 		r_member.property = make_property_record(p_member.property_info);
+		if (p_own) {
+			const Variant *default_value = p_script->member_default_values.getptr(p_name);
+			if (default_value != nullptr) {
+				r_member.has_default_value = true;
+				if (!encode_constant(*default_value, r_member.default_value)) {
+					return false;
+				}
+			}
+		}
 		return make_data_type_record(p_member.data_type, r_member.data_type);
 	};
 
@@ -1454,6 +1584,40 @@ bool Internals::make_class_record(GDScript *p_script, const String &p_identity, 
 	}
 
 	names.clear();
+	for (const KeyValue<StringName, Ref<StructLayout>> &layout : p_script->struct_layouts) {
+		names.push_back(layout.key);
+	}
+	names.sort();
+	for (const StringName &name : names) {
+		const Ref<StructLayout> &layout = p_script->struct_layouts[name];
+		if (layout.is_null() || !layout->is_finalized()) {
+			return false;
+		}
+		StructLayoutRecord layout_record;
+		layout_record.name = name;
+		layout_record.type_identifier = layout->get_type_identifier();
+		layout_record.schema_version = layout->get_schema_version();
+		layout_record.schema_fingerprint = layout->get_schema_fingerprint();
+		for (int i = 0; i < layout->get_field_count(); i++) {
+			const StructLayout::Field &field = layout->get_field(i);
+			StructFieldRecord field_record;
+			field_record.name = field.name;
+			field_record.type = field.type;
+			if (field.type == Variant::STRUCT) {
+				if (field.struct_layout.is_null() || !field.struct_layout->is_finalized()) {
+					return false;
+				}
+				field_record.nested_layout = field.struct_layout->get_type_identifier();
+			}
+			if (!encode_constant(layout->get_default_value(i), field_record.default_value)) {
+				return false;
+			}
+			layout_record.fields.push_back(field_record);
+		}
+		r_record.struct_layouts.push_back(layout_record);
+	}
+
+	names.clear();
 	for (const KeyValue<StringName, Variant> &constant : p_script->constants) {
 		names.push_back(constant.key);
 	}
@@ -1477,7 +1641,21 @@ bool Internals::make_class_record(GDScript *p_script, const String &p_identity, 
 		if (identity == nullptr) {
 			return false;
 		}
-		r_record.functions.push_back({ String(name), *identity });
+		GDScriptFunction *function = p_script->member_functions[name];
+		FunctionRecord function_metadata;
+		if (!make_function_metadata(function, function_metadata)) {
+			return false;
+		}
+		MethodBindingRecord method;
+		method.name = name;
+		method.identity = *identity;
+		method.is_static = function->_static;
+		method.default_argument_count = function_metadata.default_argument_count;
+		method.argument_types = function_metadata.argument_types;
+		method.return_type = function_metadata.return_type;
+		method.method = function_metadata.method;
+		method.rpc_config = function_metadata.rpc_config;
+		r_record.methods.push_back(method);
 	}
 
 	names.clear();

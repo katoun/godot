@@ -93,6 +93,12 @@ class GDScript : public Script {
 	HashMap<StringName, MemberInfo> static_variables_indices;
 	Vector<Variant> static_variables; // Static variable values.
 
+	// Compiler-produced declarations needed to recreate class metadata without
+	// retaining the parser AST. Defaults only contain constant initializers;
+	// other initializers remain represented by the generated functions.
+	HashMap<StringName, Variant> member_default_values;
+	HashMap<StringName, Ref<StructLayout>> struct_layouts;
+
 	HashMap<StringName, Variant> constants;
 	HashMap<StringName, GDScriptFunction *> member_functions;
 	HashMap<StringName, Ref<GDScript>> subclasses;
@@ -140,7 +146,6 @@ private:
 	void _restore_old_static_data();
 
 	HashMap<StringName, int> member_lines;
-	HashMap<StringName, Variant> member_default_values;
 	List<PropertyInfo> members_cache;
 	HashMap<StringName, Variant> member_default_values_cache;
 	Ref<GDScript> base_cache;
@@ -245,6 +250,8 @@ public:
 	const HashMap<StringName, Ref<GDScript>> &get_subclasses() const { return subclasses; }
 	const HashMap<StringName, Variant> &get_constants() const { return constants; }
 	const HashSet<StringName> &get_members() const { return members; }
+	const HashMap<StringName, Variant> &get_member_default_values() const { return member_default_values; }
+	const HashMap<StringName, Ref<StructLayout>> &get_struct_layouts() const { return struct_layouts; }
 	const GDScriptDataType &get_member_type(const StringName &p_member) const {
 		CRASH_COND(!member_indices.has(p_member));
 		return member_indices[p_member].data_type;

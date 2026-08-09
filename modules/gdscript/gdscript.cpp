@@ -1499,6 +1499,8 @@ void GDScript::clear() {
 	member_indices.clear();
 	static_variables.clear();
 	static_variables_indices.clear();
+	member_default_values.clear();
+	struct_layouts.clear();
 
 	if (implicit_initializer) {
 		functions_to_clear.insert(implicit_initializer);

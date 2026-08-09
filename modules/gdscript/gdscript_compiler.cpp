@@ -2807,6 +2807,8 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 	p_script->member_indices.clear();
 	p_script->static_variables_indices.clear();
 	p_script->static_variables.clear();
+	p_script->member_default_values.clear();
+	p_script->struct_layouts.clear();
 	p_script->_signals.clear();
 	p_script->initializer = nullptr;
 	p_script->implicit_initializer = nullptr;
@@ -2976,15 +2978,21 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 					p_script->member_indices[name] = minfo;
 					p_script->members.insert(name);
 				}
-
-#ifdef TOOLS_ENABLED
 				if (variable->initializer != nullptr && variable->initializer->is_constant) {
 					p_script->member_default_values[name] = variable->initializer->reduced_value;
 					GDScriptCompiler::convert_to_initializer_type(p_script->member_default_values[name], variable);
 				} else {
 					p_script->member_default_values.erase(name);
 				}
-#endif
+			} break;
+
+			case GDScriptParser::ClassNode::Member::STRUCT: {
+				const GDScriptParser::StructNode *structure = member.m_struct;
+				if (structure->identifier == nullptr || structure->layout.is_null() || !structure->layout->is_finalized()) {
+					_set_error("Compiler bug (please report): Struct layout is not finalized.", structure);
+					return ERR_BUG;
+				}
+				p_script->struct_layouts.insert(structure->identifier->name, structure->layout);
 			} break;
 
 			case GDScriptParser::ClassNode::Member::CONSTANT: {
