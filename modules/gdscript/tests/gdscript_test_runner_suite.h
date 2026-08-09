@@ -99,6 +99,38 @@ func _init():
 	CHECK_MESSAGE(int(ref_counted->get_meta("result")) == 42, "The script should assign object metadata successfully.");
 }
 
+TEST_CASE("[Modules][GDScript] Opcode descriptors cover every bytecode instruction") {
+	for (int opcode_index = 0; opcode_index < GDScriptFunction::OPCODE_COUNT; opcode_index++) {
+		const GDScriptFunction::Opcode opcode = GDScriptFunction::Opcode(opcode_index);
+		const GDScriptFunction::OpcodeDescriptor &descriptor = GDScriptFunction::get_opcode_descriptor(opcode);
+		CAPTURE(opcode_index);
+		CAPTURE(descriptor.name);
+		REQUIRE(descriptor.name != nullptr);
+
+		const int argument_words = descriptor.instruction_size == 0 ? 3 : 0;
+		const int expected_size = descriptor.instruction_size > 0 ? descriptor.instruction_size : 2 + argument_words + descriptor.operand_kinds.count - 2;
+		Vector<int> instruction;
+		instruction.resize(expected_size);
+		instruction.fill(0);
+		instruction.write[0] = opcode;
+		if (descriptor.instruction_size == 0) {
+			REQUIRE(descriptor.operand_kinds.count >= 2);
+			instruction.write[1] = argument_words;
+		}
+		CHECK(GDScriptFunction::get_instruction_size(instruction.ptr(), instruction.size(), 0) == expected_size);
+		for (int word = 1; word < expected_size; word++) {
+			CHECK(GDScriptFunction::get_operand_kind(instruction.ptr(), instruction.size(), 0, word) != GDScriptFunction::OPERAND_NONE);
+		}
+		const int result = GDScriptFunction::get_result_operand(instruction.ptr(), instruction.size(), 0);
+		CHECK(result < expected_size);
+
+		if (expected_size > 1) {
+			CHECK(GDScriptFunction::get_instruction_size(instruction.ptr(), instruction.size() - 1, 0) == -1);
+		}
+	}
+	CHECK(GDScriptFunction::get_opcode_descriptor(GDScriptFunction::OPCODE_END).control_flow_kind == GDScriptFunction::CONTROL_FLOW_TERMINATE);
+}
+
 TEST_CASE("[Modules][GDScript] Portable compiled modules verify and relocate VM bytecode") {
 	GDScriptLanguage::get_singleton()->init();
 	const String module_path = OS::get_singleton()->get_temp_path().path_join("portable_gdscript_module.gdm");

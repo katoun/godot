@@ -39,6 +39,95 @@
 #include "core/templates/hashfuncs.h"
 #include "core/variant/container_type_validate.h"
 
+#include <initializer_list>
+
+static GDScriptFunction::OpcodeOperandList _gdscript_opcode_operands(std::initializer_list<GDScriptFunction::OpcodeOperandKind> p_kinds) {
+	GDScriptFunction::OpcodeOperandList result;
+	uint32_t shift = 0;
+	for (GDScriptFunction::OpcodeOperandKind kind : p_kinds) {
+		DEV_ASSERT(shift < 64);
+		result.packed_kinds |= uint64_t(kind) << shift;
+		result.count++;
+		shift += 5;
+	}
+	return result;
+}
+
+static GDScriptFunction::OpcodeOperandKind _gdscript_opcode_declared_operand(const GDScriptFunction::OpcodeOperandList &p_operands, int p_index) {
+	if (p_index < 0 || p_index >= p_operands.count) {
+		return GDScriptFunction::OPERAND_NONE;
+	}
+	return GDScriptFunction::OpcodeOperandKind((p_operands.packed_kinds >> (p_index * 5)) & 0x1f);
+}
+
+const GDScriptFunction::OpcodeDescriptor &GDScriptFunction::get_opcode_descriptor(Opcode p_opcode) {
+#define GDSCRIPT_OPERANDS(...) _gdscript_opcode_operands({ __VA_ARGS__ })
+#define GDSCRIPT_OPCODE(m_name, m_size, m_operands, m_result, m_flow, m_types, m_relocation) \
+	{ #m_name, m_size, m_operands, m_result, m_flow, m_types, m_relocation },
+	static const OpcodeDescriptor descriptors[] = {
+#include "gdscript_opcode.inc"
+	};
+#undef GDSCRIPT_OPCODE
+#undef GDSCRIPT_OPERANDS
+	static_assert(sizeof(descriptors) / sizeof(descriptors[0]) == OPCODE_COUNT, "Every GDScript opcode must have one descriptor.");
+	ERR_FAIL_INDEX_V(int(p_opcode), OPCODE_COUNT, descriptors[OPCODE_END]);
+	return descriptors[p_opcode];
+}
+
+int GDScriptFunction::get_instruction_size(const int *p_code, int p_code_size, int p_ip) {
+	if (p_code == nullptr || p_ip < 0 || p_ip >= p_code_size || p_code[p_ip] < 0 || p_code[p_ip] >= OPCODE_COUNT) {
+		return -1;
+	}
+	const OpcodeDescriptor &descriptor = get_opcode_descriptor(Opcode(p_code[p_ip]));
+	if (descriptor.instruction_size > 0) {
+		return p_ip + descriptor.instruction_size <= p_code_size ? descriptor.instruction_size : -1;
+	}
+	if (p_ip + 1 >= p_code_size || p_code[p_ip + 1] < 0 || descriptor.operand_kinds.count < 2 ||
+			_gdscript_opcode_declared_operand(descriptor.operand_kinds, 0) != OPERAND_ARGUMENT_COUNT ||
+			_gdscript_opcode_declared_operand(descriptor.operand_kinds, 1) != OPERAND_VARIADIC_FRAME_SLOTS) {
+		return -1;
+	}
+	const int suffix_count = descriptor.operand_kinds.count - 2;
+	const int size = 2 + p_code[p_ip + 1] + suffix_count;
+	return size >= 2 && p_ip + size <= p_code_size ? size : -1;
+}
+
+GDScriptFunction::OpcodeOperandKind GDScriptFunction::get_operand_kind(const int *p_code, int p_code_size, int p_ip, int p_word_offset) {
+	const int instruction_size = get_instruction_size(p_code, p_code_size, p_ip);
+	if (instruction_size < 0 || p_word_offset <= 0 || p_word_offset >= instruction_size) {
+		return OPERAND_NONE;
+	}
+	const OpcodeDescriptor &descriptor = get_opcode_descriptor(Opcode(p_code[p_ip]));
+	if (descriptor.instruction_size > 0) {
+		return _gdscript_opcode_declared_operand(descriptor.operand_kinds, p_word_offset - 1);
+	}
+	const int argument_words = p_code[p_ip + 1];
+	if (p_word_offset == 1) {
+		return OPERAND_ARGUMENT_COUNT;
+	}
+	if (p_word_offset <= argument_words + 1) {
+		return OPERAND_FRAME_SLOT;
+	}
+	return _gdscript_opcode_declared_operand(descriptor.operand_kinds, p_word_offset - argument_words);
+}
+
+int GDScriptFunction::get_result_operand(const int *p_code, int p_code_size, int p_ip) {
+	if (get_instruction_size(p_code, p_code_size, p_ip) < 0) {
+		return -1;
+	}
+	const OpcodeDescriptor &descriptor = get_opcode_descriptor(Opcode(p_code[p_ip]));
+	if (descriptor.result_operand == OPCODE_RESULT_NONE) {
+		return -1;
+	}
+	if (descriptor.result_operand > 0) {
+		return descriptor.result_operand;
+	}
+	if (descriptor.instruction_size > 0) {
+		return -1;
+	}
+	return 2 + p_code[p_ip + 1] + descriptor.result_operand;
+}
+
 static bool _gdscript_container_type_matches(const GDScriptDataType &p_expected, const ContainerType &p_actual) {
 	if (p_actual.script.is_valid()) {
 		return (p_expected.kind == GDScriptDataType::SCRIPT || p_expected.kind == GDScriptDataType::GDSCRIPT) && p_expected.script_type == p_actual.script.ptr();

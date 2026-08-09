@@ -102,6 +102,9 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 #define DADDR(m_ip) (_disassemble_address(_script, *this, _code_ptr[ip + m_ip]))
 
 	for (int ip = 0; ip < _code_size;) {
+		const int instruction_ip = ip;
+		const int descriptor_size = get_instruction_size(_code_ptr, _code_size, instruction_ip);
+		ERR_FAIL_COND_MSG(descriptor_size <= 0, "Invalid GDScript bytecode while disassembling.");
 		StringBuilder text;
 		int incr = 0;
 
@@ -1511,9 +1514,13 @@ void GDScriptFunction::disassemble(const Vector<String> &p_code_lines) const {
 
 				incr += 1;
 			} break;
+			case OPCODE_COUNT:
+				break; // Sentinel, rejected before entering the switch.
 		}
 
-		ip += incr;
+		ERR_FAIL_COND_MSG(ip + incr != instruction_ip + descriptor_size,
+				"GDScript disassembler disagrees with the opcode descriptor for '" + String(get_opcode_descriptor(opcode).name) + "'.");
+		ip = instruction_ip + descriptor_size;
 		if (text.get_string_length() > 0) {
 			print_line(text.as_string());
 		}

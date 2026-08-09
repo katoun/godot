@@ -87,6 +87,20 @@ enum RelocationTable : uint32_t {
 	RELOC_TABLE_MAX,
 };
 
+static_assert(int(GDScriptFunction::RELOCATION_OPERATOR) == int(RELOC_OPERATOR));
+static_assert(int(GDScriptFunction::RELOCATION_SETTER) == int(RELOC_SETTER));
+static_assert(int(GDScriptFunction::RELOCATION_GETTER) == int(RELOC_GETTER));
+static_assert(int(GDScriptFunction::RELOCATION_KEYED_SETTER) == int(RELOC_KEYED_SETTER));
+static_assert(int(GDScriptFunction::RELOCATION_KEYED_GETTER) == int(RELOC_KEYED_GETTER));
+static_assert(int(GDScriptFunction::RELOCATION_INDEXED_SETTER) == int(RELOC_INDEXED_SETTER));
+static_assert(int(GDScriptFunction::RELOCATION_INDEXED_GETTER) == int(RELOC_INDEXED_GETTER));
+static_assert(int(GDScriptFunction::RELOCATION_BUILTIN_METHOD) == int(RELOC_BUILTIN_METHOD));
+static_assert(int(GDScriptFunction::RELOCATION_CONSTRUCTOR) == int(RELOC_CONSTRUCTOR));
+static_assert(int(GDScriptFunction::RELOCATION_UTILITY) == int(RELOC_UTILITY));
+static_assert(int(GDScriptFunction::RELOCATION_GDSCRIPT_UTILITY) == int(RELOC_GDSCRIPT_UTILITY));
+static_assert(int(GDScriptFunction::RELOCATION_METHOD_BIND) == int(RELOC_METHOD_BIND));
+static_assert(int(GDScriptFunction::RELOCATION_FUNCTION) == int(RELOC_LAMBDA));
+
 struct Writer {
 	Vector<uint8_t> data;
 
@@ -2729,190 +2743,119 @@ Error RuntimeBuilder::validate_function_code(const FunctionRecord &p_record) {
 			return fail(ERR_INVALID_DATA, "Unknown opcode in '" + p_record.identity + "'.");
 		}
 		const GDScriptFunction::Opcode opcode = GDScriptFunction::Opcode(raw_opcode);
-		int length = 0;
-		if (opcode >= GDScriptFunction::OPCODE_TYPE_ADJUST_BOOL && opcode <= GDScriptFunction::OPCODE_TYPE_ADJUST_STRUCT) {
-			length = 2;
-		} else if ((opcode >= GDScriptFunction::OPCODE_ITERATE_BEGIN_INT && opcode <= GDScriptFunction::OPCODE_ITERATE_BEGIN_OBJECT) ||
-				(opcode >= GDScriptFunction::OPCODE_ITERATE_INT && opcode <= GDScriptFunction::OPCODE_ITERATE_OBJECT) ||
-				opcode == GDScriptFunction::OPCODE_ITERATE_BEGIN || opcode == GDScriptFunction::OPCODE_ITERATE) {
-			length = 5;
-		} else {
-			switch (opcode) {
-				case GDScriptFunction::OPCODE_OPERATOR:
-				case GDScriptFunction::OPCODE_OPERATOR_MATH:
-				case GDScriptFunction::OPCODE_JUMP_COMPARE_INT:
-				case GDScriptFunction::OPCODE_JUMP_COMPARE_FLOAT:
-					length = 6;
-					break;
-				case GDScriptFunction::OPCODE_OPERATOR_VALIDATED:
-				case GDScriptFunction::OPCODE_OPERATOR_INT:
-				case GDScriptFunction::OPCODE_OPERATOR_FLOAT:
-				case GDScriptFunction::OPCODE_SET_KEYED_VALIDATED:
-				case GDScriptFunction::OPCODE_SET_INDEXED_VALIDATED:
-				case GDScriptFunction::OPCODE_GET_KEYED_VALIDATED:
-				case GDScriptFunction::OPCODE_GET_INDEXED_VALIDATED:
-				case GDScriptFunction::OPCODE_RETURN_TYPED_ARRAY:
-					length = 5;
-					break;
-				case GDScriptFunction::OPCODE_TYPE_TEST_DICTIONARY:
-				case GDScriptFunction::OPCODE_ASSIGN_TYPED_DICTIONARY:
-					length = 9;
-					break;
-				case GDScriptFunction::OPCODE_RETURN_TYPED_DICTIONARY:
-					length = 8;
-					break;
-				case GDScriptFunction::OPCODE_ITERATE_BEGIN_RANGE:
-					length = 7;
-					break;
-				case GDScriptFunction::OPCODE_ITERATE_RANGE:
-					length = 6;
-					break;
-				case GDScriptFunction::OPCODE_TYPE_TEST_ARRAY:
-				case GDScriptFunction::OPCODE_ASSIGN_TYPED_ARRAY:
-					length = 6;
-					break;
-				case GDScriptFunction::OPCODE_EQUAL_STRUCT:
-				case GDScriptFunction::OPCODE_GET_MATH_COMPONENT:
-				case GDScriptFunction::OPCODE_SET_MATH_COMPONENT:
-				case GDScriptFunction::OPCODE_MATH_LENGTH:
-				case GDScriptFunction::OPCODE_TYPE_TEST_BUILTIN:
-				case GDScriptFunction::OPCODE_TYPE_TEST_STRUCT:
-				case GDScriptFunction::OPCODE_TYPE_TEST_NATIVE:
-				case GDScriptFunction::OPCODE_TYPE_TEST_SCRIPT:
-				case GDScriptFunction::OPCODE_SET_KEYED:
-				case GDScriptFunction::OPCODE_GET_KEYED:
-				case GDScriptFunction::OPCODE_SET_NAMED:
-				case GDScriptFunction::OPCODE_SET_NAMED_VALIDATED:
-				case GDScriptFunction::OPCODE_SET_STRUCT_FIELD:
-				case GDScriptFunction::OPCODE_GET_NAMED:
-				case GDScriptFunction::OPCODE_GET_NAMED_VALIDATED:
-				case GDScriptFunction::OPCODE_GET_STRUCT_FIELD:
-				case GDScriptFunction::OPCODE_SET_STATIC_VARIABLE:
-				case GDScriptFunction::OPCODE_GET_STATIC_VARIABLE:
-				case GDScriptFunction::OPCODE_ASSIGN_MATH:
-				case GDScriptFunction::OPCODE_ASSIGN_TYPED_BUILTIN:
-				case GDScriptFunction::OPCODE_UNBOX_STRUCT:
-				case GDScriptFunction::OPCODE_ASSIGN_TYPED_NATIVE:
-				case GDScriptFunction::OPCODE_ASSIGN_TYPED_SCRIPT:
-				case GDScriptFunction::OPCODE_CAST_TO_BUILTIN:
-				case GDScriptFunction::OPCODE_CAST_TO_NATIVE:
-				case GDScriptFunction::OPCODE_CAST_TO_SCRIPT:
-					length = 4;
-					break;
-				case GDScriptFunction::OPCODE_SET_MEMBER:
-				case GDScriptFunction::OPCODE_GET_MEMBER:
-				case GDScriptFunction::OPCODE_ASSIGN:
-				case GDScriptFunction::OPCODE_ASSIGN_BOOL:
-				case GDScriptFunction::OPCODE_ASSIGN_INT:
-				case GDScriptFunction::OPCODE_ASSIGN_FLOAT:
-				case GDScriptFunction::OPCODE_ASSIGN_STRUCT:
-				case GDScriptFunction::OPCODE_BOX_STRUCT:
-				case GDScriptFunction::OPCODE_JUMP_IF:
-				case GDScriptFunction::OPCODE_JUMP_IF_NOT:
-				case GDScriptFunction::OPCODE_JUMP_IF_SHARED:
-				case GDScriptFunction::OPCODE_RETURN_TYPED_BUILTIN:
-				case GDScriptFunction::OPCODE_RETURN_TYPED_STRUCT:
-				case GDScriptFunction::OPCODE_RETURN_TYPED_NATIVE:
-				case GDScriptFunction::OPCODE_RETURN_TYPED_SCRIPT:
-				case GDScriptFunction::OPCODE_STORE_GLOBAL:
-				case GDScriptFunction::OPCODE_STORE_NAMED_GLOBAL:
-				case GDScriptFunction::OPCODE_ASSERT:
-					length = 3;
-					break;
-				case GDScriptFunction::OPCODE_JUMP_IF_BOOL:
-				case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
-					length = 3;
-					break;
-				case GDScriptFunction::OPCODE_ASSIGN_NULL:
-				case GDScriptFunction::OPCODE_ASSIGN_TRUE:
-				case GDScriptFunction::OPCODE_ASSIGN_FALSE:
-				case GDScriptFunction::OPCODE_AWAIT:
-				case GDScriptFunction::OPCODE_AWAIT_RESUME:
-				case GDScriptFunction::OPCODE_JUMP:
-				case GDScriptFunction::OPCODE_RETURN:
-				case GDScriptFunction::OPCODE_LINE:
-					length = 2;
-					break;
-				case GDScriptFunction::OPCODE_JUMP_TO_DEF_ARGUMENT:
-				case GDScriptFunction::OPCODE_BREAKPOINT:
-				case GDScriptFunction::OPCODE_END:
-					length = 1;
-					break;
-				default: {
-					if (ip + 1 >= p_record.code.size()) {
-						return fail(ERR_INVALID_DATA, "Truncated variable-length instruction in '" + p_record.identity + "'.");
+		const GDScriptFunction::OpcodeDescriptor &descriptor = GDScriptFunction::get_opcode_descriptor(opcode);
+		const int length = GDScriptFunction::get_instruction_size(p_record.code.ptr(), p_record.code.size(), ip);
+		if (length <= 0 || (descriptor.instruction_size == 0 && p_record.code[ip + 1] > p_record.instruction_args_size) ||
+				(opcode == GDScriptFunction::OPCODE_END && ip + length != p_record.code.size())) {
+			return fail(ERR_INVALID_DATA, "Truncated instruction, invalid argument count, or premature bytecode terminator in '" + p_record.identity + "'.");
+		}
+		if (descriptor.instruction_size > 0 && descriptor.operand_kinds.count != descriptor.instruction_size - 1) {
+			return fail(ERR_BUG, "Inconsistent opcode descriptor for '" + String(descriptor.name) + "'.");
+		}
+
+		auto valid_address = [&](int p_address, bool p_constant_only, bool p_typed_stack_only) {
+			const uint32_t address = uint32_t(p_address);
+			const uint32_t mode = address >> GDScriptFunction::ADDR_BITS;
+			const int index = address & GDScriptFunction::ADDR_MASK;
+			if (p_constant_only) {
+				return mode == GDScriptFunction::ADDR_TYPE_CONSTANT && index < p_record.constants.size();
+			}
+			if (p_typed_stack_only) {
+				return mode == GDScriptFunction::ADDR_TYPE_STACK && index >= GDScriptFunction::FIXED_ADDRESSES_MAX && index < p_record.stack_size;
+			}
+			switch (mode) {
+				case GDScriptFunction::ADDR_TYPE_STACK:
+					return index < p_record.stack_size;
+				case GDScriptFunction::ADDR_TYPE_CONSTANT:
+					return index < p_record.constants.size();
+				case GDScriptFunction::ADDR_TYPE_MEMBER:
+					return true;
+				default:
+					return false;
+			}
+		};
+
+		for (int word = 1; word < length; word++) {
+			const int value = p_record.code[ip + word];
+			switch (GDScriptFunction::get_operand_kind(p_record.code.ptr(), p_record.code.size(), ip, word)) {
+				case GDScriptFunction::OPERAND_FRAME_SLOT:
+					if (!valid_address(value, false, false)) {
+						return fail(ERR_INVALID_DATA, "Invalid frame-slot operand in '" + p_record.identity + "'.");
 					}
-					const int argument_words = p_record.code[ip + 1];
-					if (argument_words < 0 || argument_words > p_record.instruction_args_size) {
+					break;
+				case GDScriptFunction::OPERAND_TYPED_FRAME_SLOT:
+					if (!valid_address(value, false, true)) {
+						return fail(ERR_INVALID_DATA, "Invalid typed-frame-slot operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_CONSTANT_ADDRESS:
+					if (!valid_address(value, true, false)) {
+						return fail(ERR_INVALID_DATA, "Invalid constant operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_NAME_INDEX:
+					if (value < 0 || value >= p_record.global_names.size()) {
+						return fail(ERR_INVALID_DATA, "Invalid name operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_FUNCTION_INDEX:
+				case GDScriptFunction::OPERAND_NATIVE_API_RELOCATION:
+					if (descriptor.relocation_kind < 0 || descriptor.relocation_kind >= p_record.relocations.size() ||
+							value < 0 || value >= p_record.relocations[descriptor.relocation_kind].size()) {
+						return fail(ERR_INVALID_DATA, "Invalid symbolic relocation operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_JUMP_TARGET:
+					jump_targets.push_back(value);
+					break;
+				case GDScriptFunction::OPERAND_ARGUMENT_COUNT:
+					if (value < 0 || value > p_record.instruction_args_size) {
 						return fail(ERR_INVALID_DATA, "Invalid instruction argument count in '" + p_record.identity + "'.");
 					}
-					switch (opcode) {
-						case GDScriptFunction::OPCODE_CONSTRUCT:
-						case GDScriptFunction::OPCODE_CONSTRUCT_VALIDATED:
-							length = argument_words + 4;
-							break;
-						case GDScriptFunction::OPCODE_CONSTRUCT_STRUCT:
-						case GDScriptFunction::OPCODE_CONSTRUCT_ARRAY:
-						case GDScriptFunction::OPCODE_CONSTRUCT_DICTIONARY:
-							length = argument_words + 3;
-							break;
-						case GDScriptFunction::OPCODE_CONSTRUCT_TYPED_ARRAY:
-							length = argument_words + 5;
-							break;
-						case GDScriptFunction::OPCODE_CONSTRUCT_TYPED_DICTIONARY:
-							length = argument_words + 7;
-							break;
-						case GDScriptFunction::OPCODE_CALL:
-						case GDScriptFunction::OPCODE_CALL_RETURN:
-						case GDScriptFunction::OPCODE_CALL_ASYNC:
-						case GDScriptFunction::OPCODE_CALL_BUILTIN_STATIC:
-							length = argument_words + 5;
-							break;
-						case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC:
-						case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_RETURN:
-						case GDScriptFunction::OPCODE_CALL_NATIVE_STATIC_VALIDATED_NO_RETURN:
-						case GDScriptFunction::OPCODE_CALL_METHOD_BIND:
-						case GDScriptFunction::OPCODE_CALL_METHOD_BIND_RET:
-						case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_RETURN:
-						case GDScriptFunction::OPCODE_CALL_METHOD_BIND_VALIDATED_NO_RETURN:
-						case GDScriptFunction::OPCODE_CALL_BUILTIN_TYPE_VALIDATED:
-						case GDScriptFunction::OPCODE_CALL_UTILITY:
-						case GDScriptFunction::OPCODE_CALL_UTILITY_VALIDATED:
-						case GDScriptFunction::OPCODE_CALL_GDSCRIPT_UTILITY:
-						case GDScriptFunction::OPCODE_CALL_SELF_BASE:
-						case GDScriptFunction::OPCODE_CREATE_LAMBDA:
-						case GDScriptFunction::OPCODE_CREATE_SELF_LAMBDA:
-							length = argument_words + 4;
-							break;
-						default:
-							return fail(ERR_INVALID_DATA, "Opcode has no verifier descriptor in '" + p_record.identity + "'.");
+					break;
+				case GDScriptFunction::OPERAND_STRUCT_FIELD_INDEX:
+				case GDScriptFunction::OPERAND_STATIC_VARIABLE_INDEX:
+				case GDScriptFunction::OPERAND_GLOBAL_INDEX:
+					if (value < 0) {
+						return fail(ERR_INVALID_DATA, "Invalid index operand in '" + p_record.identity + "'.");
 					}
-				} break;
+					break;
+				case GDScriptFunction::OPERAND_TYPE_ID:
+					if (value < Variant::NIL || value >= Variant::VARIANT_MAX) {
+						return fail(ERR_INVALID_DATA, "Invalid type operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_OPERATOR:
+					if (value < 0 || value >= Variant::OP_MAX) {
+						return fail(ERR_INVALID_DATA, "Invalid operator operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_BOOLEAN:
+					if (value != 0 && value != 1) {
+						return fail(ERR_INVALID_DATA, "Invalid boolean operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_OPERATOR_FEEDBACK_INDEX:
+					if (value < 0 || value >= p_record.operator_feedback_count) {
+						return fail(ERR_INVALID_DATA, "Invalid operator-feedback operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_CALL_FEEDBACK_INDEX:
+					if (value < 0 || value >= p_record.call_feedback_count) {
+						return fail(ERR_INVALID_DATA, "Invalid call-feedback operand in '" + p_record.identity + "'.");
+					}
+					break;
+				case GDScriptFunction::OPERAND_NONE:
+				case GDScriptFunction::OPERAND_VARIADIC_FRAME_SLOTS:
+					return fail(ERR_BUG, "Incomplete operand descriptor for '" + String(descriptor.name) + "'.");
+				case GDScriptFunction::OPERAND_TYPE_METADATA:
+				case GDScriptFunction::OPERAND_IMMEDIATE:
+					break;
 			}
 		}
-		if (length <= 0 || ip + length > p_record.code.size() || (opcode == GDScriptFunction::OPCODE_END && ip + length != p_record.code.size())) {
-			return fail(ERR_INVALID_DATA, "Truncated instruction or premature bytecode terminator in '" + p_record.identity + "'.");
-		}
-		switch (opcode) {
-			case GDScriptFunction::OPCODE_JUMP_COMPARE_INT:
-			case GDScriptFunction::OPCODE_JUMP_COMPARE_FLOAT:
-				jump_targets.push_back(p_record.code[ip + 5]);
-				break;
-			case GDScriptFunction::OPCODE_JUMP_IF_BOOL:
-			case GDScriptFunction::OPCODE_JUMP_IF_NOT_BOOL:
-			case GDScriptFunction::OPCODE_JUMP_IF:
-			case GDScriptFunction::OPCODE_JUMP_IF_NOT:
-			case GDScriptFunction::OPCODE_JUMP_IF_SHARED:
-				jump_targets.push_back(p_record.code[ip + 2]);
-				break;
-			case GDScriptFunction::OPCODE_JUMP:
-				jump_targets.push_back(p_record.code[ip + 1]);
-				break;
-			default:
-				if ((opcode >= GDScriptFunction::OPCODE_ITERATE_BEGIN && opcode <= GDScriptFunction::OPCODE_ITERATE_OBJECT)) {
-					jump_targets.push_back(p_record.code[ip + length - 1]);
-				}
-				break;
+		const int result_operand = GDScriptFunction::get_result_operand(p_record.code.ptr(), p_record.code.size(), ip);
+		if (result_operand >= length) {
+			return fail(ERR_BUG, "Invalid result operand descriptor for '" + String(descriptor.name) + "'.");
 		}
 		ip += length;
 	}
@@ -3498,7 +3441,19 @@ uint64_t GDScriptCompiledModule::get_engine_api_fingerprint() {
 	uint32_t hash = HashMapHasherDefault::hash(GODOT_VERSION_FULL_CONFIG);
 	hash = hash_murmur3_one_32(FORMAT_VERSION, hash);
 	hash = hash_murmur3_one_32(BYTECODE_VERSION, hash);
-	hash = hash_murmur3_one_32(GDScriptFunction::OPCODE_END, hash);
+	hash = hash_murmur3_one_32(GDScriptFunction::OPCODE_COUNT, hash);
+	for (int opcode = 0; opcode < GDScriptFunction::OPCODE_COUNT; opcode++) {
+		const GDScriptFunction::OpcodeDescriptor &descriptor = GDScriptFunction::get_opcode_descriptor(GDScriptFunction::Opcode(opcode));
+		hash = hash_murmur3_one_32(StringName(descriptor.name).hash(), hash);
+		hash = hash_murmur3_one_32(descriptor.instruction_size, hash);
+		hash = hash_murmur3_one_32(descriptor.operand_kinds.count, hash);
+		hash = hash_murmur3_one_32(uint32_t(descriptor.operand_kinds.packed_kinds), hash);
+		hash = hash_murmur3_one_32(uint32_t(descriptor.operand_kinds.packed_kinds >> 32), hash);
+		hash = hash_murmur3_one_32(uint8_t(descriptor.result_operand), hash);
+		hash = hash_murmur3_one_32(descriptor.control_flow_kind, hash);
+		hash = hash_murmur3_one_32(descriptor.type_constraints, hash);
+		hash = hash_murmur3_one_32(uint8_t(descriptor.relocation_kind), hash);
+	}
 	hash = hash_murmur3_one_32(Variant::VARIANT_MAX, hash);
 	hash = hash_murmur3_one_32(sizeof(real_t), hash);
 

@@ -380,10 +380,13 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	}
 
 	void append_opcode(GDScriptFunction::Opcode p_code) {
+		DEV_ASSERT(GDScriptFunction::get_opcode_descriptor(p_code).instruction_size > 0);
 		opcodes.push_back(p_code);
 	}
 
 	void append_opcode_and_argcount(GDScriptFunction::Opcode p_code, int p_argument_count) {
+		DEV_ASSERT(GDScriptFunction::get_opcode_descriptor(p_code).instruction_size == 0);
+		DEV_ASSERT(p_argument_count >= 0);
 		opcodes.push_back(p_code);
 		opcodes.push_back(p_argument_count);
 		instr_args_max = MAX(instr_args_max, p_argument_count);
